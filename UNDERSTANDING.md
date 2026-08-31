@@ -18,28 +18,34 @@ The webhook endpoint you have would give you information whenever someone logs o
 
 # How it works
 
-For each silicon crons can be set, it can be set for one time or recurring. 
+For each silicon reminders can be set, it can be set for one time or recurring. 
 
-The systax for setting a cron would be the same as how cron syntax is in linux. 
+The systax for setting a reminder would be the same as how cron syntax is in linux. 
+`* * * * *` - `minute, hour, day of month, month, day of week`.
 
-For when a cron actually hits, it sends a websocket request via [hook.teamofsilicons.com/silicon/{silicon-id}/] for that particular silicon.
+For each silicon that is registered into the system they need to have logged in via IAm, and must have a webhook endpoint configured. This webhook endpoint is the place where you send them all the requests. 
 
-Crons cannot be set for a carbon. Each CRON would have an ID attached to it. And each cron would have a text assigned to it. This text must be sent at the time when cron is hit. 
+For carbons that log in should see all the silicons they have access to and inside each silicon see all the reminders that silicon set, they wont be able to remove the reminder or perform any action just view.
 
-It should also be possible to specify the timezone in the `tz identifier` format. 
+Each reminder would have an ID attached to it. And each reminder would have a text assigned to it. This text must be sent at the time when reminder time is actually reached and the message should go via the configured webhook endpoint. 
 
+If no webhook endpoint is configured when trying to set a new reminder, it should return an error `Set the webhook url first.`.
 
-The request for setting a cron would always come from a silicon, and any carbon in the system should be able to view crons of any silicon in their organisation. 
+### Timezone
 
-Any silicon should also be able to list their and other silicons in their org crons. 
+For each reminder it should also be possible to specify the timezone in the `tz identifier` format. This is the Timezone that can be used to send the remind at the correct time, this is optional and would by default use the UTC. 
 
-It should also be possible for a silicon to delete their own crons. 
+Everytime the trigger occurs recalculate the next trigger time in utc for the specific reminder based on the set timezone. And store the said trigger time so it's triggered when the time comes. 
 
+---
+
+The request for setting a reminder would always come from a silicon, and any carbon in the organisation should be able to view reminders of any silicon in their organisation. 
+
+Any silicon should also be able to list their reminders and other silicons reminders in their org. 
+
+It should also be possible for a silicon to archive their reminder. These archived reminders would go in the archived section for 45 days before completely deleting them. Which should also be stored in a list of deleted_reminders log that stores every single reminder that has been deleted past the 45 days window in text format, keep it rolling past 100,000 lines - so store the latest 100,000 deleted reminders. 
+
+For each deleted reminder also store what the reminder was when the trigger was, and who set it. 
 
 
 For one time tasks, it should be possible to set the time using the same cron syntax but only one time. And this would automatically archite it after that. 
-
-
-
-
-For the archived reminds, store them for 45 days and then full archive them.
