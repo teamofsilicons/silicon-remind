@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 use crate::domain::{Actor, ActorKind};
 
+const MAX_CARBON_SILICON_PRINCIPALS: usize = 1_000;
+
 /// IAM authentication/introspection failure.
 #[derive(Debug, Error)]
 pub enum IamError {
@@ -134,6 +136,12 @@ struct IntrospectionResponse {
     memberships: Vec<OrganizationMembership>,
     #[serde(default, alias = "exp")]
     expires_at: Option<i64>,
+    #[serde(default)]
+    membership_id: Option<String>,
+    #[serde(default)]
+    authorization_epoch: Option<u64>,
+    #[serde(default)]
+    remind_permitted_silicon_principal_ids: Option<Vec<String>>,
 }
 
 impl IntrospectionResponse {
@@ -152,14 +160,41 @@ impl IntrospectionResponse {
             "silicon" => ActorKind::Silicon,
             _ => return Err(IamError::Unauthenticated),
         };
-        if Uuid::parse_str(&actor_id).is_err() {
-            return Err(IamError::Unauthenticated);
+        let principal_id = Uuid::parse_str(&actor_id).map_err(|_| IamError::Unauthenticated)?;
+        let membership_id = self
+            .membership_id
+            .as_deref()
+            .ok_or(IamError::Unauthenticated)
+            .and_then(|value| Uuid::parse_str(value).map_err(|_| IamError::Unauthenticated))?;
+        let authorization_epoch = self.authorization_epoch.ok_or(IamError::Unauthenticated)?;
+
+        match kind {
+            ActorKind::Silicon => Ok(Actor::silicon(
+                principal_id.to_string(),
+                requested_org_id,
+                membership_id,
+                authorization_epoch,
+            )),
+            ActorKind::Carbon => {
+                let permitted = self
+                    .remind_permitted_silicon_principal_ids
+                    .ok_or(IamError::Unauthenticated)?;
+                if permitted.len() > MAX_CARBON_SILICON_PRINCIPALS {
+                    return Err(IamError::Unauthenticated);
+                }
+                let permitted = permitted
+                    .into_iter()
+                    .map(|value| Uuid::parse_str(&value).map_err(|_| IamError::Unauthenticated))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Actor::carbon(
+                    principal_id.to_string(),
+                    requested_org_id,
+                    membership_id,
+                    authorization_epoch,
+                    permitted,
+                ))
+            }
         }
-        Ok(Actor {
-            kind,
-            id: actor_id,
-            org_id: requested_org_id.to_owned(),
-        })
     }
 
     fn has_active_org(&self, requested_org_id: &str) -> bool {
@@ -270,7 +305,7 @@ async fn read_bounded(
 mod tests {
     use chrono::{TimeZone as _, Utc};
 
-    use super::{IamError, IntrospectionResponse};
+    use super::{IamError, IntrospectionResponse, MAX_CARBON_SILICON_PRINCIPALS};
 
     fn now() -> chrono::DateTime<Utc> {
         match Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).single() {
@@ -288,7 +323,9 @@ mod tests {
                 "id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a"
             },
             "memberships": [{"org_id": "tos", "status": "active"}],
-            "exp": 2_000_000_000
+            "exp": 2_000_000_000,
+            "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+            "authorization_epoch": 11
         }));
         assert!(parsed.is_ok());
         let Ok(parsed) = parsed else {
@@ -305,7 +342,9 @@ mod tests {
             "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
             "actor_type": "silicon",
             "org_id": "tos",
-            "expires_at": 2_000_000_000
+            "expires_at": 2_000_000_000,
+            "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+            "authorization_epoch": 11
         }));
         assert!(parsed.is_ok());
         let Ok(parsed) = parsed else {
@@ -317,6 +356,82 @@ mod tests {
             return;
         };
         assert_eq!(actor.id, "0198e7d8-69bb-7d38-9ee1-94e7c143f89a");
+        assert_eq!(actor.authorization_epoch, 11);
+        assert!(actor.read_scope.silicon_principal_ids().is_none());
+    }
+
+    #[test]
+    fn carbon_projection_is_required_validated_and_deduplicated() {
+        let parsed = serde_json::from_value::<IntrospectionResponse>(serde_json::json!({
+            "active": true,
+            "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
+            "actor_type": "carbon",
+            "org_id": "tos",
+            "expires_at": 2_000_000_000,
+            "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+            "authorization_epoch": 11,
+            "remind_permitted_silicon_principal_ids": [
+                "0198e7d8-69bb-7d38-9ee1-94e7c143f892",
+                "0198e7d8-69bb-7d38-9ee1-94e7c143f891",
+                "0198e7d8-69bb-7d38-9ee1-94e7c143f892"
+            ]
+        }));
+        let Ok(parsed) = parsed else {
+            panic!("test introspection document must deserialize");
+        };
+        let Ok(actor) = parsed.into_actor("tos", now()) else {
+            panic!("valid Carbon projection must authenticate");
+        };
+
+        let principals = actor.read_scope.silicon_principal_ids().unwrap_or_default();
+        assert_eq!(principals.len(), 2);
+        assert!(principals.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn rejects_missing_invalid_or_oversized_carbon_projection() {
+        let base = serde_json::json!({
+            "active": true,
+            "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
+            "actor_type": "carbon",
+            "org_id": "tos",
+            "expires_at": 2_000_000_000,
+            "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+            "authorization_epoch": 11
+        });
+        let invalid = serde_json::json!({
+            "active": true,
+            "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
+            "actor_type": "carbon",
+            "org_id": "tos",
+            "expires_at": 2_000_000_000,
+            "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+            "authorization_epoch": 11,
+            "remind_permitted_silicon_principal_ids": ["not-a-uuid"]
+        });
+        let oversized = serde_json::json!({
+            "active": true,
+            "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
+            "actor_type": "carbon",
+            "org_id": "tos",
+            "expires_at": 2_000_000_000,
+            "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+            "authorization_epoch": 11,
+            "remind_permitted_silicon_principal_ids": vec![
+                "0198e7d8-69bb-7d38-9ee1-94e7c143f891";
+                MAX_CARBON_SILICON_PRINCIPALS + 1
+            ]
+        });
+
+        for value in [base, invalid, oversized] {
+            let Ok(parsed) = serde_json::from_value::<IntrospectionResponse>(value) else {
+                panic!("test introspection document must deserialize");
+            };
+            assert!(matches!(
+                parsed.into_actor("tos", now()),
+                Err(IamError::Unauthenticated)
+            ));
+        }
     }
 
     #[test]
@@ -358,7 +473,10 @@ mod tests {
         let parsed = serde_json::from_value::<IntrospectionResponse>(serde_json::json!({
             "active": true,
             "actor": {"type": "silicon", "id": "assistant:tos"},
-            "org_id": "tos"
+            "org_id": "tos",
+            "expires_at": 2_000_000_000,
+            "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+            "authorization_epoch": 11
         }));
         assert!(parsed.is_ok());
         let Ok(parsed) = parsed else {
@@ -377,7 +495,9 @@ mod tests {
                 "active": true,
                 "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
                 "actor_type": "silicon",
-                "org_id": "tos"
+                "org_id": "tos",
+                "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+                "authorization_epoch": 11
             }),
             serde_json::json!({
                 "active": true,
@@ -388,7 +508,9 @@ mod tests {
                     "id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a"
                 },
                 "org_id": "tos",
-                "expires_at": 2_000_000_000
+                "expires_at": 2_000_000_000,
+                "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+                "authorization_epoch": 11
             }),
             serde_json::json!({
                 "active": true,
@@ -396,13 +518,45 @@ mod tests {
                 "actor_type": "silicon",
                 "org_id": "tos",
                 "memberships": ["tos"],
-                "expires_at": 2_000_000_000
+                "expires_at": 2_000_000_000,
+                "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890",
+                "authorization_epoch": 11
             }),
         ] {
             let parsed = serde_json::from_value::<IntrospectionResponse>(value);
             assert!(parsed.is_ok());
             let Ok(parsed) = parsed else {
                 continue;
+            };
+            assert!(matches!(
+                parsed.into_actor("tos", now()),
+                Err(IamError::Unauthenticated)
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_missing_membership_or_authorization_epoch() {
+        for value in [
+            serde_json::json!({
+                "active": true,
+                "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
+                "actor_type": "silicon",
+                "org_id": "tos",
+                "expires_at": 2_000_000_000,
+                "authorization_epoch": 11
+            }),
+            serde_json::json!({
+                "active": true,
+                "principal_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f89a",
+                "actor_type": "silicon",
+                "org_id": "tos",
+                "expires_at": 2_000_000_000,
+                "membership_id": "0198e7d8-69bb-7d38-9ee1-94e7c143f890"
+            }),
+        ] {
+            let Ok(parsed) = serde_json::from_value::<IntrospectionResponse>(value) else {
+                panic!("test introspection document must deserialize");
             };
             assert!(matches!(
                 parsed.into_actor("tos", now()),

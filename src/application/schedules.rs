@@ -143,6 +143,7 @@ impl ScheduleService {
             });
         let filters = ListSchedules {
             org_id: actor.org_id.clone(),
+            read_scope: actor.read_scope.clone(),
             silicon_id,
             status: status.map(schedule_status_name).map(str::to_owned),
             cursor,
@@ -161,7 +162,7 @@ impl ScheduleService {
     /// Returns not found without leaking cross-organization existence.
     pub async fn get(&self, actor: &Actor, schedule_id: Uuid) -> Result<ScheduleRow, AppError> {
         self.repository
-            .get_schedule(&actor.org_id, schedule_id)
+            .get_schedule(&actor.org_id, schedule_id, &actor.read_scope)
             .await?
             .ok_or(AppError::NotFound)
     }
@@ -277,6 +278,7 @@ impl ScheduleService {
             .list_executions(
                 &actor.org_id,
                 schedule_id,
+                &actor.read_scope,
                 cursor,
                 validate_page_limit(limit)?,
             )

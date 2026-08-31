@@ -6,10 +6,12 @@ use testcontainers::{ContainerAsync, ImageExt as _, runners::AsyncRunner as _};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
+use crate::domain::ReminderReadScope;
+
 use super::{
     ActorType, AuditContext, CreateSchedule, ExecutionRow, IamLifecycleOutcome, IdempotencyContext,
-    IdempotentMutation, NewHookDestination, NewInternalEvent, PostgresRepository, RepositoryError,
-    health_check, migrate,
+    IdempotentMutation, ListSchedules, NewHookDestination, NewInternalEvent, PostgresRepository,
+    RepositoryError, ScheduleCursor, health_check, migrate,
 };
 
 struct TestDatabase {
@@ -24,6 +26,202 @@ struct LifecycleFixture {
     target_schedule_id: Uuid,
     other_schedule_id: Uuid,
     execution_id: Uuid,
+}
+
+struct VisibilityFixture {
+    carbon_scope: ReminderReadScope,
+    denied_schedule: Uuid,
+    first_allowed_schedule: Uuid,
+    second_allowed_schedule: Uuid,
+    allowed_execution: Uuid,
+    denied_execution: Uuid,
+}
+
+#[tokio::test]
+async fn reminder_read_scope_is_enforced_before_keyset_pagination() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let fixture = seed_visibility_fixture(&database.pool).await?;
+
+    assert_carbon_schedule_pages(&database.repository, &fixture).await?;
+    assert_carbon_direct_reads(&database.repository, &fixture).await?;
+    assert_empty_and_organization_scopes(&database.repository, &fixture).await?;
+    Ok(())
+}
+
+async fn seed_visibility_fixture(pool: &PgPool) -> anyhow::Result<VisibilityFixture> {
+    let denied_owner = Uuid::now_v7();
+    let first_allowed_owner = Uuid::now_v7();
+    let second_allowed_owner = Uuid::now_v7();
+    let now = Utc::now();
+    let denied_schedule = seed_visibility_schedule(
+        pool,
+        denied_owner,
+        "denied:tos",
+        "denied newest",
+        now - Duration::minutes(1),
+    )
+    .await?;
+    let first_allowed = seed_visibility_schedule(
+        pool,
+        first_allowed_owner,
+        "first:tos",
+        "first allowed",
+        now - Duration::minutes(2),
+    )
+    .await?;
+    let second_allowed = seed_visibility_schedule(
+        pool,
+        second_allowed_owner,
+        "second:tos",
+        "second allowed",
+        now - Duration::minutes(3),
+    )
+    .await?;
+    let allowed_execution =
+        seed_visibility_execution(pool, first_allowed, "first:tos", now).await?;
+    let denied_execution =
+        seed_visibility_execution(pool, denied_schedule, "denied:tos", now).await?;
+
+    Ok(VisibilityFixture {
+        carbon_scope: ReminderReadScope::silicon_principals(vec![
+            first_allowed_owner,
+            second_allowed_owner,
+        ]),
+        denied_schedule,
+        first_allowed_schedule: first_allowed,
+        second_allowed_schedule: second_allowed,
+        allowed_execution,
+        denied_execution,
+    })
+}
+
+async fn assert_carbon_schedule_pages(
+    repository: &PostgresRepository,
+    fixture: &VisibilityFixture,
+) -> anyhow::Result<()> {
+    let first_page = repository
+        .list_schedules(&visibility_filters(fixture.carbon_scope.clone(), None, 1))
+        .await?;
+    assert_eq!(first_page.items.len(), 1);
+    assert_eq!(first_page.items[0].id, fixture.first_allowed_schedule);
+    assert!(first_page.has_more);
+
+    let second_page = repository
+        .list_schedules(&visibility_filters(
+            fixture.carbon_scope.clone(),
+            Some(ScheduleCursor {
+                created_at: first_page.items[0].created_at,
+                id: first_page.items[0].id,
+            }),
+            1,
+        ))
+        .await?;
+    assert_eq!(second_page.items.len(), 1);
+    assert_eq!(second_page.items[0].id, fixture.second_allowed_schedule);
+    assert!(!second_page.has_more);
+    Ok(())
+}
+
+async fn assert_carbon_direct_reads(
+    repository: &PostgresRepository,
+    fixture: &VisibilityFixture,
+) -> anyhow::Result<()> {
+    assert!(
+        repository
+            .get_schedule("tos", fixture.first_allowed_schedule, &fixture.carbon_scope,)
+            .await?
+            .is_some()
+    );
+    assert!(
+        repository
+            .get_schedule("tos", fixture.denied_schedule, &fixture.carbon_scope)
+            .await?
+            .is_none()
+    );
+    assert!(
+        repository
+            .get_execution("tos", fixture.allowed_execution, &fixture.carbon_scope)
+            .await?
+            .is_some()
+    );
+    assert!(
+        repository
+            .get_execution("tos", fixture.denied_execution, &fixture.carbon_scope)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        repository
+            .list_executions(
+                "tos",
+                fixture.first_allowed_schedule,
+                &fixture.carbon_scope,
+                None,
+                20,
+            )
+            .await?
+            .items
+            .len(),
+        1
+    );
+    assert!(matches!(
+        repository
+            .list_executions(
+                "tos",
+                fixture.denied_schedule,
+                &fixture.carbon_scope,
+                None,
+                20,
+            )
+            .await,
+        Err(RepositoryError::NotFound)
+    ));
+    Ok(())
+}
+
+async fn assert_empty_and_organization_scopes(
+    repository: &PostgresRepository,
+    fixture: &VisibilityFixture,
+) -> anyhow::Result<()> {
+    let empty_scope = ReminderReadScope::silicon_principals(Vec::new());
+    let empty_page = repository
+        .list_schedules(&visibility_filters(empty_scope.clone(), None, 20))
+        .await?;
+    assert!(empty_page.items.is_empty());
+    assert!(
+        repository
+            .get_schedule("tos", fixture.first_allowed_schedule, &empty_scope)
+            .await?
+            .is_none()
+    );
+
+    let organization_scope = ReminderReadScope::organization();
+    let organization_page = repository
+        .list_schedules(&visibility_filters(organization_scope.clone(), None, 20))
+        .await?;
+    assert_eq!(organization_page.items.len(), 3);
+    assert!(
+        repository
+            .get_schedule("tos", fixture.denied_schedule, &organization_scope)
+            .await?
+            .is_some()
+    );
+    Ok(())
+}
+
+fn visibility_filters(
+    read_scope: ReminderReadScope,
+    cursor: Option<ScheduleCursor>,
+    limit: u32,
+) -> ListSchedules {
+    ListSchedules {
+        org_id: "tos".to_owned(),
+        read_scope,
+        silicon_id: None,
+        status: None,
+        cursor,
+        limit,
+    }
 }
 
 #[tokio::test]
@@ -419,6 +617,76 @@ async fn test_database() -> anyhow::Result<TestDatabase> {
         pool,
         repository,
     })
+}
+
+async fn seed_visibility_schedule(
+    pool: &PgPool,
+    owner_principal_id: Uuid,
+    silicon_id: &str,
+    text: &str,
+    created_at: DateTime<Utc>,
+) -> anyhow::Result<Uuid> {
+    let schedule_id = Uuid::now_v7();
+    let next_run_at = created_at + Duration::hours(2);
+    sqlx::query(
+        "INSERT INTO organization_lifecycle (org_id, state) \
+         VALUES ('tos', 'active') ON CONFLICT (org_id) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO silicon_identities (org_id, principal_id, silicon_id, state) \
+         VALUES ('tos', $1, $2, 'active')",
+    )
+    .bind(owner_principal_id)
+    .bind(silicon_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, \
+             timezone, schedule_kind, cron_expression, status, next_run_at, \
+             created_at, updated_at\
+         ) VALUES (\
+             $1, 'tos', $2, $3, $4, 'UTC', 'one_time', '0 9 * * *', \
+             'active', $5, $6, $6\
+         )",
+    )
+    .bind(schedule_id)
+    .bind(owner_principal_id)
+    .bind(silicon_id)
+    .bind(text)
+    .bind(next_run_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(schedule_id)
+}
+
+async fn seed_visibility_execution(
+    pool: &PgPool,
+    schedule_id: Uuid,
+    silicon_id: &str,
+    scheduled_for: DateTime<Utc>,
+) -> anyhow::Result<Uuid> {
+    let execution_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO executions (\
+             id, schedule_id, org_id, silicon_id, schedule_version, \
+             schedule_kind, scheduled_for, reminder_text, timezone, status, \
+             next_attempt_at\
+         ) VALUES (\
+             $1, $2, 'tos', $3, 1, 'one_time', $4, 'visibility test', \
+             'UTC', 'pending', $4\
+         )",
+    )
+    .bind(execution_id)
+    .bind(schedule_id)
+    .bind(silicon_id)
+    .bind(scheduled_for)
+    .execute(pool)
+    .await?;
+    Ok(execution_id)
 }
 
 async fn seed_due_schedule(

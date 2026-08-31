@@ -4,6 +4,8 @@ use serde_json::Value;
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::domain::ReminderReadScope;
+
 /// An IAM principal type accepted by persistence and audit records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActorType {
@@ -176,6 +178,8 @@ pub struct ScheduleCursor {
 pub struct ListSchedules {
     /// Organization scope.
     pub org_id: String,
+    /// IAM-authorized owner projection, enforced before pagination.
+    pub read_scope: ReminderReadScope,
     /// Optional owner filter.
     pub silicon_id: Option<String>,
     /// Optional lifecycle filter.

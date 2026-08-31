@@ -17,13 +17,21 @@ Remind manages one-time and recurring schedules for Silicons. When a schedule be
 
 ### Authentication
 
-- **Bearer authentication:** IAM access token.
+- **Bearer authentication:** IAM application token issued for the Remind audience.
 - **Organization context:** Requests require `X-Org-ID`.
 - **Creation authority:** Only an authenticated Silicon creates schedules.
-- **Visibility:** Organization Carbons and Silicons can inspect schedules under the current product rules.
+- **Visibility:** A Silicon can inspect every visible reminder in the selected
+  organization. A Carbon can inspect only reminders owned by Silicons in IAM's
+  request-scoped `remind_permitted_silicon_principal_ids` projection.
 - **Idempotency:** Schedule creation and updates require `Idempotency-Key`.
 
-Remind does not create schedules for Carbons. A Carbon may view schedules if authorized but is not the schedule owner.
+Remind does not create schedules for Carbons. Carbon access is read-only. IAM
+derives the projection from its authoritative access policy (shared tags plus
+explicit extra-Silicon grants); Remind never treats same-organization
+membership or a client-supplied `silicon_id` filter as authority. An empty
+projection returns an empty list, and an inaccessible schedule or execution
+history returns `404` without disclosing whether it exists. Only the owner
+Silicon can update or archive a reminder.
 
 ### IAM application events
 
@@ -61,6 +69,10 @@ Lists schedules visible to the current actor.
 - **Filters:** `silicon_id` and status.
 - **Pagination:** Cursor and limit.
 - **Returns:** Schedules and next cursor.
+
+The IAM owner-principal projection is applied by PostgreSQL before the cursor,
+ordering, and limit. A page therefore contains up to the requested number of
+authorized rows even when newer reminders belong to inaccessible Silicons.
 
 Statuses are `active`, `paused`, and `completed`. A one-time schedule becomes
 `completed` after its current execution is delivered or reaches terminal
@@ -101,6 +113,8 @@ Returns one visible schedule.
 - **Returns:** Owner Silicon, expression, timezone, state, next run, and timestamps.
 
 Organization boundaries must be checked even when the caller knows the schedule UUID.
+Carbon owner visibility is checked in the same database lookup; an inaccessible
+UUID is indistinguishable from an absent one.
 
 ### `PATCH /schedules/{schedule_id}`
 
@@ -143,6 +157,7 @@ Lists execution history for a schedule.
 - **Returns:** Scheduled time, attempt time, delivery time, status, Hook event ID, and failure reason.
 
 Each occurrence has a stable execution UUID. That UUID is used as the Hook idempotency key so retries cannot cause multiple logical reminders.
+Execution history inherits the parent reminder's IAM-projected owner scope.
 
 Execution statuses are `pending`, `delivered`, `retrying`, and `failed`.
 
@@ -208,7 +223,8 @@ policies above are stable and recorded in [`decisions.md`](./decisions.md):
 - deletion, completion, and 45-day retention (D-012, D-023);
 - principal/public-ID binding and encrypted Hook destination provisioning
   (D-021, D-026, D-029); and
-- organization-wide schedule visibility under the current product rule (D-005).
+- IAM-projected Carbon visibility, organization-wide Silicon reads, and
+  owner-only mutation (D-035).
 
 ## Deferred public operations
 
@@ -216,5 +232,5 @@ policies above are stable and recorded in [`decisions.md`](./decisions.md):
 - Cron validation and human-readable schedule preview endpoints are absent.
 - Manual trigger and execution-redelivery operations are absent.
 - Bulk pause, resume, and organization-wide controls are absent.
-- The contract has no finer-grained reminder-text visibility capability beyond
-  the current organization access rule.
+- IAM must publish the Remind-specific permitted-Silicon projection in token
+  introspection; clients cannot supply or broaden it through this API.

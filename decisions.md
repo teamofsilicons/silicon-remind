@@ -519,3 +519,40 @@ preserving Vixie day matching, DST behavior, and D-009 missed-occurrence
 coalescing. Because Remind is still unreleased, D-028 permits consolidating
 `schedule_kind`, non-null `cron_expression`, and the UTC timezone default into
 the baseline schema.
+
+## D-035 — IAM projects Carbon reminder visibility into every read
+
+**Status:** Accepted; supersedes the Carbon visibility portion of D-005 and
+extends D-021 and D-030
+
+The specific access rule in `UNDERSTANDING.md` takes precedence over its later
+organization-wide shorthand: a Carbon reads only Silicons it can access and
+their reminders, while a Silicon reads all visible reminders in the selected
+organization. Carbon access is read-only. Creation still requires a Silicon,
+and only the owner Silicon may update or archive its reminder. Knowing a UUID or
+supplying a public `silicon_id` filter never grants authority.
+
+IAM remains the policy authority. Every successful introspection result must now
+include the selected membership UUID and an `authorization_epoch`. A Carbon
+result must additionally include an explicit
+`remind_permitted_silicon_principal_ids` array representing IAM's effective
+shared-tag plus explicit extra-Silicon grants. Remind validates every UUID,
+rejects more than 1,000 entries before deduplication, sorts and deduplicates the
+projection, and accepts an empty set as no readable Silicon reminders. Silicon
+actors instead receive an organization-wide read scope. Authorization remains
+uncached so a changed IAM projection takes effect on the next request.
+
+The repository applies the owner-principal predicate in PostgreSQL before
+keyset cursor predicates, ordering, and limits for schedule lists, individual
+schedule reads, individual execution reads, and execution-history lists.
+Filtering after pagination would produce sparse or misleading pages and is not
+permitted. An inaccessible individual resource returns `404`, preserving the
+same non-disclosure boundary as cross-organization lookups. Mutation queries
+retain their independent owner-principal predicate.
+
+This contract is an upstream deployment prerequisite. The checked-in IAM
+runtime does not currently mint Remind-audience application tokens to Silicons,
+and its current introspection result does not publish the required access
+projection. IAM must implement the audience-bound token-exchange/issuance flow
+and authoritative projection before public Remind traffic is enabled. Remind
+does not reconstruct authority from a broad organization-directory response.

@@ -2,7 +2,10 @@ openapi: 3.1.0
 info:
   title: Silicon Remind API
   version: 0.1.0
-  description: Time-based scheduling for Silicons. Supports one-time and recurring schedules and delivers executions through Silicon Hook.
+  description: >-
+    Time-based scheduling for Silicons. Silicons read all visible reminders in
+    their selected organization; Carbons have read-only access to IAM-projected
+    Silicon owners. Occurrences are delivered through Silicon Hook.
 servers:
   - url: https://remind.teamofsilicons.com/api/v1
 security:
@@ -16,6 +19,9 @@ paths:
       tags: [Schedules]
       operationId: listSchedules
       summary: List schedules visible to the current actor
+      description: >-
+        IAM-projected owner visibility is enforced before cursor pagination.
+        An empty Carbon projection returns an empty page.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - name: silicon_id
@@ -65,6 +71,8 @@ paths:
     get:
       tags: [Schedules]
       operationId: getSchedule
+      summary: Get an IAM-visible schedule
+      description: Inaccessible identifiers return the same not-found response as absent identifiers.
       responses:
         '200':
           description: Schedule
@@ -110,6 +118,8 @@ paths:
     get:
       tags: [Executions]
       operationId: listScheduleExecutions
+      summary: List execution history for an IAM-visible schedule
+      description: The parent schedule's IAM-projected owner visibility is enforced before pagination.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/ScheduleId'
@@ -132,7 +142,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: IAM access token
+      bearerFormat: IAM Remind-audience application token
   parameters:
     OrgId:
       name: X-Org-ID

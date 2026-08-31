@@ -139,7 +139,18 @@ contract before deployment. Remind intentionally rejects the older
 and lifecycle identity projection needed for fail-safe revocation; see D-030 in
 [decisions.md](decisions.md). IAM must likewise serve the published authenticated
 introspection response containing `principal_id`, `actor_type`, public `org_id`,
-and `expires_at`; Remind does not infer authority from older internal-ID shapes.
+`membership_id`, `authorization_epoch`, and `expires_at`. Carbon responses must
+also contain the explicit `remind_permitted_silicon_principal_ids` array. Remind
+applies that owner UUID projection inside PostgreSQL before pagination; Silicons
+receive organization-wide reads, Carbons receive read-only projected access,
+and only an owner Silicon can mutate its reminder.
+
+The checked-in IAM runtime must add a token-exchange/issuance path for
+Remind-audience application tokens and populate this authoritative projection
+before public Remind traffic is enabled. Its current native token audience and
+Carbon-only OAuth path cannot satisfy Remind's authenticated introspection
+contract. Remind fails closed rather than deriving Carbon access from an
+organization directory response.
 
 ## Configuration
 

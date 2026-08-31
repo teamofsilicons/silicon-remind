@@ -9,7 +9,7 @@ mod execution;
 mod identity;
 mod schedule;
 
-pub use actor::{Actor, ActorKind};
+pub use actor::{Actor, ActorKind, ReminderReadScope};
 pub use cursor::{CursorError, CursorKind, PageCursor};
 pub use execution::{Execution, ExecutionStatus, ExecutionStatusTransitionError};
 pub use identity::{

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
-use crate::domain::{is_valid_iam_label, silicon_id_belongs_to_org};
+use crate::domain::{ReminderReadScope, is_valid_iam_label, silicon_id_belongs_to_org};
 
 use super::{
     error::RepositoryError,
@@ -188,25 +188,31 @@ impl PostgresRepository {
         &self,
         org_id: &str,
         schedule_id: Uuid,
+        read_scope: &ReminderReadScope,
     ) -> Result<Option<ScheduleRow>, RepositoryError> {
-        let sql = format!(
-            "SELECT {SCHEDULE_COLUMNS} \
-             FROM schedules s \
-             WHERE s.org_id = $1 AND s.id = $2 AND s.deleted_at IS NULL \
-               AND EXISTS (\
-                   SELECT 1 FROM silicon_identities identity \
-                   JOIN organization_lifecycle organization \
-                     ON organization.org_id = identity.org_id \
-                   WHERE identity.org_id = s.org_id \
-                     AND identity.principal_id = s.owner_principal_id \
-                     AND identity.state = 'active' \
-                     AND organization.state = 'active'\
-               )"
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "SELECT {SCHEDULE_COLUMNS} FROM schedules s WHERE s.org_id = "
+        ));
+        query
+            .push_bind(org_id)
+            .push(" AND s.id = ")
+            .push_bind(schedule_id)
+            .push(" AND s.deleted_at IS NULL");
+        push_reminder_read_scope(&mut query, "s.owner_principal_id", read_scope);
+        query.push(
+            " AND EXISTS (\
+                 SELECT 1 FROM silicon_identities identity \
+                 JOIN organization_lifecycle organization \
+                   ON organization.org_id = identity.org_id \
+                 WHERE identity.org_id = s.org_id \
+                   AND identity.principal_id = s.owner_principal_id \
+                   AND identity.state = 'active' \
+                   AND organization.state = 'active'\
+             )",
         );
 
-        sqlx::query_as::<_, ScheduleRow>(AssertSqlSafe(sql))
-            .bind(org_id)
-            .bind(schedule_id)
+        query
+            .build_query_as::<ScheduleRow>()
             .fetch_optional(&self.pool)
             .await
             .map_err(RepositoryError::from)
@@ -237,6 +243,7 @@ impl PostgresRepository {
         ));
         query.push_bind(&filters.org_id);
         query.push(" AND s.deleted_at IS NULL");
+        push_reminder_read_scope(&mut query, "s.owner_principal_id", &filters.read_scope);
         query.push(
             " AND EXISTS (\
                  SELECT 1 FROM silicon_identities identity \
@@ -284,23 +291,28 @@ impl PostgresRepository {
         &self,
         org_id: &str,
         execution_id: Uuid,
+        read_scope: &ReminderReadScope,
     ) -> Result<Option<ExecutionRow>, RepositoryError> {
-        let sql = format!(
-            "SELECT {EXECUTION_COLUMNS} \
-             FROM executions e \
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "SELECT {EXECUTION_COLUMNS} FROM executions e \
              JOIN schedules s ON s.id = e.schedule_id \
              JOIN silicon_identities identity \
                ON identity.org_id = s.org_id \
               AND identity.principal_id = s.owner_principal_id \
              JOIN organization_lifecycle organization \
                ON organization.org_id = s.org_id \
-             WHERE e.org_id = $1 AND e.id = $2 AND s.deleted_at IS NULL \
-               AND identity.state = 'active' AND organization.state = 'active'"
-        );
+             WHERE e.org_id = "
+        ));
+        query
+            .push_bind(org_id)
+            .push(" AND e.id = ")
+            .push_bind(execution_id)
+            .push(" AND s.deleted_at IS NULL");
+        push_reminder_read_scope(&mut query, "s.owner_principal_id", read_scope);
+        query.push(" AND identity.state = 'active' AND organization.state = 'active'");
 
-        sqlx::query_as::<_, ExecutionRow>(AssertSqlSafe(sql))
-            .bind(org_id)
-            .bind(execution_id)
+        query
+            .build_query_as::<ExecutionRow>()
             .fetch_optional(&self.pool)
             .await
             .map_err(RepositoryError::from)
@@ -317,11 +329,16 @@ impl PostgresRepository {
         &self,
         org_id: &str,
         schedule_id: Uuid,
+        read_scope: &ReminderReadScope,
         cursor: Option<ExecutionCursor>,
         limit: u32,
     ) -> Result<Page<ExecutionRow>, RepositoryError> {
         validate_public_limit(limit)?;
-        if self.get_schedule(org_id, schedule_id).await?.is_none() {
+        if self
+            .get_schedule(org_id, schedule_id, read_scope)
+            .await?
+            .is_none()
+        {
             return Err(RepositoryError::NotFound);
         }
 
@@ -343,9 +360,10 @@ impl PostgresRepository {
                        ON organization.org_id = schedule.org_id \
                      WHERE schedule.id = e.schedule_id \
                        AND identity.state = 'active' \
-                       AND organization.state = 'active'\
-                 )",
+                       AND organization.state = 'active'",
             );
+        push_reminder_read_scope(&mut query, "schedule.owner_principal_id", read_scope);
+        query.push(")");
 
         if let Some(cursor) = cursor {
             query
@@ -2510,9 +2528,14 @@ async fn append_iam_lifecycle_audits(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use sqlx::{Postgres, QueryBuilder};
     use uuid::Uuid;
 
-    use super::{CreateSchedule, page_from_rows, validate_create_schedule};
+    use crate::domain::ReminderReadScope;
+
+    use super::{
+        CreateSchedule, page_from_rows, push_reminder_read_scope, validate_create_schedule,
+    };
 
     #[test]
     fn create_rejects_an_unknown_schedule_kind() {
@@ -2536,6 +2559,60 @@ mod tests {
         let page = page_from_rows(vec![1_u8, 2, 3], 2);
         assert_eq!(page.items, vec![1, 2]);
         assert!(page.has_more);
+    }
+
+    #[test]
+    fn silicon_read_scope_adds_no_owner_predicate() {
+        let mut query = QueryBuilder::<Postgres>::new("SELECT 1 WHERE TRUE");
+        push_reminder_read_scope(
+            &mut query,
+            "schedule.owner_principal_id",
+            &ReminderReadScope::organization(),
+        );
+
+        assert_eq!(query.sql(), "SELECT 1 WHERE TRUE");
+    }
+
+    #[test]
+    fn empty_carbon_scope_is_an_explicit_false_predicate() {
+        let mut query = QueryBuilder::<Postgres>::new("SELECT 1 WHERE TRUE");
+        push_reminder_read_scope(
+            &mut query,
+            "schedule.owner_principal_id",
+            &ReminderReadScope::silicon_principals(Vec::new()),
+        );
+
+        assert_eq!(query.sql(), "SELECT 1 WHERE TRUE AND FALSE");
+    }
+
+    #[test]
+    fn carbon_owner_predicate_precedes_cursor_order_and_limit() {
+        let mut query = QueryBuilder::<Postgres>::new("SELECT 1 WHERE TRUE");
+        push_reminder_read_scope(
+            &mut query,
+            "schedule.owner_principal_id",
+            &ReminderReadScope::silicon_principals(vec![Uuid::from_u128(1)]),
+        );
+        query.push(
+            " AND (schedule.created_at, schedule.id) < ($2, $3) \
+             ORDER BY schedule.created_at DESC, schedule.id DESC LIMIT $4",
+        );
+
+        let sql = query.sql();
+        let sql = sql.as_str();
+        let owner = sql.find("schedule.owner_principal_id");
+        let cursor = sql.find("schedule.created_at, schedule.id");
+        let limit = sql.find("LIMIT");
+        assert!(
+            owner
+                .zip(cursor)
+                .is_some_and(|(owner, cursor)| owner < cursor)
+        );
+        assert!(
+            cursor
+                .zip(limit)
+                .is_some_and(|(cursor, limit)| cursor < limit)
+        );
     }
 }
 
@@ -2893,6 +2970,27 @@ fn validate_public_limit(limit: u32) -> Result<(), RepositoryError> {
         Err(RepositoryError::InvalidInput(
             "public page limit must be from 1 through 100",
         ))
+    }
+}
+
+fn push_reminder_read_scope(
+    query: &mut QueryBuilder<Postgres>,
+    owner_column: &'static str,
+    read_scope: &ReminderReadScope,
+) {
+    match read_scope.silicon_principal_ids() {
+        None => {}
+        Some([]) => {
+            query.push(" AND FALSE");
+        }
+        Some(principal_ids) => {
+            query
+                .push(" AND ")
+                .push(owner_column)
+                .push(" = ANY(")
+                .push_bind(principal_ids.to_vec())
+                .push(')');
+        }
     }
 }
 

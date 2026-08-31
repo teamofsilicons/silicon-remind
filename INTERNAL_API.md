@@ -16,6 +16,46 @@ All JSON errors use Remind's standard envelope and include a request ID:
 }
 ```
 
+## Public bearer introspection prerequisite
+
+Public `/api/v1` requests are authorized through the configured IAM
+introspection endpoint using Remind's application Basic credential and the
+caller's `X-Org-ID`. The active response must bind one public organization and
+contain the following authoritative fields:
+
+```json
+{
+  "active": true,
+  "principal_id": "0198f74d-7ef7-7c9f-95bf-7d403a61e5cc",
+  "actor_type": "carbon",
+  "org_id": "tos",
+  "membership_id": "0198f74d-7ef7-7c9f-95bf-7d403a61e5cd",
+  "authorization_epoch": 42,
+  "expires_at": 2000000000,
+  "remind_permitted_silicon_principal_ids": [
+    "0198f74d-7ef7-7c9f-95bf-7d403a61e5ce"
+  ]
+}
+```
+
+`principal_id` and `membership_id` are UUIDs. `authorization_epoch` is IAM's
+nonnegative authorization revision. For a Carbon,
+`remind_permitted_silicon_principal_ids` is mandatory, may be empty, contains
+at most 1,000 Silicon principal UUIDs before deduplication, and represents IAM's
+effective shared-tag plus explicit-grant policy. Remind sorts and deduplicates
+the array, then applies it as an owner predicate before database pagination.
+For a Silicon the field is unnecessary because the product grants read access
+to all visible reminders in the selected organization. Missing, malformed,
+ambiguous, expired, or oversized projections fail closed.
+
+The bearer itself must be an application token whose audience/client binding
+permits Remind to introspect it. The checked-in IAM runtime does not yet issue
+such Remind-audience tokens to Silicons: native tokens use IAM's own audience,
+application introspection enforces caller/audience equality, and the available
+OAuth authorization path is Carbon-only. IAM token exchange/issuance and this
+projection are therefore deployment prerequisites; an organization directory
+listing is not an authorization substitute.
+
 ## Hook destination provisioning
 
 The Hook provisioning routes require:
