@@ -606,3 +606,31 @@ trigger whose execution may still be delivered, while `deleted_at` identifies
 manual or lifecycle archival that blocks delivery. Responses expose the common
 derived `archived_at`, `section`, and `purge_after` fields so clients do not need
 to infer the storage distinction.
+
+## D-038 — Retention and cancellation are enforced on the synchronous path
+
+**Status:** Accepted; extends D-019 and D-037 and supersedes D-012's immediate
+public hiding of manually archived schedules
+
+The 45-day archive deadline is a logical access and delivery boundary, not the
+time at which a best-effort maintenance pass happens to delete a row. Schedule
+and execution reads compare `purge_after` with PostgreSQL's current time, and
+delivery claim, pre-send lease validation, and terminal writes reject expired
+parents. An overdue row is therefore invisible and ineligible for Hook delivery
+even when a retention sweep is delayed after an outage. The bounded sweep still
+performs physical deletion and ledger capture independently.
+
+An owner archive request terminally fails every pending or retrying execution in
+the same transaction, clearing retry times and delivery leases and recording
+the cancelled count in an audit. It updates the parent only when the reminder is
+still current; requesting archive for an automatically archived one-time
+reminder preserves its original `completed_at` and purge deadline while still
+cancelling unaccepted delivery. A worker also revalidates a claimed lease
+immediately before outbound I/O, narrowing the claim-to-archive race without
+holding a database transaction open across a network request.
+
+IAM revocation terminalizes unaccepted executions independently from schedule
+archival. Inline webhook handling and deferred cleanup both use bounded
+execution batches across every schedule status, so an auto-archived one-time
+reminder cannot remain retryable after its principal or organization is
+revoked. Its original `completed_at` and retention deadline remain unchanged.

@@ -145,10 +145,11 @@ Archives a schedule owned by the authenticated Silicon.
 - **Returns:** `204 No Content`.
 
 Archival immediately removes the reminder from the default current section and
-prevents unaccepted work from being claimed again. It remains readable through
-`section=archived`, together with its execution history, for exactly 45 days.
-Repeating the operation is idempotent and never extends the original retention
-deadline. A bounded worker sweep then permanently removes it.
+atomically marks pending or retrying executions failed with their leases
+cleared. It remains readable through `section=archived`, together with its
+execution history, for exactly 45 days. Repeating the operation is idempotent
+and never extends the original retention deadline. Public reads enforce that
+deadline even if the bounded permanent-deletion sweep is delayed.
 
 ## Executions
 
@@ -201,11 +202,11 @@ Remind marks the execution delivered after Hook durably accepts it, not after th
 ```text
 Silicon creates one_time + cron, optionally with timezone
   -> Remind defaults an omitted timezone to UTC and stores the first match
-  -> scheduler materializes a durable execution with a stable ID
+  -> scheduler materializes a durable execution with a stable ID and archives the reminder
   -> delivery worker claims that execution
   -> Remind sends signed Hook event
   -> Hook durably accepts it, or bounded retries reach terminal failure
-  -> Remind records the terminal outcome and completes the matching generation
+  -> Remind records the terminal outcome without changing the archive deadline
 ```
 
 ### Recurring reminder

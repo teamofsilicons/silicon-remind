@@ -25,6 +25,8 @@ const PUBLIC_PAGE_LIMIT: u32 = 100;
 const WORKER_BATCH_LIMIT: u32 = 10_000;
 const IAM_INLINE_CLEANUP_LIMIT: i64 = 1_000;
 const MAX_FAILURE_REASON_BYTES: usize = 4_096;
+const IAM_REVOCATION_FAILURE_REASON: &str = "stopped after IAM access revocation";
+const OWNER_ARCHIVE_FAILURE_REASON: &str = "stopped after reminder archive";
 pub(super) const DELETED_REMINDER_LEDGER_LIMIT: u32 = 100_000;
 const DELETED_REMINDER_LEDGER_LOCK_CLASS: i32 = 0x5349_4c49;
 const DELETED_REMINDER_LEDGER_LOCK_KEY: i32 = 1;
@@ -202,7 +204,8 @@ impl PostgresRepository {
         query
             .push_bind(org_id)
             .push(" AND s.id = ")
-            .push_bind(schedule_id);
+            .push_bind(schedule_id)
+            .push(" AND (s.purge_after IS NULL OR s.purge_after > clock_timestamp())");
         push_reminder_read_scope(&mut query, "s.owner_principal_id", read_scope);
         query.push(
             " AND EXISTS (\
@@ -252,7 +255,10 @@ impl PostgresRepository {
                 query.push(" AND s.deleted_at IS NULL AND s.status <> 'completed'");
             }
             ScheduleSection::Archived => {
-                query.push(" AND (s.deleted_at IS NOT NULL OR s.status = 'completed')");
+                query.push(
+                    " AND (s.deleted_at IS NOT NULL OR s.status = 'completed') \
+                     AND s.purge_after > clock_timestamp()",
+                );
             }
         }
         push_reminder_read_scope(&mut query, "s.owner_principal_id", &filters.read_scope);
@@ -318,7 +324,8 @@ impl PostgresRepository {
         query
             .push_bind(org_id)
             .push(" AND e.id = ")
-            .push_bind(execution_id);
+            .push_bind(execution_id)
+            .push(" AND (s.purge_after IS NULL OR s.purge_after > clock_timestamp())");
         push_reminder_read_scope(&mut query, "s.owner_principal_id", read_scope);
         query.push(" AND identity.state = 'active' AND organization.state = 'active'");
 
@@ -371,7 +378,9 @@ impl PostgresRepository {
                        ON organization.org_id = schedule.org_id \
                      WHERE schedule.id = e.schedule_id \
                        AND identity.state = 'active' \
-                       AND organization.state = 'active'",
+                       AND organization.state = 'active' \
+                       AND (schedule.purge_after IS NULL \
+                            OR schedule.purge_after > clock_timestamp())",
             );
         push_reminder_read_scope(&mut query, "schedule.owner_principal_id", read_scope);
         query.push(")");
@@ -662,10 +671,11 @@ impl PostgresRepository {
         audit: &AuditContext,
     ) -> Result<bool, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let existing = sqlx::query_as::<_, (Uuid, String, Option<DateTime<Utc>>)>(
-            "SELECT id, status, deleted_at \
+        let (status, deleted_at) = sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
+            "SELECT status, deleted_at \
              FROM schedules \
              WHERE org_id = $1 AND owner_principal_id = $2 AND id = $3 \
+               AND (purge_after IS NULL OR purge_after > clock_timestamp()) \
              FOR UPDATE",
         )
         .bind(org_id)
@@ -675,36 +685,56 @@ impl PostgresRepository {
         .await?
         .ok_or(RepositoryError::NotFound)?;
 
-        if existing.1 == "completed" || existing.2.is_some() {
-            transaction.commit().await?;
-            return Ok(false);
+        let newly_archived = status != "completed" && deleted_at.is_none();
+        if newly_archived {
+            sqlx::query(
+                "UPDATE schedules SET \
+                     deleted_at = $1, next_run_at = NULL, version = version + 1 \
+                 WHERE id = $2",
+            )
+            .bind(archived_at)
+            .bind(schedule_id)
+            .execute(&mut *transaction)
+            .await?;
         }
 
-        sqlx::query(
-            "UPDATE schedules SET \
-                 deleted_at = $1, next_run_at = NULL, version = version + 1 \
-             WHERE id = $2",
+        let schedule_ids = [schedule_id];
+        let executions_cancelled = fail_schedule_unaccepted_executions(
+            &mut transaction,
+            &schedule_ids,
+            OWNER_ARCHIVE_FAILURE_REASON,
         )
-        .bind(archived_at)
-        .bind(schedule_id)
-        .execute(&mut *transaction)
         .await?;
 
-        append_audit(
-            &mut transaction,
-            Some(org_id),
-            audit,
-            "schedule.archived",
-            "schedule",
-            Some(schedule_id.to_string()),
-            json!({
-                "reason": "owner_requested",
-                "retention_days": ARCHIVE_RETENTION_DAYS,
-            }),
-        )
-        .await?;
+        if newly_archived {
+            append_audit(
+                &mut transaction,
+                Some(org_id),
+                audit,
+                "schedule.archived",
+                "schedule",
+                Some(schedule_id.to_string()),
+                json!({
+                    "reason": "owner_requested",
+                    "retention_days": ARCHIVE_RETENTION_DAYS,
+                    "executions_cancelled": executions_cancelled,
+                }),
+            )
+            .await?;
+        } else if executions_cancelled > 0 {
+            append_audit(
+                &mut transaction,
+                Some(org_id),
+                audit,
+                "schedule.delivery_cancelled_after_archive_request",
+                "schedule",
+                Some(schedule_id.to_string()),
+                json!({ "executions_cancelled": executions_cancelled }),
+            )
+            .await?;
+        }
         transaction.commit().await?;
-        Ok(true)
+        Ok(newly_archived)
     }
 }
 
@@ -904,6 +934,7 @@ impl PostgresRepository {
                    AND e.next_attempt_at <= $1 \
                    AND (e.lease_expires_at IS NULL OR e.lease_expires_at <= $1) \
                    AND s.deleted_at IS NULL \
+                   AND (s.purge_after IS NULL OR s.purge_after > $1) \
                    AND identity.state = 'active' AND organization.state = 'active' \
                  ORDER BY e.next_attempt_at, e.id \
                  FOR UPDATE OF e SKIP LOCKED \
@@ -952,6 +983,47 @@ impl PostgresRepository {
         Ok(rows)
     }
 
+    /// Revalidates a claimed delivery immediately before outbound I/O.
+    ///
+    /// The lease must still belong to this worker, and its schedule, IAM
+    /// identity, organization, and retention window must all remain live.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input error for an invalid worker identifier or a database
+    /// error when the eligibility query fails.
+    pub async fn delivery_lease_is_live(
+        &self,
+        execution_id: Uuid,
+        worker_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RepositoryError> {
+        validate_worker_id(worker_id)?;
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM executions e \
+                 JOIN schedules s ON s.id = e.schedule_id \
+                 JOIN silicon_identities identity \
+                   ON identity.org_id = s.org_id \
+                  AND identity.principal_id = s.owner_principal_id \
+                 JOIN organization_lifecycle organization \
+                   ON organization.org_id = s.org_id \
+                 WHERE e.id = $1 AND e.status IN ('pending', 'retrying') \
+                   AND e.lease_owner = $2 AND e.lease_expires_at > $3 \
+                   AND s.deleted_at IS NULL \
+                   AND (s.purge_after IS NULL OR s.purge_after > $3) \
+                   AND identity.state = 'active' \
+                   AND organization.state = 'active'\
+             )",
+        )
+        .bind(execution_id)
+        .bind(worker_id)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from)
+    }
+
     /// Marks a leased execution delivered after a validated Hook `202`.
     ///
     /// # Errors
@@ -967,7 +1039,7 @@ impl PostgresRepository {
     ) -> Result<ExecutionRow, RepositoryError> {
         validate_worker_id(worker_id)?;
         let mut transaction = self.pool.begin().await?;
-        lock_live_delivery_schedule(&mut transaction, execution_id).await?;
+        lock_live_delivery_schedule(&mut transaction, execution_id, accepted_at).await?;
         let sql = format!(
             "UPDATE executions e SET \
                  status = 'delivered', delivered_at = $1, hook_event_id = $2, \
@@ -977,7 +1049,8 @@ impl PostgresRepository {
                AND e.lease_owner = $4 AND e.lease_expires_at > $1 \
                AND EXISTS (\
                    SELECT 1 FROM schedules s \
-                   WHERE s.id = e.schedule_id AND s.deleted_at IS NULL\
+                   WHERE s.id = e.schedule_id AND s.deleted_at IS NULL \
+                     AND (s.purge_after IS NULL OR s.purge_after > $1)\
                ) \
              RETURNING {EXECUTION_COLUMNS}"
         );
@@ -1035,7 +1108,7 @@ impl PostgresRepository {
         }
 
         let mut transaction = self.pool.begin().await?;
-        lock_live_delivery_schedule(&mut transaction, execution_id).await?;
+        lock_live_delivery_schedule(&mut transaction, execution_id, failed_at).await?;
         let sql = format!(
             "UPDATE executions e SET \
                  status = 'retrying', next_attempt_at = $1, failure_reason = $2, \
@@ -1044,7 +1117,8 @@ impl PostgresRepository {
                AND e.lease_owner = $4 AND e.lease_expires_at > $5 \
                AND EXISTS (\
                    SELECT 1 FROM schedules s \
-                   WHERE s.id = e.schedule_id AND s.deleted_at IS NULL\
+                   WHERE s.id = e.schedule_id AND s.deleted_at IS NULL \
+                     AND (s.purge_after IS NULL OR s.purge_after > $5)\
                ) \
              RETURNING {EXECUTION_COLUMNS}"
         );
@@ -1090,7 +1164,7 @@ impl PostgresRepository {
         validate_failure_reason(failure_reason)?;
 
         let mut transaction = self.pool.begin().await?;
-        lock_live_delivery_schedule(&mut transaction, execution_id).await?;
+        lock_live_delivery_schedule(&mut transaction, execution_id, failed_at).await?;
         let sql = format!(
             "UPDATE executions e SET \
                  status = 'failed', next_attempt_at = NULL, failure_reason = $1, \
@@ -1099,7 +1173,8 @@ impl PostgresRepository {
                AND e.lease_owner = $3 AND e.lease_expires_at > $4 \
                AND EXISTS (\
                    SELECT 1 FROM schedules s \
-                   WHERE s.id = e.schedule_id AND s.deleted_at IS NULL\
+                   WHERE s.id = e.schedule_id AND s.deleted_at IS NULL \
+                     AND (s.purge_after IS NULL OR s.purge_after > $4)\
                ) \
              RETURNING {EXECUTION_COLUMNS}"
         );
@@ -1505,9 +1580,14 @@ impl PostgresRepository {
             .fetch_one(&mut *transaction)
             .await?;
         block_iam_target(&mut transaction, &target, processed_at).await?;
-        let (schedules_deleted, schedule_ids) =
+        let schedules_deleted =
             soft_delete_iam_schedules(&mut transaction, &target, processed_at).await?;
-        let executions_failed = fail_unaccepted_executions(&mut transaction, &schedule_ids).await?;
+        let executions_failed = fail_iam_target_unaccepted_executions(
+            &mut transaction,
+            &target,
+            IAM_INLINE_CLEANUP_LIMIT,
+        )
+        .await?;
         disable_iam_destinations(&mut transaction, &target, processed_at).await?;
         let processed_receipt =
             mark_internal_event_processed(&mut transaction, receipt.id, processed_at).await?;
@@ -2015,6 +2095,7 @@ fn materialization_generation(
 async fn lock_live_delivery_schedule(
     transaction: &mut Transaction<'_, Postgres>,
     execution_id: Uuid,
+    now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
     let schedule_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT s.id \
@@ -2026,10 +2107,12 @@ async fn lock_live_delivery_schedule(
          JOIN organization_lifecycle organization \
            ON organization.org_id = s.org_id \
          WHERE e.id = $1 AND s.deleted_at IS NULL \
+           AND (s.purge_after IS NULL OR s.purge_after > $2) \
            AND identity.state = 'active' AND organization.state = 'active' \
          FOR UPDATE OF s",
     )
     .bind(execution_id)
+    .bind(now)
     .fetch_optional(&mut **transaction)
     .await?;
 
@@ -2362,7 +2445,8 @@ async fn cleanup_revoked_schedules(
         .await?
         .rows_affected()
     };
-    let executions_failed = fail_unaccepted_executions(transaction, &schedule_ids).await?;
+    let executions_failed =
+        fail_revoked_unaccepted_executions(transaction, i64::from(limit)).await?;
     Ok((schedules, schedules_deleted, executions_failed))
 }
 
@@ -2437,7 +2521,7 @@ async fn soft_delete_iam_schedules(
     transaction: &mut Transaction<'_, Postgres>,
     target: &IamLifecycleTarget,
     deleted_at: DateTime<Utc>,
-) -> Result<(u64, Vec<Uuid>), RepositoryError> {
+) -> Result<u64, RepositoryError> {
     let schedule_ids = match target {
         IamLifecycleTarget::Silicon {
             org_id,
@@ -2482,7 +2566,7 @@ async fn soft_delete_iam_schedules(
         .await?
         .rows_affected()
     };
-    Ok((deleted, schedule_ids))
+    Ok(deleted)
 }
 
 async fn block_iam_target(
@@ -2597,9 +2681,10 @@ async fn disable_iam_destinations(
     Ok(result.rows_affected())
 }
 
-async fn fail_unaccepted_executions(
+async fn fail_schedule_unaccepted_executions(
     transaction: &mut Transaction<'_, Postgres>,
     schedule_ids: &[Uuid],
+    failure_reason: &str,
 ) -> Result<u64, RepositoryError> {
     if schedule_ids.is_empty() {
         return Ok(0);
@@ -2607,11 +2692,109 @@ async fn fail_unaccepted_executions(
     sqlx::query(
         "UPDATE executions SET \
              status = 'failed', next_attempt_at = NULL, \
-             failure_reason = 'stopped after IAM membership removal', \
+             failure_reason = $2, \
              lease_owner = NULL, lease_expires_at = NULL \
          WHERE schedule_id = ANY($1) AND status IN ('pending', 'retrying')",
     )
     .bind(schedule_ids)
+    .bind(failure_reason)
+    .execute(&mut **transaction)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(RepositoryError::from)
+}
+
+async fn fail_iam_target_unaccepted_executions(
+    transaction: &mut Transaction<'_, Postgres>,
+    target: &IamLifecycleTarget,
+    limit: i64,
+) -> Result<u64, RepositoryError> {
+    let result = match target {
+        IamLifecycleTarget::Silicon {
+            org_id,
+            principal_id,
+        } => {
+            sqlx::query(
+                "WITH candidates AS (\
+                     SELECT execution.id \
+                     FROM executions execution \
+                     JOIN schedules schedule ON schedule.id = execution.schedule_id \
+                     WHERE schedule.org_id = $1 \
+                       AND schedule.owner_principal_id = $2 \
+                       AND execution.status IN ('pending', 'retrying') \
+                     ORDER BY execution.id \
+                     FOR UPDATE OF execution SKIP LOCKED LIMIT $3\
+                 ) \
+                 UPDATE executions execution SET \
+                     status = 'failed', next_attempt_at = NULL, \
+                     failure_reason = $4, lease_owner = NULL, lease_expires_at = NULL \
+                 FROM candidates \
+                 WHERE execution.id = candidates.id",
+            )
+            .bind(org_id)
+            .bind(principal_id)
+            .bind(limit)
+            .bind(IAM_REVOCATION_FAILURE_REASON)
+            .execute(&mut **transaction)
+            .await?
+        }
+        IamLifecycleTarget::Organization { org_id } => {
+            sqlx::query(
+                "WITH candidates AS (\
+                     SELECT execution.id \
+                     FROM executions execution \
+                     JOIN schedules schedule ON schedule.id = execution.schedule_id \
+                     WHERE schedule.org_id = $1 \
+                       AND execution.status IN ('pending', 'retrying') \
+                     ORDER BY execution.id \
+                     FOR UPDATE OF execution SKIP LOCKED LIMIT $2\
+                 ) \
+                 UPDATE executions execution SET \
+                     status = 'failed', next_attempt_at = NULL, \
+                     failure_reason = $3, lease_owner = NULL, lease_expires_at = NULL \
+                 FROM candidates \
+                 WHERE execution.id = candidates.id",
+            )
+            .bind(org_id)
+            .bind(limit)
+            .bind(IAM_REVOCATION_FAILURE_REASON)
+            .execute(&mut **transaction)
+            .await?
+        }
+    };
+    Ok(result.rows_affected())
+}
+
+async fn fail_revoked_unaccepted_executions(
+    transaction: &mut Transaction<'_, Postgres>,
+    limit: i64,
+) -> Result<u64, RepositoryError> {
+    sqlx::query(
+        "WITH candidates AS (\
+             SELECT execution.id \
+             FROM executions execution \
+             JOIN schedules schedule ON schedule.id = execution.schedule_id \
+             LEFT JOIN organization_lifecycle organization \
+               ON organization.org_id = schedule.org_id \
+             LEFT JOIN silicon_identities identity \
+               ON identity.org_id = schedule.org_id \
+              AND identity.principal_id = schedule.owner_principal_id \
+             WHERE execution.status IN ('pending', 'retrying') \
+               AND (\
+                   organization.state IS DISTINCT FROM 'active' \
+                   OR identity.state IS DISTINCT FROM 'active'\
+               ) \
+             ORDER BY execution.id \
+             FOR UPDATE OF execution SKIP LOCKED LIMIT $1\
+         ) \
+         UPDATE executions execution SET \
+             status = 'failed', next_attempt_at = NULL, \
+             failure_reason = $2, lease_owner = NULL, lease_expires_at = NULL \
+         FROM candidates \
+         WHERE execution.id = candidates.id",
+    )
+    .bind(limit)
+    .bind(IAM_REVOCATION_FAILURE_REASON)
     .execute(&mut **transaction)
     .await
     .map(|result| result.rows_affected())

@@ -84,7 +84,7 @@ pub struct ScheduleRow {
     pub next_run_at: Option<DateTime<Utc>>,
     /// Monotonic optimistic-lock version.
     pub version: i64,
-    /// One-time terminal transition timestamp.
+    /// Time at which a one-time reminder's sole trigger entered archive.
     pub completed_at: Option<DateTime<Utc>>,
     /// Soft-deletion timestamp.
     pub deleted_at: Option<DateTime<Utc>>,

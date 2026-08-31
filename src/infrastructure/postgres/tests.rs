@@ -25,8 +25,11 @@ struct LifecycleFixture {
     now: DateTime<Utc>,
     target_principal_id: Uuid,
     target_schedule_id: Uuid,
+    completed_schedule_id: Uuid,
     other_schedule_id: Uuid,
     execution_id: Uuid,
+    completed_execution_id: Uuid,
+    completed_at: DateTime<Utc>,
 }
 
 struct VisibilityFixture {
@@ -36,6 +39,14 @@ struct VisibilityFixture {
     second_allowed_schedule: Uuid,
     allowed_execution: Uuid,
     denied_execution: Uuid,
+}
+
+struct ExpiredArchiveFixture {
+    schedule: Uuid,
+    pending_execution: Uuid,
+    leased_execution: Uuid,
+    created_at: DateTime<Utc>,
+    completed_at: DateTime<Utc>,
 }
 
 #[tokio::test]
@@ -276,7 +287,7 @@ async fn iam_silicon_removal_is_atomic_and_replay_safe() -> anyhow::Result<()> {
         .await?;
     assert!(!outcome.replayed);
     assert_eq!(outcome.schedules_deleted, 1);
-    assert_eq!(outcome.executions_failed, 1);
+    assert_eq!(outcome.executions_failed, 2);
     assert_eq!(outcome.receipt.status, "processed");
     assert_silicon_removal_state(&database.pool, &fixture).await?;
 
@@ -371,6 +382,51 @@ async fn schedule_purge_logs_full_snapshot_and_trims_deterministic_oldest() -> a
     assert_purge_source_removed_and_audited(&database.pool, &fixture, ledger_id).await?;
     assert_trim_keeps_deterministic_newest(&database.pool, &fixture).await?;
     assert_ledger_conflict_preserves_source(&database).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_one_time_purge_logs_automatic_archive_snapshot() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let fixture = seed_expired_archive(&database.pool).await?;
+    let purged_at = Utc::now();
+    let result = database
+        .repository
+        .purge_expired_schedules(purged_at, 100, "completed-purge-test-worker")
+        .await?;
+    assert_eq!(result.purged, 1);
+    assert_eq!(result.logged, 1);
+
+    let ledger = sqlx::query_as::<_, DeletedReminderRow>(
+        "SELECT id, schedule_id, org_id, owner_principal_id, silicon_id, \
+                reminder_text, schedule_kind, cron_expression, timezone, \
+                last_triggered_at, created_at, archived_at, purge_after, purged_at, \
+                purge_reason, record_text \
+         FROM deleted_reminders WHERE schedule_id = $1",
+    )
+    .bind(fixture.schedule)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(ledger.schedule_kind, "one_time");
+    assert_eq!(ledger.created_at, fixture.created_at);
+    assert_eq!(ledger.archived_at, fixture.completed_at);
+    assert_eq!(
+        ledger.purge_after,
+        fixture.completed_at + Duration::days(crate::domain::ARCHIVE_RETENTION_DAYS)
+    );
+    assert_eq!(ledger.purged_at, purged_at);
+    assert_eq!(ledger.last_triggered_at, Some(fixture.completed_at));
+    assert_eq!(ledger.purge_reason, "completed");
+    let record = serde_json::from_str::<Value>(&ledger.record_text)?;
+    assert_eq!(record["archived_at"], json!(fixture.completed_at));
+    assert_eq!(record["purge_reason"], "completed");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM schedules WHERE id = $1")
+            .bind(fixture.schedule)
+            .fetch_one(&database.pool)
+            .await?,
+        0
+    );
     Ok(())
 }
 
@@ -722,6 +778,7 @@ async fn current_and_archived_sections_are_partitioned_before_pagination() -> an
         schedule_archive_state(&database.pool, automatic_id).await?,
         automatic_before
     );
+    assert_cancelled_execution(&database.pool, automatic_execution.id).await?;
     Ok(())
 }
 
@@ -781,6 +838,307 @@ async fn assert_schedule_sections(
         automatic_execution_id
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn manual_archive_cancels_unaccepted_work_without_extending_retention() -> anyhow::Result<()>
+{
+    let database = test_database().await?;
+    let now = Utc::now();
+    let schedule_id =
+        seed_due_schedule(&database.pool, "archive-cancel:tos", now, "recurring").await?;
+    let execution_ids =
+        seed_unaccepted_archive_executions(&database.pool, schedule_id, now).await?;
+    let owner = schedule_owner(&database.pool, schedule_id).await?;
+    let archived_at = now + Duration::seconds(1);
+
+    assert!(
+        database
+            .repository
+            .archive_schedule("tos", owner, schedule_id, archived_at, &service_audit())
+            .await?
+    );
+    assert_manual_archive_cancellation(&database.pool, schedule_id, &execution_ids).await?;
+    assert!(
+        !database
+            .repository
+            .delivery_lease_is_live(execution_ids[1], "archive-test-worker", archived_at)
+            .await?
+    );
+
+    let original_state = manual_archive_state(&database.pool, schedule_id).await?;
+    assert!(
+        !database
+            .repository
+            .archive_schedule(
+                "tos",
+                owner,
+                schedule_id,
+                archived_at + Duration::days(1),
+                &service_audit(),
+            )
+            .await?
+    );
+    assert_eq!(
+        manual_archive_state(&database.pool, schedule_id).await?,
+        original_state
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_archive_is_hidden_and_cannot_resume_delivery() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let fixture = seed_expired_archive(&database.pool).await?;
+    let read_scope = ReminderReadScope::organization();
+
+    let archived = database
+        .repository
+        .list_schedules(&ListSchedules {
+            org_id: "tos".to_owned(),
+            read_scope: read_scope.clone(),
+            silicon_id: None,
+            section: ScheduleSection::Archived,
+            status: None,
+            cursor: None,
+            limit: 100,
+        })
+        .await?;
+    assert!(archived.items.is_empty());
+    assert!(
+        database
+            .repository
+            .get_schedule("tos", fixture.schedule, &read_scope)
+            .await?
+            .is_none()
+    );
+    assert!(
+        database
+            .repository
+            .get_execution("tos", fixture.pending_execution, &read_scope)
+            .await?
+            .is_none()
+    );
+    assert!(matches!(
+        database
+            .repository
+            .list_executions("tos", fixture.schedule, &read_scope, None, 100)
+            .await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    let now = Utc::now();
+    assert!(
+        database
+            .repository
+            .claim_deliveries(
+                "expiry-test-worker",
+                now,
+                std::time::Duration::from_secs(300),
+                100,
+            )
+            .await?
+            .is_empty()
+    );
+    assert!(
+        !database
+            .repository
+            .delivery_lease_is_live(fixture.leased_execution, "expired-lease-worker", now,)
+            .await?
+    );
+    assert!(matches!(
+        database
+            .repository
+            .mark_delivery_failed(
+                fixture.leased_execution,
+                "expired-lease-worker",
+                now,
+                "must remain expired",
+            )
+            .await,
+        Err(RepositoryError::LeaseLost)
+    ));
+    Ok(())
+}
+
+async fn seed_unaccepted_archive_executions(
+    pool: &PgPool,
+    schedule_id: Uuid,
+    now: DateTime<Utc>,
+) -> anyhow::Result<[Uuid; 2]> {
+    let pending_id = Uuid::now_v7();
+    let retrying_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO executions (\
+             id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
+             scheduled_for, reminder_text, timezone, status, attempt_count, \
+             next_attempt_at, attempted_at, failure_reason, lease_owner, lease_expires_at\
+         ) VALUES \
+             ($1, $3, 'tos', 'archive-cancel:tos', 1, 'recurring', $4, \
+              'pending archive', 'UTC', 'pending', 0, $6, NULL, NULL, NULL, NULL), \
+             ($2, $3, 'tos', 'archive-cancel:tos', 1, 'recurring', $5, \
+              'retrying archive', 'UTC', 'retrying', 1, $6, $4, \
+              'temporary failure', 'archive-test-worker', $7)",
+    )
+    .bind(pending_id)
+    .bind(retrying_id)
+    .bind(schedule_id)
+    .bind(now - Duration::minutes(3))
+    .bind(now - Duration::minutes(2))
+    .bind(now - Duration::minutes(1))
+    .bind(now + Duration::minutes(5))
+    .execute(pool)
+    .await?;
+    Ok([pending_id, retrying_id])
+}
+
+async fn assert_manual_archive_cancellation(
+    pool: &PgPool,
+    schedule_id: Uuid,
+    execution_ids: &[Uuid; 2],
+) -> anyhow::Result<()> {
+    let states = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+        ),
+    >(
+        "SELECT id, status, next_attempt_at, lease_owner, lease_expires_at, failure_reason \
+         FROM executions WHERE id = ANY($1) ORDER BY id",
+    )
+    .bind(execution_ids.as_slice())
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(states.len(), 2);
+    for (_, status, next_attempt_at, lease_owner, lease_expires_at, failure_reason) in states {
+        assert_eq!(status, "failed");
+        assert!(next_attempt_at.is_none());
+        assert!(lease_owner.is_none());
+        assert!(lease_expires_at.is_none());
+        assert_eq!(
+            failure_reason.as_deref(),
+            Some("stopped after reminder archive")
+        );
+    }
+    let metadata = sqlx::query_scalar::<_, Value>(
+        "SELECT metadata FROM audit_records \
+         WHERE action = 'schedule.archived' AND resource_id = $1",
+    )
+    .bind(schedule_id.to_string())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(metadata["executions_cancelled"], 2);
+    Ok(())
+}
+
+async fn assert_cancelled_execution(pool: &PgPool, execution_id: Uuid) -> anyhow::Result<()> {
+    let (status, next_attempt_at, lease_owner, failure_reason) = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT status, next_attempt_at, lease_owner, failure_reason \
+         FROM executions WHERE id = $1",
+    )
+    .bind(execution_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(status, "failed");
+    assert!(next_attempt_at.is_none());
+    assert!(lease_owner.is_none());
+    assert_eq!(
+        failure_reason.as_deref(),
+        Some("stopped after reminder archive")
+    );
+    Ok(())
+}
+
+async fn manual_archive_state(
+    pool: &PgPool,
+    schedule_id: Uuid,
+) -> anyhow::Result<(i64, DateTime<Utc>, DateTime<Utc>)> {
+    sqlx::query_as("SELECT version, deleted_at, purge_after FROM schedules WHERE id = $1")
+        .bind(schedule_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+}
+
+async fn seed_expired_archive(pool: &PgPool) -> anyhow::Result<ExpiredArchiveFixture> {
+    let now = Utc::now();
+    let completed_at = now - Duration::days(46);
+    let created_at = completed_at - Duration::days(1);
+    let owner_principal_id = Uuid::now_v7();
+    let schedule_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO organization_lifecycle (org_id, state) \
+         VALUES ('tos', 'active') ON CONFLICT (org_id) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO silicon_identities (org_id, principal_id, silicon_id, state) \
+         VALUES ('tos', $1, 'expired-archive:tos', 'active')",
+    )
+    .bind(owner_principal_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, completed_at, \
+             created_at, updated_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'expired-archive:tos', 'expired archive', 'UTC', \
+             'one_time', '* * * * *', 'completed', NULL, $3, $4, $3\
+         )",
+    )
+    .bind(schedule_id)
+    .bind(owner_principal_id)
+    .bind(completed_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+
+    let pending_execution_id = Uuid::now_v7();
+    let leased_execution_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO executions (\
+             id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
+             scheduled_for, reminder_text, timezone, status, attempt_count, \
+             next_attempt_at, attempted_at, failure_reason, lease_owner, lease_expires_at\
+         ) VALUES \
+             ($1, $3, 'tos', 'expired-archive:tos', 2, 'one_time', $4, \
+              'expired pending', 'UTC', 'pending', 0, $6, NULL, NULL, NULL, NULL), \
+             ($2, $3, 'tos', 'expired-archive:tos', 2, 'one_time', $5, \
+              'expired leased', 'UTC', 'retrying', 1, $6, $5, \
+              'temporary failure', 'expired-lease-worker', $7)",
+    )
+    .bind(pending_execution_id)
+    .bind(leased_execution_id)
+    .bind(schedule_id)
+    .bind(completed_at)
+    .bind(completed_at - Duration::minutes(1))
+    .bind(now - Duration::minutes(1))
+    .bind(now + Duration::minutes(5))
+    .execute(pool)
+    .await?;
+    Ok(ExpiredArchiveFixture {
+        schedule: schedule_id,
+        pending_execution: pending_execution_id,
+        leased_execution: leased_execution_id,
+        created_at,
+        completed_at,
+    })
 }
 
 #[tokio::test]
@@ -1223,6 +1581,7 @@ async fn assert_schedule_state(
 async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixture> {
     let now = Utc::now();
     let target_schedule_id = Uuid::now_v7();
+    let completed_schedule_id = Uuid::now_v7();
     let other_schedule_id = Uuid::now_v7();
     let target_principal_id = Uuid::now_v7();
     let other_principal_id = Uuid::now_v7();
@@ -1244,6 +1603,24 @@ async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixtur
     .execute(pool)
     .await?;
 
+    let completed_at = now - Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, completed_at, \
+             created_at, updated_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'removed:tos', 'completed target', 'UTC', \
+             'one_time', '* * * * *', 'completed', NULL, $3, $4, $3\
+         )",
+    )
+    .bind(completed_schedule_id)
+    .bind(target_principal_id)
+    .bind(completed_at)
+    .bind(completed_at - Duration::hours(1))
+    .execute(pool)
+    .await?;
+
     let execution_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO executions (\
@@ -1262,12 +1639,30 @@ async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixtur
     .bind(now + Duration::minutes(5))
     .execute(pool)
     .await?;
+    let completed_execution_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO executions (\
+             id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
+             scheduled_for, reminder_text, timezone, status, next_attempt_at\
+         ) VALUES (\
+             $1, $2, 'tos', 'removed:tos', 2, 'one_time', $3, \
+             'completed target', 'UTC', 'pending', $3\
+         )",
+    )
+    .bind(completed_execution_id)
+    .bind(completed_schedule_id)
+    .bind(completed_at)
+    .execute(pool)
+    .await?;
     Ok(LifecycleFixture {
         now,
         target_principal_id,
         target_schedule_id,
+        completed_schedule_id,
         other_schedule_id,
         execution_id,
+        completed_execution_id,
+        completed_at,
     })
 }
 
@@ -1346,6 +1741,26 @@ async fn assert_silicon_removal_state(
     assert!(execution_state.1.is_none());
     assert!(execution_state.2.is_none());
     assert!(execution_state.3.is_none());
+
+    let completed_state =
+        sqlx::query_as::<_, (Option<DateTime<Utc>>, DateTime<Utc>, DateTime<Utc>, String)>(
+            "SELECT schedule.deleted_at, schedule.completed_at, schedule.purge_after, \
+                execution.status \
+         FROM schedules schedule \
+         JOIN executions execution ON execution.schedule_id = schedule.id \
+         WHERE schedule.id = $1 AND execution.id = $2",
+        )
+        .bind(fixture.completed_schedule_id)
+        .bind(fixture.completed_execution_id)
+        .fetch_one(pool)
+        .await?;
+    assert!(completed_state.0.is_none());
+    assert_eq!(completed_state.1, fixture.completed_at);
+    assert_eq!(
+        completed_state.2,
+        fixture.completed_at + Duration::days(crate::domain::ARCHIVE_RETENTION_DAYS)
+    );
+    assert_eq!(completed_state.3, "failed");
     Ok(())
 }
 

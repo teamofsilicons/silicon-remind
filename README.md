@@ -13,7 +13,9 @@ occurrence.
 The default schedule view contains current reminders. Owner-archived reminders
 and one-time reminders whose cron trigger has materialized remain readable in
 the archived section, with execution history, for exactly 45 days before the
-retention worker permanently removes them.
+retention worker permanently removes them. Read and delivery queries enforce
+the deadline independently, so a delayed sweep cannot extend access or send an
+expired reminder.
 
 The service is a Rust modular monolith with three independently runnable
 processes:

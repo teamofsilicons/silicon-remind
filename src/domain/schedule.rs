@@ -64,7 +64,7 @@ pub enum ScheduleStatus {
     Active,
     /// Future occurrences are suppressed until the owner resumes the schedule.
     Paused,
-    /// A one-time schedule reached a worker-owned terminal state.
+    /// A one-time schedule materialized its sole trigger and entered archive.
     Completed,
 }
 

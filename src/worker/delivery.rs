@@ -129,6 +129,18 @@ impl DeliveryProcessor {
                 return self.finish_failure(&execution, error).await;
             }
         };
+        let attempted_at = self.clock.now();
+        if !self
+            .repository
+            .delivery_lease_is_live(execution.id, &self.worker_id, attempted_at)
+            .await?
+        {
+            tracing::debug!(
+                execution.id = %execution.id,
+                "skipping delivery whose lease or schedule is no longer live"
+            );
+            return Ok(());
+        }
         let event = ReminderEvent {
             execution_id: execution.id,
             schedule_id: execution.schedule_id,
@@ -137,7 +149,6 @@ impl DeliveryProcessor {
             scheduled_for: execution.scheduled_for,
             timezone: execution.timezone.clone(),
         };
-        let attempted_at = self.clock.now();
         match self
             .hook_client
             .deliver(&destination, &event, attempted_at)
