@@ -475,3 +475,19 @@ the stable code `webhook_not_configured` and the product-required message
 separate `silicon_unavailable` conflict because configuration cannot repair
 revoked authority. A committed idempotent replay returns its original response
 even if the destination is disabled later.
+
+## D-033 — IAM's event vocabulary is open but its lifecycle projections are strict
+
+**Status:** Accepted; clarifies D-025 and D-030
+
+IAM may add versioned application events without coordinating a Remind release.
+Remind therefore accepts lowercase dotted event names ending in a positive
+`vN`, authenticates and deduplicates their exact envelope, and records unknown
+valid types as durable processed no-ops. A closed Rust enum would incorrectly
+turn additive producer events into delivery failures.
+
+The membership-removal and disabled-organization types remain explicitly
+recognized and their aggregate/data projections remain fail-closed. Remind
+does not infer a public organization or principal UUID from IAM internal IDs.
+The checked-in IAM producer must still migrate its removal payload and aggregate
+type to the published application-webhook contract before deployment.

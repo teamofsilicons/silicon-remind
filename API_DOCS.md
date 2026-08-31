@@ -46,6 +46,11 @@ Remind state. An `organization.updated.v1` event whose data reports
 accepted idempotently as durable no-ops until Remind assigns event-specific behavior. Hook-destination
 provisioning endpoints remain protected by the internal bearer credential.
 
+Event names are validated as lowercase dotted identifiers ending in a positive
+`vN` schema version rather than deserialized through a closed enum. This keeps
+IAM's additive event vocabulary forward-compatible while the two lifecycle
+events above retain strict event-specific payload validation.
+
 ## Schedules
 
 ### `GET /schedules`

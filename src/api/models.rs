@@ -300,54 +300,83 @@ pub struct IamWebhookEvent {
     pub data: Map<String, Value>,
 }
 
-/// Initial Silicon IAM application webhook event types.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum IamWebhookEventType {
-    /// A Carbon's public projection changed.
-    #[serde(rename = "carbon.updated.v1")]
-    CarbonUpdated,
-    /// An organization's public projection changed.
-    #[serde(rename = "organization.updated.v1")]
-    OrganizationUpdated,
-    /// An organization membership was created.
-    #[serde(rename = "organization.membership.created.v1")]
-    OrganizationMembershipCreated,
-    /// An organization membership changed.
-    #[serde(rename = "organization.membership.updated.v1")]
-    OrganizationMembershipUpdated,
-    /// An organization membership was removed.
-    #[serde(rename = "organization.membership.removed.v1")]
-    OrganizationMembershipRemoved,
-    /// A Silicon's public projection changed.
-    #[serde(rename = "silicon.updated.v1")]
-    SiliconUpdated,
-    /// An effective role changed.
-    #[serde(rename = "role.changed.v1")]
-    RoleChanged,
-    /// An authenticated session logged out.
-    #[serde(rename = "session.logout.v1")]
-    SessionLogout,
-    /// IAM initialized a Silicon's Hook integration.
-    #[serde(rename = "iam.silicon.initialized.v1")]
-    IamSiliconInitialized,
-}
+/// Validated, versioned Silicon IAM application event name.
+///
+/// IAM's event vocabulary is additive. Remind interprets the lifecycle events
+/// it owns and durably records every other syntactically valid event as a no-op,
+/// allowing a newer IAM producer to add projections without breaking delivery.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct IamWebhookEventType(String);
 
 impl IamWebhookEventType {
-    /// Returns the exact versioned event-type spelling used on the wire.
+    /// Organization disablement may revoke the entire tenant.
+    pub const ORGANIZATION_UPDATED: &'static str = "organization.updated.v1";
+    /// Silicon membership removal may revoke one principal.
+    pub const ORGANIZATION_MEMBERSHIP_REMOVED: &'static str = "organization.membership.removed.v1";
+
+    /// Returns the exact validated event-type spelling used on the wire.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CarbonUpdated => "carbon.updated.v1",
-            Self::OrganizationUpdated => "organization.updated.v1",
-            Self::OrganizationMembershipCreated => "organization.membership.created.v1",
-            Self::OrganizationMembershipUpdated => "organization.membership.updated.v1",
-            Self::OrganizationMembershipRemoved => "organization.membership.removed.v1",
-            Self::SiliconUpdated => "silicon.updated.v1",
-            Self::RoleChanged => "role.changed.v1",
-            Self::SessionLogout => "session.logout.v1",
-            Self::IamSiliconInitialized => "iam.silicon.initialized.v1",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
+
+    /// Returns whether this is the exact supplied event schema.
+    #[must_use]
+    pub fn is(&self, event_type: &str) -> bool {
+        self.0 == event_type
+    }
+
+    fn parse(value: String) -> Option<Self> {
+        is_versioned_iam_event_name(&value).then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for IamWebhookEventType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).ok_or_else(|| {
+            serde::de::Error::custom("event_type must be a versioned dotted IAM event name")
+        })
+    }
+}
+
+impl Serialize for IamWebhookEventType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+fn is_versioned_iam_event_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > 255 {
+        return false;
+    }
+    let mut segments = value.split('.').peekable();
+    let mut semantic_segments = 0_usize;
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_none() {
+            let Some(version) = segment.strip_prefix('v') else {
+                return false;
+            };
+            return semantic_segments >= 2
+                && !version.is_empty()
+                && !version.starts_with('0')
+                && version.bytes().all(|byte| byte.is_ascii_digit());
+        }
+        let mut bytes = segment.bytes();
+        if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return false;
+        }
+        semantic_segments += 1;
+    }
+    false
 }
 
 /// Aggregate metadata carried by each IAM webhook event.
@@ -415,10 +444,37 @@ mod tests {
         )?;
 
         assert_eq!(
-            event.event_type,
-            IamWebhookEventType::OrganizationMembershipRemoved
+            event.event_type.as_str(),
+            IamWebhookEventType::ORGANIZATION_MEMBERSHIP_REMOVED
         );
         assert_eq!(event.aggregate.aggregate_type, "membership");
         Ok(())
+    }
+
+    #[test]
+    fn iam_webhook_accepts_additive_versioned_events_and_rejects_invalid_names() {
+        for event_type in [
+            "organization.silicon.created.v1",
+            "organization.silicon.updated.v1",
+            "organization.tag_archived.v2",
+        ] {
+            let parsed = serde_json::from_value::<IamWebhookEventType>(serde_json::Value::String(
+                event_type.to_owned(),
+            ));
+            assert!(parsed.is_ok(), "valid additive event {event_type} rejected");
+        }
+        for event_type in [
+            "silicon.updated",
+            "organization..updated.v1",
+            "Organization.updated.v1",
+            "organization.updated.v0",
+            "organization.updated.v01",
+            "organization.updated.v1.extra",
+        ] {
+            let parsed = serde_json::from_value::<IamWebhookEventType>(serde_json::Value::String(
+                event_type.to_owned(),
+            ));
+            assert!(parsed.is_err(), "invalid event {event_type} accepted");
+        }
     }
 }

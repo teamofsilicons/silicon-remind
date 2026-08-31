@@ -155,9 +155,11 @@ Remind applies local lifecycle state for two projections:
 - `organization.updated.v1` with `data.org_id` and `data.status: "disabled"`.
   The entire organization is revoked.
 
-The other event types in IAM's initial published vocabulary are authenticated,
-validated, and durably recorded as processed no-ops. Unsupported event names or
-versions fail validation so contract drift is visible.
+Every other syntactically valid, positively versioned IAM event name is
+authenticated and durably recorded as a processed no-op. This includes future
+additive producer events. Malformed event names, invalid envelope versions, and
+invalid payload field types still fail validation so wire corruption remains
+visible.
 
 A newly accepted or exactly replayed event returns `202 Accepted`:
 

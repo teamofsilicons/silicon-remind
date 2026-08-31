@@ -218,31 +218,36 @@ fn prepare_iam_event(
     }
 
     let mut applies_lifecycle = false;
-    let (org_id, subject_id) =
-        if event.event_type == models::IamWebhookEventType::OrganizationMembershipRemoved {
-            if event.aggregate.aggregate_type != "membership" {
-                return Err(AppError::Validation);
-            }
-            let data =
-                serde_json::from_value::<MembershipRemovedData>(Value::Object(event.data.clone()))
-                    .map_err(|_| AppError::Validation)?;
-            validate_iam_org_id(&data.org_id)?;
-            applies_lifecycle = data.principal_type == MembershipPrincipalType::Silicon;
-            (Some(data.org_id), Some(data.principal_id.to_string()))
-        } else {
-            let org_id = optional_string_field(&event.data, "org_id")?;
-            if let Some(org_id) = org_id.as_deref() {
-                validate_iam_org_id(org_id)?;
-            }
-            let subject_id = optional_uuid_field(&event.data, "principal_id")?;
-            if event.event_type == models::IamWebhookEventType::OrganizationUpdated {
-                applies_lifecycle = matches!(
-                    optional_string_field(&event.data, "status")?.as_deref(),
-                    Some("disabled")
-                );
-            }
-            (org_id, subject_id.map(|id| id.to_string()))
-        };
+    let (org_id, subject_id) = if event
+        .event_type
+        .is(models::IamWebhookEventType::ORGANIZATION_MEMBERSHIP_REMOVED)
+    {
+        if event.aggregate.aggregate_type != "membership" {
+            return Err(AppError::Validation);
+        }
+        let data =
+            serde_json::from_value::<MembershipRemovedData>(Value::Object(event.data.clone()))
+                .map_err(|_| AppError::Validation)?;
+        validate_iam_org_id(&data.org_id)?;
+        applies_lifecycle = data.principal_type == MembershipPrincipalType::Silicon;
+        (Some(data.org_id), Some(data.principal_id.to_string()))
+    } else {
+        let org_id = optional_string_field(&event.data, "org_id")?;
+        if let Some(org_id) = org_id.as_deref() {
+            validate_iam_org_id(org_id)?;
+        }
+        let subject_id = optional_uuid_field(&event.data, "principal_id")?;
+        if event
+            .event_type
+            .is(models::IamWebhookEventType::ORGANIZATION_UPDATED)
+        {
+            applies_lifecycle = matches!(
+                optional_string_field(&event.data, "status")?.as_deref(),
+                Some("disabled")
+            );
+        }
+        (org_id, subject_id.map(|id| id.to_string()))
+    };
 
     Ok((
         NewInternalEvent {
@@ -378,7 +383,7 @@ mod tests {
         assert!(applies_lifecycle);
         assert_eq!(
             event.event_type,
-            IamWebhookEventType::OrganizationMembershipRemoved.as_str()
+            IamWebhookEventType::ORGANIZATION_MEMBERSHIP_REMOVED
         );
         assert_eq!(event.org_id.as_deref(), Some("tos"));
         assert_eq!(
@@ -446,6 +451,37 @@ mod tests {
         assert!(applies_lifecycle);
         assert_eq!(event.org_id.as_deref(), Some("tos"));
         assert!(event.subject_id.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn additive_iam_event_is_prepared_as_a_durable_noop() -> anyhow::Result<()> {
+        let payload = json!({
+            "spec_version": "1.0",
+            "event_id": "0198f74d-7ef7-7c9f-95bf-7d403a61e5ca",
+            "event_type": "organization.silicon.updated.v1",
+            "occurred_at": "2026-08-31T12:00:00Z",
+            "aggregate": {
+                "id": "0198f74d-7ef7-7c9f-95bf-7d403a61e5cb",
+                "type": "silicon",
+                "version": 9
+            },
+            "data": {
+                "org_id": "tos",
+                "principal_id": "0198f74d-7ef7-7c9f-95bf-7d403a61e5cc"
+            }
+        });
+        let event = serde_json::from_value::<IamWebhookEvent>(payload.clone())?;
+        let (event, applies_lifecycle) = prepare_iam_event(
+            &event,
+            payload,
+            Sha256::digest(b"additive event wire bytes").into(),
+            received_at(),
+        )?;
+
+        assert!(!applies_lifecycle);
+        assert_eq!(event.event_type, "organization.silicon.updated.v1");
+        assert_eq!(event.org_id.as_deref(), Some("tos"));
         Ok(())
     }
 
