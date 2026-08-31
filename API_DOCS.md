@@ -79,8 +79,12 @@ eligible.
 
 The creator's stable IAM principal becomes the owner, while responses expose its
 public global Silicon ID. Trusted Hook provisioning must establish that binding
-first; otherwise creation returns `409 silicon_unavailable`. Remind calculates
-and returns `next_run_at`.
+and leave the destination enabled first. Otherwise creation returns HTTP `409`
+with code `webhook_not_configured` and the exact message
+`Set the webhook url first.` Remind recalculates this prerequisite inside the
+creation transaction, so a concurrent destination disable cannot race a
+successful first request. An exact committed idempotency replay still returns
+its original response. Remind calculates and returns `next_run_at`.
 
 ### `GET /schedules/{schedule_id}`
 

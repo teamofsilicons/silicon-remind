@@ -56,6 +56,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Schedule' }
+        '409': { $ref: '#/components/responses/WebhookNotConfigured' }
         default: { $ref: '#/components/responses/Error' }
   /schedules/{schedule_id}:
     parameters:
@@ -157,6 +158,16 @@ components:
       in: query
       schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
   responses:
+    WebhookNotConfigured:
+      description: The authenticated Silicon has no active Hook destination.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: webhook_not_configured
+              message: Set the webhook url first.
+              request_id: 0199d8d5-2f62-7eb7-81c5-1e456778f8de
     Error:
       description: Error
       content:

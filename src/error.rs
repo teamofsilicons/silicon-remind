@@ -28,6 +28,9 @@ pub enum AppError {
         /// Stable, machine-readable conflict code.
         code: Cow<'static, str>,
     },
+    /// The authenticated Silicon has no active Hook delivery destination.
+    #[error("the Silicon must configure its webhook before creating reminders")]
+    WebhookNotConfigured,
     /// Caller exceeded a request or abuse-control limit.
     #[error("rate limit exceeded")]
     RateLimited {
@@ -107,7 +110,7 @@ impl AppError {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
-            Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::Conflict { .. } | Self::WebhookNotConfigured => StatusCode::CONFLICT,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -127,6 +130,7 @@ impl AppError {
             Self::Forbidden => Cow::Borrowed("forbidden"),
             Self::NotFound => Cow::Borrowed("not_found"),
             Self::Conflict { code } => code.clone(),
+            Self::WebhookNotConfigured => Cow::Borrowed("webhook_not_configured"),
             Self::RateLimited { .. } => Cow::Borrowed("rate_limited"),
             Self::Timeout => Cow::Borrowed("request_timeout"),
             Self::PayloadTooLarge => Cow::Borrowed("payload_too_large"),
@@ -144,6 +148,7 @@ impl AppError {
             Self::Forbidden => "The actor is not authorized for this action.",
             Self::NotFound => "The requested resource was not found.",
             Self::Conflict { .. } => "The request conflicts with the current resource state.",
+            Self::WebhookNotConfigured => "Set the webhook url first.",
             Self::RateLimited { .. } => "Too many requests. Retry later.",
             Self::Timeout => "The request exceeded its processing deadline.",
             Self::PayloadTooLarge => "The request body exceeds the allowed size.",
@@ -225,6 +230,7 @@ impl From<crate::infrastructure::postgres::RepositoryError> for AppError {
             RepositoryError::IdempotencyIncomplete => Self::conflict("idempotency_in_progress"),
             RepositoryError::EventReceiptConflict => Self::conflict("event_id_conflict"),
             RepositoryError::SiliconUnavailable => Self::conflict("silicon_unavailable"),
+            RepositoryError::WebhookNotConfigured => Self::WebhookNotConfigured,
             RepositoryError::NotFound => Self::NotFound,
             RepositoryError::VersionConflict => Self::conflict("schedule_version_conflict"),
             RepositoryError::InvalidState => Self::conflict("invalid_schedule_state"),
@@ -261,6 +267,21 @@ mod tests {
         assert_eq!(value["error"]["code"], "not_found");
         assert_eq!(value["error"]["request_id"], "req_42");
         assert!(value["error"].get("message").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_webhook_uses_the_product_required_message() -> anyhow::Result<()> {
+        let response = crate::request_context::scope("req_webhook".to_owned(), async {
+            AppError::WebhookNotConfigured.into_response()
+        })
+        .await;
+        assert_eq!(response.status(), http::StatusCode::CONFLICT);
+
+        let body = response.into_body().collect().await?.to_bytes();
+        let value: Value = serde_json::from_slice(&body)?;
+        assert_eq!(value["error"]["code"], "webhook_not_configured");
+        assert_eq!(value["error"]["message"], "Set the webhook url first.");
         Ok(())
     }
 

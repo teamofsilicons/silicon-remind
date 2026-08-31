@@ -119,7 +119,7 @@ the IAM principal UUID, immutable public global Silicon ID, exact Hook endpoint,
 and one-time `whsec_` credential. This bearer-protected operation establishes
 the authorization-to-routing identity binding and encrypts the destination
 material. Until it succeeds, schedule creation fails closed with
-`409 silicon_unavailable`.
+`409 webhook_not_configured` and `Set the webhook url first.`
 
 Destination rotation uses the same `PUT`; explicit disable uses
 `DELETE /internal/v1/hook-destinations/{org_id}/{silicon_id}`. IAM revocation

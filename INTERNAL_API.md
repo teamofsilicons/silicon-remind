@@ -78,10 +78,12 @@ principal/public-ID binding returns `200 OK`:
 
 Registration atomically establishes the principal-to-public-ID binding and
 stores the endpoint URL and signing secret encrypted. A Silicon cannot create a
-schedule before this binding exists; the public create operation returns
-`409 silicon_unavailable`. A different public ID for an established principal,
-or any provisioning attempt after an IAM revocation tombstone, also returns
-that conflict and cannot silently reactivate the identity.
+schedule before an enabled destination exists. The public create operation
+returns `409 webhook_not_configured` with `Set the webhook url first.` when the
+binding or enabled destination is absent. A different public ID for an
+established principal, or any provisioning attempt after an IAM revocation
+tombstone, instead returns `409 silicon_unavailable` and cannot silently
+reactivate the identity.
 
 ### Disable a destination
 
@@ -92,7 +94,9 @@ DELETE /internal/v1/hook-destinations/{org_id}/{silicon_id}
 A successful disable returns `204 No Content` and immediately prevents further
 delivery through that destination. It does not revoke the IAM identity. The
 encrypted row is retained for 45 days and then permanently purged by a bounded
-worker sweep.
+worker sweep. New schedule creation returns the documented
+`webhook_not_configured` conflict until trusted provisioning rotates or
+re-enables the destination.
 
 ## Silicon IAM application events
 

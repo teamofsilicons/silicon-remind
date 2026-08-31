@@ -92,9 +92,8 @@ impl ScheduleService {
         let owner_principal_id = principal_id(actor)?;
         let identity = self
             .repository
-            .get_active_silicon_identity(&actor.org_id, owner_principal_id)
-            .await?
-            .ok_or_else(|| AppError::conflict("silicon_unavailable"))?;
+            .get_schedulable_silicon_identity(&actor.org_id, owner_principal_id)
+            .await?;
         let validated = command.validate(now).map_err(|_| AppError::Validation)?;
         let schedule = CreateSchedule {
             id: Uuid::now_v7(),

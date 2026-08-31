@@ -112,6 +112,64 @@ impl PostgresRepository {
         .map_err(RepositoryError::from)
     }
 
+    /// Resolves the public Silicon identity only when its Hook destination is
+    /// currently enabled.
+    ///
+    /// A principal that has never been provisioned is reported as a missing
+    /// webhook. A durable IAM or organization tombstone remains a distinct
+    /// unavailable-identity error so revocation cannot be mistaken for a
+    /// recoverable configuration omission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input error for malformed identifiers, a lifecycle error for
+    /// a revoked identity, or a database error.
+    pub async fn get_schedulable_silicon_identity(
+        &self,
+        org_id: &str,
+        principal_id: Uuid,
+    ) -> Result<SiliconIdentityRow, RepositoryError> {
+        validate_org_id(org_id)?;
+        let row = sqlx::query_as::<_, (String, Uuid, Option<String>, String, String, bool)>(
+            "SELECT identity.org_id, identity.principal_id, identity.silicon_id, \
+                    identity.state, organization.state, \
+                    EXISTS (\
+                        SELECT 1 FROM hook_destinations destination \
+                        WHERE destination.org_id = identity.org_id \
+                          AND destination.owner_principal_id = identity.principal_id \
+                          AND destination.silicon_id = identity.silicon_id \
+                          AND destination.disabled_at IS NULL\
+                    ) AS has_destination \
+             FROM silicon_identities identity \
+             JOIN organization_lifecycle organization \
+               ON organization.org_id = identity.org_id \
+             WHERE identity.org_id = $1 AND identity.principal_id = $2",
+        )
+        .bind(org_id)
+        .bind(principal_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some((org_id, principal_id, silicon_id, identity_state, org_state, has_destination)) =
+            row
+        else {
+            return Err(RepositoryError::WebhookNotConfigured);
+        };
+        if identity_state != "active" || org_state != "active" {
+            return Err(RepositoryError::SiliconUnavailable);
+        }
+        let silicon_id = silicon_id.ok_or(RepositoryError::SiliconUnavailable)?;
+        if !has_destination {
+            return Err(RepositoryError::WebhookNotConfigured);
+        }
+
+        Ok(SiliconIdentityRow {
+            org_id,
+            principal_id,
+            silicon_id,
+        })
+    }
+
     /// Begins an explicit transaction for the two-stage due-materialization API.
     ///
     /// # Errors
@@ -394,7 +452,7 @@ impl PostgresRepository {
             });
         }
 
-        lock_active_silicon_identity(
+        lock_schedulable_silicon_identity(
             &mut transaction,
             &schedule.org_id,
             schedule.owner_principal_id,
@@ -2738,32 +2796,49 @@ fn validate_mutating_silicon(
     Ok(())
 }
 
-async fn lock_active_silicon_identity(
+async fn lock_schedulable_silicon_identity(
     transaction: &mut Transaction<'_, Postgres>,
     org_id: &str,
     principal_id: Uuid,
     silicon_id: &str,
 ) -> Result<(), RepositoryError> {
-    let matches = sqlx::query_scalar::<_, bool>(
-        "SELECT true \
+    let lifecycle = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT identity.state, organization.state, identity.silicon_id \
          FROM silicon_identities identity \
          JOIN organization_lifecycle organization \
            ON organization.org_id = identity.org_id \
          WHERE identity.org_id = $1 AND identity.principal_id = $2 \
-           AND identity.silicon_id = $3 AND identity.state = 'active' \
-           AND organization.state = 'active' \
          FOR UPDATE OF identity, organization",
+    )
+    .bind(org_id)
+    .bind(principal_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((identity_state, organization_state, bound_silicon_id)) = lifecycle else {
+        return Err(RepositoryError::WebhookNotConfigured);
+    };
+    if identity_state != "active"
+        || organization_state != "active"
+        || bound_silicon_id.as_deref() != Some(silicon_id)
+    {
+        return Err(RepositoryError::SiliconUnavailable);
+    }
+
+    let destination = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM hook_destinations \
+         WHERE org_id = $1 AND owner_principal_id = $2 AND silicon_id = $3 \
+           AND disabled_at IS NULL \
+         FOR UPDATE",
     )
     .bind(org_id)
     .bind(principal_id)
     .bind(silicon_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    if matches.is_some() {
-        Ok(())
-    } else {
-        Err(RepositoryError::SiliconUnavailable)
+    if destination.is_none() {
+        return Err(RepositoryError::WebhookNotConfigured);
     }
+    Ok(())
 }
 
 fn validate_org_id(value: &str) -> Result<(), RepositoryError> {

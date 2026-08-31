@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use super::{
     ActorType, AuditContext, CreateSchedule, ExecutionRow, IamLifecycleOutcome, IdempotencyContext,
-    NewHookDestination, NewInternalEvent, PostgresRepository, RepositoryError, health_check,
-    migrate,
+    IdempotentMutation, NewHookDestination, NewInternalEvent, PostgresRepository, RepositoryError,
+    health_check, migrate,
 };
 
 struct TestDatabase {
@@ -193,22 +193,27 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
     let database = test_database().await?;
     let principal_id = Uuid::now_v7();
     let audit = service_audit();
+    assert!(matches!(
+        database
+            .repository
+            .get_schedulable_silicon_identity("tos", Uuid::now_v7())
+            .await,
+        Err(RepositoryError::WebhookNotConfigured)
+    ));
+    let destination = NewHookDestination {
+        id: Uuid::now_v7(),
+        org_id: "tos".to_owned(),
+        owner_principal_id: principal_id,
+        silicon_id: "assistant:tos".to_owned(),
+        endpoint_url_ciphertext: vec![1],
+        endpoint_url_nonce: [2; 12],
+        signing_secret_ciphertext: vec![3],
+        signing_secret_nonce: [4; 12],
+        encryption_key_version: 1,
+    };
     database
         .repository
-        .upsert_hook_destination(
-            &NewHookDestination {
-                id: Uuid::now_v7(),
-                org_id: "tos".to_owned(),
-                owner_principal_id: principal_id,
-                silicon_id: "assistant:tos".to_owned(),
-                endpoint_url_ciphertext: vec![1],
-                endpoint_url_nonce: [2; 12],
-                signing_secret_ciphertext: vec![3],
-                signing_secret_nonce: [4; 12],
-                encryption_key_version: 1,
-            },
-            &audit,
-        )
+        .upsert_hook_destination(&destination, &audit)
         .await?;
     let binding = database
         .repository
@@ -216,6 +221,14 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         .await?
         .ok_or_else(|| anyhow::anyhow!("active Silicon binding was not persisted"))?;
     assert_eq!(binding.silicon_id, "assistant:tos");
+    assert_eq!(
+        database
+            .repository
+            .get_schedulable_silicon_identity("tos", principal_id)
+            .await?
+            .silicon_id,
+        "assistant:tos"
+    );
 
     let now = Utc::now();
     let schedule = CreateSchedule {
@@ -240,7 +253,38 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         .repository
         .create_schedule_idempotent(&schedule, &idempotency, &audit)
         .await?;
+    assert_disabled_destination_blocks_new_creation_but_not_replay(
+        &database,
+        &schedule,
+        &idempotency,
+        destination,
+        &audit,
+        now,
+    )
+    .await?;
 
+    assert_revocation_tombstone_blocks_creation(
+        &database,
+        schedule,
+        idempotency,
+        &audit,
+        now,
+        principal_id,
+    )
+    .await?;
+
+    assert_maximum_identifier_binding(&database.repository, &audit).await?;
+    Ok(())
+}
+
+async fn assert_revocation_tombstone_blocks_creation(
+    database: &TestDatabase,
+    mut schedule: CreateSchedule,
+    idempotency: IdempotencyContext,
+    audit: &AuditContext,
+    now: DateTime<Utc>,
+    principal_id: Uuid,
+) -> anyhow::Result<()> {
     let removal = lifecycle_event(
         "binding-removal",
         "organization.membership.removed.v1",
@@ -249,7 +293,7 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
     )?;
     database
         .repository
-        .apply_iam_lifecycle_event(&removal, &audit)
+        .apply_iam_lifecycle_event(&removal, audit)
         .await?;
     assert!(
         database
@@ -266,8 +310,7 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
             .is_none()
     );
 
-    let mut blocked_schedule = schedule;
-    blocked_schedule.id = Uuid::now_v7();
+    schedule.id = Uuid::now_v7();
     let blocked_idempotency = IdempotencyContext {
         key: "binding-create-2".to_owned(),
         request_hash: [8; 32],
@@ -275,11 +318,57 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
     };
     let blocked = database
         .repository
-        .create_schedule_idempotent(&blocked_schedule, &blocked_idempotency, &audit)
+        .create_schedule_idempotent(&schedule, &blocked_idempotency, audit)
         .await;
     assert!(matches!(blocked, Err(RepositoryError::SiliconUnavailable)));
+    Ok(())
+}
 
-    assert_maximum_identifier_binding(&database.repository, &audit).await?;
+async fn assert_disabled_destination_blocks_new_creation_but_not_replay(
+    database: &TestDatabase,
+    schedule: &CreateSchedule,
+    idempotency: &IdempotencyContext,
+    mut destination: NewHookDestination,
+    audit: &AuditContext,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    database
+        .repository
+        .disable_hook_destination("tos", "assistant:tos", now, audit)
+        .await?;
+    let replay = database
+        .repository
+        .create_schedule_idempotent(schedule, idempotency, audit)
+        .await?;
+    assert!(matches!(replay, IdempotentMutation::Replayed { .. }));
+    assert!(matches!(
+        database
+            .repository
+            .get_schedulable_silicon_identity("tos", schedule.owner_principal_id)
+            .await,
+        Err(RepositoryError::WebhookNotConfigured)
+    ));
+
+    let mut disabled_schedule = schedule.clone();
+    disabled_schedule.id = Uuid::now_v7();
+    let disabled_idempotency = IdempotencyContext {
+        key: "binding-disabled-1".to_owned(),
+        request_hash: [9; 32],
+        ..idempotency.clone()
+    };
+    assert!(matches!(
+        database
+            .repository
+            .create_schedule_idempotent(&disabled_schedule, &disabled_idempotency, audit)
+            .await,
+        Err(RepositoryError::WebhookNotConfigured)
+    ));
+
+    destination.id = Uuid::now_v7();
+    database
+        .repository
+        .upsert_hook_destination(&destination, audit)
+        .await?;
     Ok(())
 }
 

@@ -474,6 +474,19 @@ fn core_execution_error_and_pagination_schemas_are_stable() -> Result<()> {
         "public Error envelope changed"
     );
     ensure!(
+        document.pointer("/paths/~1schedules/post/responses/409/$ref")
+            == Some(&Value::String(
+                "#/components/responses/WebhookNotConfigured".to_owned()
+            ))
+            && document.pointer(
+                "/components/responses/WebhookNotConfigured/content/application~1json/example/error/code",
+            ) == Some(&Value::String("webhook_not_configured".to_owned()))
+            && document.pointer(
+                "/components/responses/WebhookNotConfigured/content/application~1json/example/error/message",
+            ) == Some(&Value::String("Set the webhook url first.".to_owned())),
+        "missing-webhook response contract changed"
+    );
+    ensure!(
         document.pointer("/components/parameters/Limit/schema/minimum") == Some(&json!(1))
             && document.pointer("/components/parameters/Limit/schema/maximum") == Some(&json!(100))
             && document.pointer("/components/parameters/Limit/schema/default") == Some(&json!(20)),

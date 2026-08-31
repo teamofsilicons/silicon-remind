@@ -457,3 +457,21 @@ retention environment variable: a runtime knob could disagree with already
 persisted deadlines and imply a configurability that `UNDERSTANDING.md` does
 not permit. Idempotency retention and bounded sweep cadence remain configurable
 because they are operational policies rather than user-visible archive rules.
+
+## D-032 — Reminder creation requires a transactionally active Hook destination
+
+**Status:** Accepted
+
+An active IAM token alone is insufficient to create a reminder. After checking
+for an exact committed idempotency replay, Remind resolves the Silicon's
+immutable principal binding and requires its Hook destination to exist and be
+enabled. The creation transaction locks the organization, identity, and
+destination in that order before inserting the reminder, serializing creation
+against destination disablement and preserving a single authoritative check.
+
+A never-provisioned or currently disabled destination returns HTTP `409` with
+the stable code `webhook_not_configured` and the product-required message
+`Set the webhook url first.` An IAM or organization tombstone remains the
+separate `silicon_unavailable` conflict because configuration cannot repair
+revoked authority. A committed idempotent replay returns its original response
+even if the destination is disabled later.
