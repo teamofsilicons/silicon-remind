@@ -1,0 +1,84 @@
+name: silicon-remind
+
+x-remind-service: &remind-service
+  image: silicon-remind:local
+  build:
+    context: .
+    target: runtime
+  env_file:
+    - .env
+  environment:
+    REMIND_BIND_ADDR: 0.0.0.0:8080
+    REMIND_WORKER_OPERATIONAL_BIND_ADDR: 0.0.0.0:9090
+    REMIND_PUBLIC_BASE_URL: http://127.0.0.1:8080
+    REMIND_DATABASE_URL: postgres://remind:local-development-only@postgres:5432/remind
+    REMIND_MIGRATOR_DATABASE_URL: postgres://remind:local-development-only@postgres:5432/remind
+  depends_on:
+    postgres:
+      condition: service_healthy
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 256
+  stop_grace_period: 35s
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: remind
+      POSTGRES_USER: remind
+      POSTGRES_PASSWORD: local-development-only
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    ports:
+      - 127.0.0.1:5432:5432
+    volumes:
+      - remind-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U remind -d remind]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  migrate:
+    <<: *remind-service
+    profiles: [tools]
+    entrypoint: [/usr/local/bin/remind-migrate]
+    restart: "no"
+
+  api:
+    <<: *remind-service
+    profiles: [api]
+    ports:
+      - 127.0.0.1:8080:8080
+    healthcheck:
+      test: [CMD, /bin/busybox, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  worker:
+    <<: *remind-service
+    profiles: [worker]
+    entrypoint: [/usr/local/bin/remind-worker]
+    ports:
+      - 127.0.0.1:9090:9090
+    healthcheck:
+      test: [CMD, /bin/busybox, wget, -q, -O, /dev/null, http://127.0.0.1:9090/health/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  remind-postgres:

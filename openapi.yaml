@@ -20,7 +20,7 @@ paths:
         - $ref: '#/components/parameters/OrgId'
         - name: silicon_id
           in: query
-          schema: { type: string }
+          schema: { $ref: '#/components/schemas/SiliconGlobalId' }
         - name: status
           in: query
           schema: { $ref: '#/components/schemas/ScheduleStatus' }
@@ -84,12 +84,13 @@ paths:
             schema:
               type: object
               minProperties: 1
+              additionalProperties: false
               properties:
                 text: { type: string, minLength: 1 }
                 timezone: { type: string, description: IANA time-zone identifier }
                 run_at: { type: [string, 'null'], format: date-time }
                 cron: { type: [string, 'null'] }
-                status: { $ref: '#/components/schemas/ScheduleStatus' }
+                status: { $ref: '#/components/schemas/MutableScheduleStatus' }
       responses:
         '200':
           description: Updated schedule
@@ -136,7 +137,7 @@ components:
       name: X-Org-ID
       in: header
       required: true
-      schema: { type: string }
+      schema: { $ref: '#/components/schemas/OrgId' }
     ScheduleId:
       name: schedule_id
       in: path
@@ -162,12 +163,22 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
   schemas:
+    OrgId:
+      type: string
+      pattern: '^[a-z0-9_-]{3,50}$'
+    SiliconGlobalId:
+      type: string
+      pattern: '^[a-z0-9_-]{3,50}:[a-z0-9_-]{3,50}$'
     ScheduleStatus:
       type: string
       enum: [active, paused, completed]
+    MutableScheduleStatus:
+      type: string
+      enum: [active, paused]
     ScheduleCreate:
       type: object
       required: [text, timezone]
+      additionalProperties: false
       oneOf:
         - required: [run_at]
         - required: [cron]
@@ -183,8 +194,8 @@ components:
           required: [id, org_id, silicon_id, status, created_at, updated_at]
           properties:
             id: { type: string, format: uuid }
-            org_id: { type: string }
-            silicon_id: { type: string }
+            org_id: { $ref: '#/components/schemas/OrgId' }
+            silicon_id: { $ref: '#/components/schemas/SiliconGlobalId' }
             status: { $ref: '#/components/schemas/ScheduleStatus' }
             next_run_at: { type: [string, 'null'], format: date-time }
             created_at: { type: string, format: date-time }
@@ -207,7 +218,7 @@ components:
       properties:
         error:
           type: object
-          required: [code, message]
+          required: [code, message, request_id]
           properties:
             code: { type: string }
             message: { type: string }

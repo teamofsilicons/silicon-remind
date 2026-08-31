@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.DS_Store
+target
+*.log
+Dockerfile*
+compose*.yaml
+README.md
+API_DOCS.md
+UNDERSTANDING.md
+decisions.md
+openapi.yaml
