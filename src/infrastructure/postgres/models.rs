@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::domain::ReminderReadScope;
+use crate::domain::{ReminderReadScope, ScheduleSection};
 
 /// An IAM principal type accepted by persistence and audit records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +96,29 @@ pub struct ScheduleRow {
     pub updated_at: DateTime<Utc>,
 }
 
+impl ScheduleRow {
+    /// Returns the first instant at which this reminder entered the archive.
+    #[must_use]
+    pub fn archived_at(&self) -> Option<DateTime<Utc>> {
+        match (self.completed_at, self.deleted_at) {
+            (Some(completed_at), Some(deleted_at)) => Some(completed_at.min(deleted_at)),
+            (Some(completed_at), None) => Some(completed_at),
+            (None, Some(deleted_at)) => Some(deleted_at),
+            (None, None) => None,
+        }
+    }
+
+    /// Returns the product-facing collection section for this row.
+    #[must_use]
+    pub fn section(&self) -> ScheduleSection {
+        if self.archived_at().is_some() {
+            ScheduleSection::Archived
+        } else {
+            ScheduleSection::Current
+        }
+    }
+}
+
 /// Values required to create an active schedule.
 #[derive(Clone, Debug)]
 pub struct CreateSchedule {
@@ -182,6 +205,8 @@ pub struct ListSchedules {
     pub read_scope: ReminderReadScope,
     /// Optional owner filter.
     pub silicon_id: Option<String>,
+    /// Product-facing current or archived partition.
+    pub section: ScheduleSection,
     /// Optional lifecycle filter.
     pub status: Option<String>,
     /// Decoded opaque cursor.
@@ -485,13 +510,17 @@ pub(crate) struct ScheduleResponse {
     pub kind: String,
     pub cron: String,
     pub status: String,
+    pub section: ScheduleSection,
     pub next_run_at: Option<DateTime<Utc>>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub purge_after: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl From<&ScheduleRow> for ScheduleResponse {
     fn from(row: &ScheduleRow) -> Self {
+        let archived_at = row.archived_at();
         Self {
             id: row.id,
             org_id: row.org_id.clone(),
@@ -501,7 +530,10 @@ impl From<&ScheduleRow> for ScheduleResponse {
             kind: row.schedule_kind.clone(),
             cron: row.cron.clone(),
             status: row.status.clone(),
+            section: row.section(),
             next_run_at: row.next_run_at,
+            archived_at,
+            purge_after: row.purge_after,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }

@@ -231,18 +231,30 @@ EXECUTE FUNCTION remind_reject_audit_mutation();
 -- Public schedule reads and opaque keyset pagination.
 CREATE INDEX schedules_org_created_keyset_idx
     ON schedules (org_id, created_at DESC, id DESC)
-    WHERE deleted_at IS NULL;
+    WHERE deleted_at IS NULL AND status <> 'completed';
 
 CREATE INDEX schedules_org_owner_created_keyset_idx
     ON schedules (org_id, silicon_id, created_at DESC, id DESC)
-    WHERE deleted_at IS NULL;
+    WHERE deleted_at IS NULL AND status <> 'completed';
+
+CREATE INDEX schedules_archive_org_created_keyset_idx
+    ON schedules (org_id, created_at DESC, id DESC)
+    WHERE deleted_at IS NOT NULL OR status = 'completed';
+
+CREATE INDEX schedules_archive_org_owner_created_keyset_idx
+    ON schedules (org_id, silicon_id, created_at DESC, id DESC)
+    WHERE deleted_at IS NOT NULL OR status = 'completed';
 
 CREATE INDEX schedules_org_principal_idx
     ON schedules (org_id, owner_principal_id, id);
 
 CREATE INDEX schedules_org_status_created_keyset_idx
     ON schedules (org_id, status, created_at DESC, id DESC)
-    WHERE deleted_at IS NULL;
+    WHERE deleted_at IS NULL AND status <> 'completed';
+
+CREATE INDEX schedules_archive_org_status_created_keyset_idx
+    ON schedules (org_id, status, created_at DESC, id DESC)
+    WHERE deleted_at IS NOT NULL OR status = 'completed';
 
 -- Multi-worker due scans and bounded retention cleanup.
 CREATE INDEX schedules_due_idx

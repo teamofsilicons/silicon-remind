@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// Maximum UTF-8 size of reminder text accepted by the public contract.
 pub const MAX_TEXT_BYTES: usize = 100_000;
 
-/// Number of days for which completed and deleted schedules are retained.
+/// Number of days for which archived schedules are retained.
 pub const ARCHIVE_RETENTION_DAYS: i64 = 45;
 
 /// Canonical timezone used when a client omits one.
@@ -66,6 +66,28 @@ pub enum ScheduleStatus {
     Paused,
     /// A one-time schedule reached a worker-owned terminal state.
     Completed,
+}
+
+/// Product-facing section used to partition current and archived reminders.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleSection {
+    /// Active and paused reminders that can still be changed by their owner.
+    #[default]
+    Current,
+    /// Manually archived reminders and one-time reminders whose trigger fired.
+    Archived,
+}
+
+impl ScheduleSection {
+    /// Returns the stable API and persistence-query representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Archived => "archived",
+        }
+    }
 }
 
 impl ScheduleStatus {
@@ -457,7 +479,7 @@ pub struct Schedule {
     pub updated_at: DateTime<Utc>,
     /// Internal monotonic optimistic version.
     pub version: u64,
-    /// Soft-deletion time; deleted schedules are hidden from public reads.
+    /// Manual archive time. Archived schedules remain readable during retention.
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
@@ -530,7 +552,7 @@ impl Schedule {
         Ok(())
     }
 
-    /// Marks a one-time schedule completed after terminal delivery processing.
+    /// Archives a one-time schedule when its cron occurrence is materialized.
     ///
     /// Repeating the operation on an already completed schedule is idempotent.
     ///
@@ -540,7 +562,7 @@ impl Schedule {
     /// deleted schedule, a status-transition error for a recurring schedule, or
     /// [`ScheduleValidationError::VersionExhausted`] if the version cannot be
     /// advanced.
-    pub fn complete_one_time(
+    pub fn archive_triggered_one_time(
         &mut self,
         completed_at: DateTime<Utc>,
     ) -> Result<(), ScheduleValidationError> {
@@ -561,25 +583,22 @@ impl Schedule {
         Ok(())
     }
 
-    /// Soft-deletes a schedule and prevents further occurrence materialization.
+    /// Manually archives a schedule and prevents further materialization.
     ///
-    /// Repeating deletion is idempotent and does not advance the version twice.
+    /// Repeating archival is idempotent and does not advance the version twice.
     ///
     /// # Errors
     ///
     /// Returns [`ScheduleValidationError::VersionExhausted`] if the schedule's
     /// monotonic version cannot be advanced.
-    pub fn soft_delete(
-        &mut self,
-        deleted_at: DateTime<Utc>,
-    ) -> Result<(), ScheduleValidationError> {
-        if self.deleted_at.is_some() {
+    pub fn archive(&mut self, archived_at: DateTime<Utc>) -> Result<(), ScheduleValidationError> {
+        if self.deleted_at.is_some() || self.status == ScheduleStatus::Completed {
             return Ok(());
         }
         let version = next_version(self.version)?;
-        self.deleted_at = Some(deleted_at);
+        self.deleted_at = Some(archived_at);
         self.next_run_at = None;
-        self.updated_at = deleted_at;
+        self.updated_at = archived_at;
         self.version = version;
         Ok(())
     }
@@ -1124,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn only_one_time_worker_flow_can_complete_a_schedule() -> Result<(), Box<dyn std::error::Error>>
+    fn only_one_time_trigger_flow_can_archive_a_schedule() -> Result<(), Box<dyn std::error::Error>>
     {
         let now = instant(2026, 8, 31, 9, 0)?;
         let one_time = one_time_command().validate(now)?;
@@ -1136,16 +1155,16 @@ mod tests {
             one_time,
             now,
         );
-        one_time.complete_one_time(now + Duration::minutes(2))?;
+        one_time.archive_triggered_one_time(now + Duration::minutes(2))?;
         assert_eq!(one_time.status, ScheduleStatus::Completed);
         assert_eq!(one_time.next_run_at, None);
         let version = one_time.version;
-        one_time.complete_one_time(now + Duration::minutes(3))?;
+        one_time.archive_triggered_one_time(now + Duration::minutes(3))?;
         assert_eq!(one_time.version, version);
 
         let mut recurring = active_recurring_schedule()?;
         assert_eq!(
-            recurring.complete_one_time(now),
+            recurring.archive_triggered_one_time(now),
             Err(ScheduleValidationError::StatusTransition(
                 ScheduleStatusTransitionError::RecurringCannotComplete
             ))
@@ -1157,7 +1176,7 @@ mod tests {
     fn retention_deadline_is_45_days_after_archive() -> Result<(), Box<dyn std::error::Error>> {
         let now = instant(2026, 8, 31, 9, 0)?;
         let mut schedule = active_recurring_schedule()?;
-        schedule.soft_delete(now)?;
+        schedule.archive(now)?;
         assert_eq!(
             schedule.retention_deadline(),
             now.checked_add_signed(Duration::days(ARCHIVE_RETENTION_DAYS))

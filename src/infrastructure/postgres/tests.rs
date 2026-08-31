@@ -6,7 +6,7 @@ use testcontainers::{ContainerAsync, ImageExt as _, runners::AsyncRunner as _};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-use crate::domain::ReminderReadScope;
+use crate::domain::{ReminderReadScope, ScheduleSection};
 
 use super::repository::{DELETED_REMINDER_LEDGER_LIMIT, trim_deleted_reminder_ledger};
 use super::{
@@ -219,6 +219,7 @@ fn visibility_filters(
         org_id: "tos".to_owned(),
         read_scope,
         silicon_id: None,
+        section: ScheduleSection::Current,
         status: None,
         cursor,
         limit,
@@ -597,66 +598,188 @@ async fn assert_ledger_conflict_preserves_source(database: &TestDatabase) -> any
 }
 
 #[tokio::test]
-async fn terminal_execution_only_completes_its_materialized_one_time_generation()
+async fn one_time_materialization_archives_before_delivery_without_extending_retention()
 -> anyhow::Result<()> {
     let database = test_database().await?;
-    let now = Utc::now();
+    let seed_now = Utc::now();
 
-    let current_id = seed_due_schedule(&database.pool, "current:tos", now, "one_time").await?;
-    let current = materialize_schedule(&database.repository, current_id, now, None).await?;
-    assert_eq!(current.schedule_version, 2);
-    assert_eq!(current.schedule_kind, "one_time");
-    claim_execution(&database.repository, current.id, now).await?;
+    let one_time_id =
+        seed_due_schedule(&database.pool, "one-time:tos", seed_now, "one_time").await?;
+    let worker_now = Utc::now() + Duration::seconds(1);
+    let execution =
+        materialize_schedule(&database.repository, one_time_id, worker_now, None).await?;
+    assert_eq!(execution.schedule_version, 2);
+    assert_eq!(execution.schedule_kind, "one_time");
+    let before_delivery = schedule_archive_state(&database.pool, one_time_id).await?;
+    assert_eq!(before_delivery.0, "completed");
+    assert_eq!(before_delivery.1, 2);
+    let archived_at = before_delivery
+        .2
+        .ok_or_else(|| anyhow::anyhow!("one-time schedule was not archived"))?;
+    assert_eq!(
+        before_delivery.3,
+        Some(archived_at + Duration::days(crate::domain::ARCHIVE_RETENTION_DAYS))
+    );
+
+    claim_execution(&database.repository, execution.id, worker_now).await?;
     database
         .repository
         .mark_delivery_succeeded(
-            current.id,
+            execution.id,
             "execution-test-worker",
             Uuid::now_v7(),
-            now + Duration::seconds(1),
+            worker_now + Duration::seconds(1),
         )
         .await?;
-    assert_schedule_state(&database.pool, current_id, "completed", 3, true).await?;
+    assert_eq!(
+        schedule_archive_state(&database.pool, one_time_id).await?,
+        before_delivery
+    );
 
-    let edited_id = seed_due_schedule(&database.pool, "edited:tos", now, "one_time").await?;
-    let edited = materialize_schedule(&database.repository, edited_id, now, None).await?;
-    let replacement_next_run_at = now + Duration::hours(1);
-    replace_with_one_time(&database.pool, edited_id, replacement_next_run_at).await?;
-    claim_execution(&database.repository, edited.id, now).await?;
-    database
-        .repository
-        .mark_delivery_succeeded(
-            edited.id,
-            "execution-test-worker",
-            Uuid::now_v7(),
-            now + Duration::seconds(1),
-        )
-        .await?;
-    assert_schedule_state(&database.pool, edited_id, "active", 3, false).await?;
-
-    let changed_kind_id =
-        seed_due_schedule(&database.pool, "changed-kind:tos", now, "recurring").await?;
+    let recurring_id =
+        seed_due_schedule(&database.pool, "recurring:tos", seed_now, "recurring").await?;
     let recurring = materialize_schedule(
         &database.repository,
-        changed_kind_id,
-        now,
-        Some(now + Duration::minutes(1)),
+        recurring_id,
+        worker_now,
+        Some(worker_now + Duration::minutes(1)),
     )
     .await?;
     assert_eq!(recurring.schedule_version, 2);
     assert_eq!(recurring.schedule_kind, "recurring");
-    replace_with_one_time(&database.pool, changed_kind_id, replacement_next_run_at).await?;
-    claim_execution(&database.repository, recurring.id, now).await?;
+    claim_execution(&database.repository, recurring.id, worker_now).await?;
     database
         .repository
         .mark_delivery_failed(
             recurring.id,
             "execution-test-worker",
-            now + Duration::seconds(1),
+            worker_now + Duration::seconds(1),
             "terminal test failure",
         )
         .await?;
-    assert_schedule_state(&database.pool, changed_kind_id, "active", 3, false).await?;
+    assert_schedule_state(&database.pool, recurring_id, "active", 2, false).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn current_and_archived_sections_are_partitioned_before_pagination() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let seed_now = Utc::now();
+    let current_id =
+        seed_due_schedule(&database.pool, "current-section:tos", seed_now, "recurring").await?;
+    let manual_id =
+        seed_due_schedule(&database.pool, "manual-archive:tos", seed_now, "recurring").await?;
+    let manual_owner = schedule_owner(&database.pool, manual_id).await?;
+    let archived_at = Utc::now() + Duration::seconds(1);
+    assert!(
+        database
+            .repository
+            .archive_schedule(
+                "tos",
+                manual_owner,
+                manual_id,
+                archived_at,
+                &service_audit(),
+            )
+            .await?
+    );
+
+    let automatic_id = seed_due_schedule(
+        &database.pool,
+        "automatic-archive:tos",
+        seed_now,
+        "one_time",
+    )
+    .await?;
+    let automatic_owner = schedule_owner(&database.pool, automatic_id).await?;
+    let worker_now = Utc::now() + Duration::seconds(2);
+    let automatic_execution =
+        materialize_schedule(&database.repository, automatic_id, worker_now, None).await?;
+
+    assert_schedule_sections(
+        &database.repository,
+        current_id,
+        manual_id,
+        automatic_id,
+        automatic_execution.id,
+    )
+    .await?;
+
+    let automatic_before = schedule_archive_state(&database.pool, automatic_id).await?;
+    assert!(
+        !database
+            .repository
+            .archive_schedule(
+                "tos",
+                automatic_owner,
+                automatic_id,
+                worker_now + Duration::days(1),
+                &service_audit(),
+            )
+            .await?
+    );
+    assert_eq!(
+        schedule_archive_state(&database.pool, automatic_id).await?,
+        automatic_before
+    );
+    Ok(())
+}
+
+async fn assert_schedule_sections(
+    repository: &PostgresRepository,
+    current_id: Uuid,
+    manual_id: Uuid,
+    automatic_id: Uuid,
+    automatic_execution_id: Uuid,
+) -> anyhow::Result<()> {
+    let read_scope = ReminderReadScope::organization();
+    let current = repository
+        .list_schedules(&ListSchedules {
+            org_id: "tos".to_owned(),
+            read_scope: read_scope.clone(),
+            silicon_id: None,
+            section: ScheduleSection::Current,
+            status: None,
+            cursor: None,
+            limit: 100,
+        })
+        .await?;
+    assert_eq!(current.items.len(), 1);
+    assert_eq!(current.items[0].id, current_id);
+
+    let archived = repository
+        .list_schedules(&ListSchedules {
+            org_id: "tos".to_owned(),
+            read_scope: read_scope.clone(),
+            silicon_id: None,
+            section: ScheduleSection::Archived,
+            status: None,
+            cursor: None,
+            limit: 100,
+        })
+        .await?;
+    let archived_ids = archived
+        .items
+        .iter()
+        .map(|schedule| schedule.id)
+        .collect::<Vec<_>>();
+    assert_eq!(archived_ids.len(), 2);
+    assert!(archived_ids.contains(&manual_id));
+    assert!(archived_ids.contains(&automatic_id));
+    assert!(
+        repository
+            .get_schedule("tos", manual_id, &read_scope)
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        repository
+            .list_executions("tos", automatic_id, &read_scope, None, 100,)
+            .await?
+            .items[0]
+            .id,
+        automatic_execution_id
+    );
     Ok(())
 }
 
@@ -1055,27 +1178,26 @@ async fn claim_execution(
     Ok(())
 }
 
-async fn replace_with_one_time(
+async fn schedule_archive_state(
     pool: &PgPool,
     schedule_id: Uuid,
-    next_run_at: DateTime<Utc>,
-) -> anyhow::Result<()> {
-    let result = sqlx::query(
-        "UPDATE schedules SET \
-             schedule_kind = 'one_time', cron_expression = '0 0 * * *', \
-             next_run_at = $1, \
-             version = version + 1 \
-         WHERE id = $2",
+) -> anyhow::Result<(String, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> {
+    sqlx::query_as(
+        "SELECT status, version, completed_at, purge_after \
+         FROM schedules WHERE id = $1",
     )
-    .bind(next_run_at)
     .bind(schedule_id)
-    .execute(pool)
-    .await?;
-    anyhow::ensure!(
-        result.rows_affected() == 1,
-        "test schedule was not replaced"
-    );
-    Ok(())
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
+async fn schedule_owner(pool: &PgPool, schedule_id: Uuid) -> anyhow::Result<Uuid> {
+    sqlx::query_scalar("SELECT owner_principal_id FROM schedules WHERE id = $1")
+        .bind(schedule_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
 }
 
 async fn assert_schedule_state(

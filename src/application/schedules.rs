@@ -13,8 +13,8 @@ use crate::{
     application::ports::Clock,
     domain::{
         Actor, ActorKind, CreateScheduleCommand, CronExpression, CursorKind, PageCursor,
-        PatchScheduleCommand, Schedule, ScheduleKind, ScheduleStatus, ScheduleTiming,
-        ScheduleValidationError, silicon_id_belongs_to_org,
+        PatchScheduleCommand, Schedule, ScheduleKind, ScheduleSection, ScheduleStatus,
+        ScheduleTiming, ScheduleValidationError, silicon_id_belongs_to_org,
     },
     error::AppError,
     infrastructure::postgres::{
@@ -123,6 +123,7 @@ impl ScheduleService {
         &self,
         actor: &Actor,
         silicon_id: Option<String>,
+        section: ScheduleSection,
         status: Option<ScheduleStatus>,
         encoded_cursor: Option<&str>,
         limit: Option<u32>,
@@ -145,6 +146,7 @@ impl ScheduleService {
             org_id: actor.org_id.clone(),
             read_scope: actor.read_scope.clone(),
             silicon_id,
+            section,
             status: status.map(schedule_status_name).map(str::to_owned),
             cursor,
             limit: validate_page_limit(limit)?,
@@ -234,7 +236,7 @@ impl ScheduleService {
         Ok(mutation_response(mutation, 200))
     }
 
-    /// Soft-deletes an owner schedule and prevents future delivery claims.
+    /// Archives an owner schedule and prevents future delivery claims.
     ///
     /// # Errors
     ///
@@ -243,7 +245,7 @@ impl ScheduleService {
         require_silicon(actor)?;
         let owner_principal_id = principal_id(actor)?;
         self.repository
-            .soft_delete_schedule(
+            .archive_schedule(
                 &actor.org_id,
                 owner_principal_id,
                 schedule_id,

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         CreateScheduleCommand, ExecutionStatus, PatchScheduleCommand, PatchValue, ScheduleKind,
-        ScheduleStatus,
+        ScheduleSection, ScheduleStatus,
     },
     infrastructure::postgres::{ExecutionRow, ScheduleRow},
 };
@@ -139,6 +139,9 @@ where
 pub struct ListSchedulesQuery {
     /// Optional owner Silicon filter.
     pub silicon_id: Option<String>,
+    /// Current reminders by default, or reminders retained in the archive.
+    #[serde(default)]
+    pub section: ScheduleSection,
     /// Optional lifecycle filter.
     pub status: Option<ScheduleStatus>,
     /// Opaque schedule cursor.
@@ -176,8 +179,14 @@ pub struct ScheduleResponse {
     pub cron: String,
     /// Public lifecycle status.
     pub status: String,
+    /// Product-facing current or archived section.
+    pub section: ScheduleSection,
     /// Next due instant or null.
     pub next_run_at: Option<DateTime<Utc>>,
+    /// Time at which the reminder entered the archive, if applicable.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Permanent-deletion deadline for archived reminders.
+    pub purge_after: Option<DateTime<Utc>>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last mutation timestamp.
@@ -186,6 +195,7 @@ pub struct ScheduleResponse {
 
 impl From<&ScheduleRow> for ScheduleResponse {
     fn from(row: &ScheduleRow) -> Self {
+        let archived_at = row.archived_at();
         Self {
             id: row.id,
             org_id: row.org_id.clone(),
@@ -195,7 +205,10 @@ impl From<&ScheduleRow> for ScheduleResponse {
             kind: row.schedule_kind.clone(),
             cron: row.cron.clone(),
             status: row.status.clone(),
+            section: row.section(),
             next_run_at: row.next_run_at,
+            archived_at,
+            purge_after: row.purge_after,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -405,9 +418,10 @@ pub struct InternalEventAccepted {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateScheduleRequest, IamWebhookEvent, IamWebhookEventType, NullablePatch,
-        PatchScheduleRequest,
+        CreateScheduleRequest, IamWebhookEvent, IamWebhookEventType, ListSchedulesQuery,
+        NullablePatch, PatchScheduleRequest,
     };
+    use crate::domain::ScheduleSection;
 
     #[test]
     fn patch_distinguishes_omission_null_and_value() -> anyhow::Result<()> {
@@ -441,6 +455,16 @@ mod tests {
             serde_json::to_value(omitted)?,
             serde_json::to_value(explicit)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_listing_defaults_to_current_and_accepts_archive() -> anyhow::Result<()> {
+        let current = serde_json::from_str::<ListSchedulesQuery>("{}")?;
+        let archived = serde_json::from_str::<ListSchedulesQuery>(r#"{"section":"archived"}"#)?;
+
+        assert_eq!(current.section, ScheduleSection::Current);
+        assert_eq!(archived.section, ScheduleSection::Archived);
         Ok(())
     }
 

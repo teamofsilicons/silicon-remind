@@ -33,6 +33,7 @@ pub async fn list(
         .list(
             &actor,
             query.silicon_id,
+            query.section,
             query.status,
             query.cursor.as_deref(),
             query.limit,

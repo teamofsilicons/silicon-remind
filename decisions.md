@@ -577,3 +577,32 @@ and trigger content, deletes the source schedules and cascading executions, and
 trims deterministic oldest identity values. Any failure rolls the whole pass
 back. The identity insertion order defines “latest,” and exactly the newest
 100,000 records are retained globally.
+
+## D-037 — Archive membership begins at the reminder trigger
+
+**Status:** Accepted; supersedes the completion timing in D-008, D-023, and D-034
+
+The public schedule collection is partitioned into `current` and `archived`
+sections before keyset pagination. Current is the default and contains active
+or paused reminders. Archived contains manually archived reminders and one-time
+reminders whose sole cron occurrence has been durably materialized. Retained
+archive records, their detail view, and execution history remain readable for
+exactly 45 days. Archived reminders are immutable, and repeating an archive
+request never extends an existing purge deadline.
+
+One-time materialization atomically inserts the immutable execution snapshot,
+sets the parent to `completed`, assigns the archive timestamp and 45-day purge
+deadline, and clears `next_run_at`. This transition happens when the trigger is
+processed rather than after Hook delivery. Its materialized execution remains
+eligible for delivery and retry because automatic archival must not discard the
+notification that caused it. Manual archival continues to cancel unaccepted
+work. Delivery-terminal transitions no longer mutate the parent schedule or
+its retention deadline.
+
+Persistence keeps separate `completed_at` and `deleted_at` timestamps even
+though both appear in the archived product section. That internal distinction
+is intentional: `completed_at` identifies an automatically archived one-time
+trigger whose execution may still be delivered, while `deleted_at` identifies
+manual or lifecycle archival that blocks delivery. Responses expose the common
+derived `archived_at`, `section`, and `purge_after` fields so clients do not need
+to infer the storage distinction.

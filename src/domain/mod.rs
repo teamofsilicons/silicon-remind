@@ -17,7 +17,8 @@ pub use identity::{
     silicon_id_belongs_to_org,
 };
 pub use schedule::{
-    CreateScheduleCommand, CronExpression, DEFAULT_TIMEZONE, NewSchedule, PatchScheduleCommand,
-    PatchValue, Schedule, ScheduleKind, ScheduleStatus, ScheduleStatusTransitionError,
-    ScheduleTiming, ScheduleValidationError, ValidatedSchedulePatch, next_recurring_occurrence,
+    ARCHIVE_RETENTION_DAYS, CreateScheduleCommand, CronExpression, DEFAULT_TIMEZONE, NewSchedule,
+    PatchScheduleCommand, PatchValue, Schedule, ScheduleKind, ScheduleSection, ScheduleStatus,
+    ScheduleStatusTransitionError, ScheduleTiming, ScheduleValidationError, ValidatedSchedulePatch,
+    next_recurring_occurrence,
 };

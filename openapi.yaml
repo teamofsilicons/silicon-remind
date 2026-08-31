@@ -27,6 +27,12 @@ paths:
         - name: silicon_id
           in: query
           schema: { $ref: '#/components/schemas/SiliconGlobalId' }
+        - name: section
+          in: query
+          description: Product-facing reminder section; current is the default.
+          schema:
+            allOf: [{ $ref: '#/components/schemas/ScheduleSection' }]
+            default: current
         - name: status
           in: query
           schema: { $ref: '#/components/schemas/ScheduleStatus' }
@@ -109,10 +115,10 @@ paths:
         default: { $ref: '#/components/responses/Error' }
     delete:
       tags: [Schedules]
-      operationId: deleteSchedule
-      summary: Delete a schedule owned by the authenticated Silicon
+      operationId: archiveSchedule
+      summary: Archive a schedule owned by the authenticated Silicon for 45 days
       responses:
-        '204': { description: Deleted }
+        '204': { description: 'Archived, or already archived' }
         default: { $ref: '#/components/responses/Error' }
   /schedules/{schedule_id}/executions:
     get:
@@ -193,6 +199,9 @@ components:
     ScheduleStatus:
       type: string
       enum: [active, paused, completed]
+    ScheduleSection:
+      type: string
+      enum: [current, archived]
     MutableScheduleStatus:
       type: string
       enum: [active, paused]
@@ -212,13 +221,16 @@ components:
       allOf:
         - $ref: '#/components/schemas/ScheduleCreate'
         - type: object
-          required: [id, org_id, silicon_id, timezone, status, created_at, updated_at]
+          required: [id, org_id, silicon_id, timezone, status, section, next_run_at, archived_at, purge_after, created_at, updated_at]
           properties:
             id: { type: string, format: uuid }
             org_id: { $ref: '#/components/schemas/OrgId' }
             silicon_id: { $ref: '#/components/schemas/SiliconGlobalId' }
             status: { $ref: '#/components/schemas/ScheduleStatus' }
+            section: { $ref: '#/components/schemas/ScheduleSection' }
             next_run_at: { type: [string, 'null'], format: date-time }
+            archived_at: { type: [string, 'null'], format: date-time }
+            purge_after: { type: [string, 'null'], format: date-time }
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
     Execution:

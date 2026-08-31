@@ -10,6 +10,11 @@ Both reminder kinds use five-field Linux cron syntax. Clients select
 case Remind canonicalizes it to UTC before calculating and storing the next
 occurrence.
 
+The default schedule view contains current reminders. Owner-archived reminders
+and one-time reminders whose cron trigger has materialized remain readable in
+the archived section, with execution history, for exactly 45 days before the
+retention worker permanently removes them.
+
 The service is a Rust modular monolith with three independently runnable
 processes:
 

@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
-use crate::domain::{ReminderReadScope, is_valid_iam_label, silicon_id_belongs_to_org};
+use crate::domain::{
+    ARCHIVE_RETENTION_DAYS, ReminderReadScope, ScheduleSection, is_valid_iam_label,
+    silicon_id_belongs_to_org,
+};
 
 use super::{
     error::RepositoryError,
@@ -182,7 +185,7 @@ impl PostgresRepository {
         self.pool.begin().await.map_err(RepositoryError::from)
     }
 
-    /// Reads one publicly visible schedule within an organization.
+    /// Reads one retained, publicly visible schedule within an organization.
     ///
     /// # Errors
     ///
@@ -199,8 +202,7 @@ impl PostgresRepository {
         query
             .push_bind(org_id)
             .push(" AND s.id = ")
-            .push_bind(schedule_id)
-            .push(" AND s.deleted_at IS NULL");
+            .push_bind(schedule_id);
         push_reminder_read_scope(&mut query, "s.owner_principal_id", read_scope);
         query.push(
             " AND EXISTS (\
@@ -245,7 +247,14 @@ impl PostgresRepository {
              WHERE s.org_id = "
         ));
         query.push_bind(&filters.org_id);
-        query.push(" AND s.deleted_at IS NULL");
+        match filters.section {
+            ScheduleSection::Current => {
+                query.push(" AND s.deleted_at IS NULL AND s.status <> 'completed'");
+            }
+            ScheduleSection::Archived => {
+                query.push(" AND (s.deleted_at IS NOT NULL OR s.status = 'completed')");
+            }
+        }
         push_reminder_read_scope(&mut query, "s.owner_principal_id", &filters.read_scope);
         query.push(
             " AND EXISTS (\
@@ -309,8 +318,7 @@ impl PostgresRepository {
         query
             .push_bind(org_id)
             .push(" AND e.id = ")
-            .push_bind(execution_id)
-            .push(" AND s.deleted_at IS NULL");
+            .push_bind(execution_id);
         push_reminder_read_scope(&mut query, "s.owner_principal_id", read_scope);
         query.push(" AND identity.state = 'active' AND organization.state = 'active'");
 
@@ -637,25 +645,25 @@ impl PostgresRepository {
         })
     }
 
-    /// Soft-deletes an owner-visible schedule and starts its 45-day retention
-    /// window. Repeating the delete for the same owner succeeds without a new
-    /// mutation.
+    /// Archives an owner-visible schedule and starts its 45-day retention
+    /// window. Repeating the operation, including for an automatically
+    /// archived one-time reminder, succeeds without extending retention.
     ///
     /// # Errors
     ///
     /// Returns not found when ownership cannot be established or a database
     /// error when the transaction fails.
-    pub async fn soft_delete_schedule(
+    pub async fn archive_schedule(
         &self,
         org_id: &str,
         owner_principal_id: Uuid,
         schedule_id: Uuid,
-        deleted_at: DateTime<Utc>,
+        archived_at: DateTime<Utc>,
         audit: &AuditContext,
     ) -> Result<bool, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let existing = sqlx::query_as::<_, (Uuid, Option<DateTime<Utc>>)>(
-            "SELECT id, deleted_at \
+        let existing = sqlx::query_as::<_, (Uuid, String, Option<DateTime<Utc>>)>(
+            "SELECT id, status, deleted_at \
              FROM schedules \
              WHERE org_id = $1 AND owner_principal_id = $2 AND id = $3 \
              FOR UPDATE",
@@ -667,7 +675,7 @@ impl PostgresRepository {
         .await?
         .ok_or(RepositoryError::NotFound)?;
 
-        if existing.1.is_some() {
+        if existing.1 == "completed" || existing.2.is_some() {
             transaction.commit().await?;
             return Ok(false);
         }
@@ -677,7 +685,7 @@ impl PostgresRepository {
                  deleted_at = $1, next_run_at = NULL, version = version + 1 \
              WHERE id = $2",
         )
-        .bind(deleted_at)
+        .bind(archived_at)
         .bind(schedule_id)
         .execute(&mut *transaction)
         .await?;
@@ -686,10 +694,13 @@ impl PostgresRepository {
             &mut transaction,
             Some(org_id),
             audit,
-            "schedule.deleted",
+            "schedule.archived",
             "schedule",
             Some(schedule_id.to_string()),
-            json!({ "retention_days": 45 }),
+            json!({
+                "reason": "owner_requested",
+                "retention_days": ARCHIVE_RETENTION_DAYS,
+            }),
         )
         .await?;
         transaction.commit().await?;
@@ -809,13 +820,24 @@ impl PostgresRepository {
         }
 
         let advanced_version = sqlx::query_scalar::<_, i64>(
-            "UPDATE schedules SET next_run_at = $1, version = version + 1 \
-             WHERE id = $2 AND org_id = $3 AND silicon_id = $4 \
+            "UPDATE schedules SET \
+                 next_run_at = $1, \
+                 status = CASE \
+                     WHEN schedule_kind = 'one_time' THEN 'completed' \
+                     ELSE status \
+                 END, \
+                 completed_at = CASE \
+                     WHEN schedule_kind = 'one_time' THEN $2 \
+                     ELSE completed_at \
+                 END, \
+                 version = version + 1 \
+             WHERE id = $3 AND org_id = $4 AND silicon_id = $5 \
                AND status = 'active' AND deleted_at IS NULL \
-               AND next_run_at IS NOT DISTINCT FROM $5 AND version = $6 \
+               AND next_run_at IS NOT DISTINCT FROM $6 AND version = $7 \
              RETURNING version",
         )
         .bind(next_run_at)
+        .bind(worker_now)
         .bind(schedule.id)
         .bind(&schedule.org_id)
         .bind(&schedule.silicon_id)
@@ -827,25 +849,16 @@ impl PostgresRepository {
             return Err(RepositoryError::InvalidState);
         }
 
-        if inserted {
-            append_audit(
-                transaction,
-                Some(&schedule.org_id),
-                audit,
-                "execution.materialized",
-                "execution",
-                Some(execution.id.to_string()),
-                json!({
-                    "schedule_id": schedule.id,
-                    "schedule_version": generation.schedule_version,
-                    "schedule_kind": generation.schedule_kind,
-                    "scheduled_for": generation.scheduled_for,
-                    "coalesced": schedule.schedule_kind == "recurring"
-                        && generation.scheduled_for < worker_now,
-                }),
-            )
-            .await?;
-        }
+        append_materialization_audits(
+            transaction,
+            schedule,
+            &execution,
+            generation,
+            worker_now,
+            inserted,
+            audit,
+        )
+        .await?;
 
         Ok(DueMaterialization {
             execution,
@@ -939,8 +952,7 @@ impl PostgresRepository {
         Ok(rows)
     }
 
-    /// Marks a leased execution delivered after a validated Hook `202` and
-    /// completes a one-time parent schedule in the same transaction.
+    /// Marks a leased execution delivered after a validated Hook `202`.
     ///
     /// # Errors
     ///
@@ -978,8 +990,6 @@ impl PostgresRepository {
             .await?
             .ok_or(RepositoryError::LeaseLost)?;
 
-        let completed =
-            complete_one_time_schedule(&mut transaction, &execution, accepted_at).await?;
         let audit = AuditContext {
             actor_type: ActorType::System,
             actor_id: worker_id.to_owned(),
@@ -998,19 +1008,6 @@ impl PostgresRepository {
             }),
         )
         .await?;
-        if completed {
-            append_audit(
-                &mut transaction,
-                Some(&execution.org_id),
-                &audit,
-                "schedule.completed",
-                "schedule",
-                Some(execution.schedule_id.to_string()),
-                json!({ "execution_id": execution.id, "outcome": "delivered" }),
-            )
-            .await?;
-        }
-
         transaction.commit().await?;
         Ok(execution)
     }
@@ -1076,8 +1073,7 @@ impl PostgresRepository {
         Ok(execution)
     }
 
-    /// Marks a live delivery lease terminally failed and completes a one-time
-    /// parent schedule in the same transaction.
+    /// Marks a live delivery lease terminally failed.
     ///
     /// # Errors
     ///
@@ -1116,7 +1112,6 @@ impl PostgresRepository {
             .await?
             .ok_or(RepositoryError::LeaseLost)?;
 
-        let completed = complete_one_time_schedule(&mut transaction, &execution, failed_at).await?;
         append_worker_execution_audit(
             &mut transaction,
             &execution,
@@ -1125,23 +1120,6 @@ impl PostgresRepository {
             json!({ "attempt_count": execution.attempt_count }),
         )
         .await?;
-        if completed {
-            let audit = AuditContext {
-                actor_type: ActorType::System,
-                actor_id: worker_id.to_owned(),
-                request_id: None,
-            };
-            append_audit(
-                &mut transaction,
-                Some(&execution.org_id),
-                &audit,
-                "schedule.completed",
-                "schedule",
-                Some(execution.schedule_id.to_string()),
-                json!({ "execution_id": execution.id, "outcome": "failed" }),
-            )
-            .await?;
-        }
         transaction.commit().await?;
         Ok(execution)
     }
@@ -1939,6 +1917,54 @@ struct MaterializationGeneration {
     schedule_kind: &'static str,
 }
 
+async fn append_materialization_audits(
+    transaction: &mut Transaction<'_, Postgres>,
+    schedule: &ScheduleRow,
+    execution: &ExecutionRow,
+    generation: MaterializationGeneration,
+    worker_now: DateTime<Utc>,
+    inserted: bool,
+    audit: &AuditContext,
+) -> Result<(), RepositoryError> {
+    if inserted {
+        append_audit(
+            transaction,
+            Some(&schedule.org_id),
+            audit,
+            "execution.materialized",
+            "execution",
+            Some(execution.id.to_string()),
+            json!({
+                "schedule_id": schedule.id,
+                "schedule_version": generation.schedule_version,
+                "schedule_kind": generation.schedule_kind,
+                "scheduled_for": generation.scheduled_for,
+                "coalesced": schedule.schedule_kind == "recurring"
+                    && generation.scheduled_for < worker_now,
+            }),
+        )
+        .await?;
+    }
+    if generation.schedule_kind == "one_time" {
+        append_audit(
+            transaction,
+            Some(&schedule.org_id),
+            audit,
+            "schedule.archived",
+            "schedule",
+            Some(schedule.id.to_string()),
+            json!({
+                "execution_id": execution.id,
+                "reason": "one_time_triggered",
+                "retention_days": ARCHIVE_RETENTION_DAYS,
+                "scheduled_for": generation.scheduled_for,
+            }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn materialization_generation(
     schedule: &ScheduleRow,
     worker_now: DateTime<Utc>,
@@ -1984,33 +2010,6 @@ fn materialization_generation(
         schedule_version,
         schedule_kind,
     })
-}
-
-async fn complete_one_time_schedule(
-    transaction: &mut Transaction<'_, Postgres>,
-    execution: &ExecutionRow,
-    completed_at: DateTime<Utc>,
-) -> Result<bool, RepositoryError> {
-    if execution.schedule_kind != "one_time" {
-        return Ok(false);
-    }
-
-    let result = sqlx::query(
-        "UPDATE schedules SET \
-             status = 'completed', completed_at = $1, next_run_at = NULL, \
-             version = version + 1 \
-         WHERE id = $2 AND org_id = $3 AND silicon_id = $4 \
-           AND version = $5 AND schedule_kind = 'one_time' \
-           AND deleted_at IS NULL AND status IN ('active', 'paused')",
-    )
-    .bind(completed_at)
-    .bind(execution.schedule_id)
-    .bind(&execution.org_id)
-    .bind(&execution.silicon_id)
-    .bind(execution.schedule_version)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(result.rows_affected() == 1)
 }
 
 async fn lock_live_delivery_schedule(
@@ -2335,7 +2334,7 @@ async fn cleanup_revoked_schedules(
          LEFT JOIN silicon_identities identity \
            ON identity.org_id = schedule.org_id \
           AND identity.principal_id = schedule.owner_principal_id \
-         WHERE schedule.deleted_at IS NULL \
+         WHERE schedule.deleted_at IS NULL AND schedule.status <> 'completed' \
            AND (\
                organization.state IS DISTINCT FROM 'active' \
                OR identity.state IS DISTINCT FROM 'active'\
@@ -2355,7 +2354,7 @@ async fn cleanup_revoked_schedules(
         sqlx::query(
             "UPDATE schedules SET \
                  deleted_at = $1, next_run_at = NULL, version = version + 1 \
-             WHERE id = ANY($2) AND deleted_at IS NULL",
+             WHERE id = ANY($2) AND deleted_at IS NULL AND status <> 'completed'",
         )
         .bind(now)
         .bind(&schedule_ids)
@@ -2412,7 +2411,7 @@ async fn append_revocation_cleanup_audits(
             transaction,
             Some(&schedule.org_id),
             audit,
-            "schedule.deleted_after_iam_revocation",
+            "schedule.archived_after_iam_revocation",
             "schedule",
             Some(schedule.id.to_string()),
             json!({ "silicon_id": schedule.silicon_id }),
@@ -2447,7 +2446,7 @@ async fn soft_delete_iam_schedules(
             sqlx::query_scalar::<_, Uuid>(
                 "SELECT id FROM schedules \
                  WHERE org_id = $1 AND owner_principal_id = $2 \
-                   AND deleted_at IS NULL \
+                   AND deleted_at IS NULL AND status <> 'completed' \
                  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $3",
             )
             .bind(org_id)
@@ -2459,7 +2458,7 @@ async fn soft_delete_iam_schedules(
         IamLifecycleTarget::Organization { org_id } => {
             sqlx::query_scalar::<_, Uuid>(
                 "SELECT id FROM schedules \
-                 WHERE org_id = $1 AND deleted_at IS NULL \
+                 WHERE org_id = $1 AND deleted_at IS NULL AND status <> 'completed' \
                  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $2",
             )
             .bind(org_id)
@@ -2475,7 +2474,7 @@ async fn soft_delete_iam_schedules(
         sqlx::query(
             "UPDATE schedules SET \
                  deleted_at = $1, next_run_at = NULL, version = version + 1 \
-             WHERE id = ANY($2) AND deleted_at IS NULL",
+             WHERE id = ANY($2) AND deleted_at IS NULL AND status <> 'completed'",
         )
         .bind(deleted_at)
         .bind(&schedule_ids)

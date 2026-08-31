@@ -66,7 +66,8 @@ events above retain strict event-specific payload validation.
 Lists schedules visible to the current actor.
 
 - **Authentication:** Bearer token.
-- **Filters:** `silicon_id` and status.
+- **Filters:** `silicon_id`, status, and `section` (`current` by default or
+  `archived`).
 - **Pagination:** Cursor and limit.
 - **Returns:** Schedules and next cursor.
 
@@ -74,9 +75,11 @@ The IAM owner-principal projection is applied by PostgreSQL before the cursor,
 ordering, and limit. A page therefore contains up to the requested number of
 authorized rows even when newer reminders belong to inaccessible Silicons.
 
-Statuses are `active`, `paused`, and `completed`. A one-time schedule becomes
-`completed` after its current execution is delivered or reaches terminal
-failure. A recurring schedule remains active until paused or deleted.
+Statuses are `active`, `paused`, and `completed`. Current results contain active
+and paused reminders. Archived results contain owner-archived reminders plus
+one-time reminders, which become `completed` as soon as their cron occurrence
+is durably materialized. Every response includes `section`, `archived_at`, and
+the fixed 45-day `purge_after` deadline when archived.
 
 ### `POST /schedules`
 
@@ -132,19 +135,20 @@ required and cannot be cleared.
 Pausing prevents new materialization without deleting history. Resuming
 recalculates the next occurrence. An already materialized execution retains its
 immutable text, timezone, public destination, scheduled instant, schedule kind,
-and generation. It may finish its own history, but a stale one-time generation
-cannot mark a later edited or converted schedule `completed`.
+and generation. Archived reminders are immutable.
 
 ### `DELETE /schedules/{schedule_id}`
 
-Deletes a schedule owned by the authenticated Silicon.
+Archives a schedule owned by the authenticated Silicon.
 
 - **Authentication:** Silicon bearer token.
 - **Returns:** `204 No Content`.
 
-Deletion immediately hides the schedule and prevents unaccepted work from being
-claimed again. Its metadata and execution history remain archived for 45 days,
-then a bounded worker sweep permanently removes them.
+Archival immediately removes the reminder from the default current section and
+prevents unaccepted work from being claimed again. It remains readable through
+`section=archived`, together with its execution history, for exactly 45 days.
+Repeating the operation is idempotent and never extends the original retention
+deadline. A bounded worker sweep then permanently removes it.
 
 ## Executions
 
@@ -155,6 +159,11 @@ Lists execution history for a schedule.
 - **Authentication:** Bearer token.
 - **Pagination:** Cursor and limit.
 - **Returns:** Scheduled time, attempt time, delivery time, status, Hook event ID, and failure reason.
+
+Execution history remains readable while its parent reminder is retained in the
+archived section. Automatically archived one-time executions continue normal
+Hook delivery and retry processing; archival records that the cron trigger has
+occurred, not that delivery has already succeeded.
 
 Each occurrence has a stable execution UUID. That UUID is used as the Hook idempotency key so retries cannot cause multiple logical reminders.
 Execution history inherits the parent reminder's IAM-projected owner scope.

@@ -156,7 +156,7 @@ fn contract_exposes_exactly_the_six_documented_operations() -> Result<()> {
         ("post", "/schedules", "createSchedule"),
         ("get", "/schedules/{schedule_id}", "getSchedule"),
         ("patch", "/schedules/{schedule_id}", "updateSchedule"),
-        ("delete", "/schedules/{schedule_id}", "deleteSchedule"),
+        ("delete", "/schedules/{schedule_id}", "archiveSchedule"),
         (
             "get",
             "/schedules/{schedule_id}/executions",
@@ -330,35 +330,7 @@ fn each_operation_has_expected_auth_tenant_and_mutation_contract() -> Result<()>
 #[test]
 fn core_schedule_schemas_are_stable() -> Result<()> {
     let document = load_contract()?;
-
-    let statuses = document
-        .pointer("/components/schemas/ScheduleStatus/enum")
-        .context("ScheduleStatus enum is missing")?;
-    ensure!(
-        string_set(statuses, "ScheduleStatus enum")?
-            == BTreeSet::from([
-                "active".to_owned(),
-                "paused".to_owned(),
-                "completed".to_owned(),
-            ]),
-        "ScheduleStatus values changed"
-    );
-    let mutable_statuses = document
-        .pointer("/components/schemas/MutableScheduleStatus/enum")
-        .context("MutableScheduleStatus enum is missing")?;
-    ensure!(
-        string_set(mutable_statuses, "MutableScheduleStatus enum")?
-            == BTreeSet::from(["active".to_owned(), "paused".to_owned()]),
-        "clients must not set the worker-owned completed status"
-    );
-    let schedule_kinds = document
-        .pointer("/components/schemas/ScheduleKind/enum")
-        .context("ScheduleKind enum is missing")?;
-    ensure!(
-        string_set(schedule_kinds, "ScheduleKind enum")?
-            == BTreeSet::from(["one_time".to_owned(), "recurring".to_owned()]),
-        "ScheduleKind values changed"
-    );
+    assert_schedule_enums(&document)?;
 
     let create = object_at(&document, "/components/schemas/ScheduleCreate")?;
     ensure!(
@@ -403,6 +375,10 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
                 "org_id".to_owned(),
                 "silicon_id".to_owned(),
                 "status".to_owned(),
+                "section".to_owned(),
+                "next_run_at".to_owned(),
+                "archived_at".to_owned(),
+                "purge_after".to_owned(),
                 "timezone".to_owned(),
                 "created_at".to_owned(),
                 "updated_at".to_owned(),
@@ -426,7 +402,67 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
             ) == Some(&json!(1)),
         "create and patch request schema contracts changed"
     );
+    assert_archive_contract(&document)?;
     assert_patch_uses_cron_timing(&document)?;
+    Ok(())
+}
+
+fn assert_schedule_enums(document: &Value) -> Result<()> {
+    let statuses = document
+        .pointer("/components/schemas/ScheduleStatus/enum")
+        .context("ScheduleStatus enum is missing")?;
+    ensure!(
+        string_set(statuses, "ScheduleStatus enum")?
+            == BTreeSet::from([
+                "active".to_owned(),
+                "paused".to_owned(),
+                "completed".to_owned(),
+            ]),
+        "ScheduleStatus values changed"
+    );
+    let mutable_statuses = document
+        .pointer("/components/schemas/MutableScheduleStatus/enum")
+        .context("MutableScheduleStatus enum is missing")?;
+    ensure!(
+        string_set(mutable_statuses, "MutableScheduleStatus enum")?
+            == BTreeSet::from(["active".to_owned(), "paused".to_owned()]),
+        "clients must not set the worker-owned completed status"
+    );
+    let schedule_kinds = document
+        .pointer("/components/schemas/ScheduleKind/enum")
+        .context("ScheduleKind enum is missing")?;
+    ensure!(
+        string_set(schedule_kinds, "ScheduleKind enum")?
+            == BTreeSet::from(["one_time".to_owned(), "recurring".to_owned()]),
+        "ScheduleKind values changed"
+    );
+    Ok(())
+}
+
+fn assert_archive_contract(document: &Value) -> Result<()> {
+    let sections = document
+        .pointer("/components/schemas/ScheduleSection/enum")
+        .context("ScheduleSection enum is missing")?;
+    ensure!(
+        string_set(sections, "ScheduleSection enum")?
+            == BTreeSet::from(["archived".to_owned(), "current".to_owned()]),
+        "ScheduleSection values changed"
+    );
+
+    let list_parameters = document
+        .pointer("/paths/~1schedules/get/parameters")
+        .and_then(Value::as_array)
+        .context("list schedule parameters are missing")?;
+    let section = list_parameters
+        .iter()
+        .find(|parameter| parameter.get("name") == Some(&json!("section")))
+        .context("list schedules must expose the section parameter")?;
+    ensure!(
+        section.pointer("/schema/default") == Some(&json!("current"))
+            && section.pointer("/schema/allOf/0/$ref")
+                == Some(&json!("#/components/schemas/ScheduleSection")),
+        "list schedules section must default to current"
+    );
     Ok(())
 }
 
