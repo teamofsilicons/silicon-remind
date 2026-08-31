@@ -1,0 +1,214 @@
+openapi: 3.1.0
+info:
+  title: Silicon Remind API
+  version: 0.1.0
+  description: Time-based scheduling for Silicons. Supports one-time and recurring schedules and delivers executions through Silicon Hook.
+servers:
+  - url: https://remind.teamofsilicons.com/api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: Schedules
+  - name: Executions
+paths:
+  /schedules:
+    get:
+      tags: [Schedules]
+      operationId: listSchedules
+      summary: List schedules visible to the current actor
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: silicon_id
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/ScheduleStatus' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Schedules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Schedule' } }
+                  next_cursor: { type: [string, 'null'] }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Schedules]
+      operationId: createSchedule
+      summary: Create a one-time or recurring schedule for the authenticated Silicon
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduleCreate' }
+      responses:
+        '201':
+          description: Schedule created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Schedule' }
+        default: { $ref: '#/components/responses/Error' }
+  /schedules/{schedule_id}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/ScheduleId'
+    get:
+      tags: [Schedules]
+      operationId: getSchedule
+      responses:
+        '200':
+          description: Schedule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Schedule' }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Schedules]
+      operationId: updateSchedule
+      summary: Update a schedule owned by the authenticated Silicon
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                text: { type: string, minLength: 1 }
+                timezone: { type: string, description: IANA time-zone identifier }
+                run_at: { type: [string, 'null'], format: date-time }
+                cron: { type: [string, 'null'] }
+                status: { $ref: '#/components/schemas/ScheduleStatus' }
+      responses:
+        '200':
+          description: Updated schedule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Schedule' }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Schedules]
+      operationId: deleteSchedule
+      summary: Delete a schedule owned by the authenticated Silicon
+      responses:
+        '204': { description: Deleted }
+        default: { $ref: '#/components/responses/Error' }
+  /schedules/{schedule_id}/executions:
+    get:
+      tags: [Executions]
+      operationId: listScheduleExecutions
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ScheduleId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Execution history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Execution' } }
+                  next_cursor: { type: [string, 'null'] }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: IAM access token
+  parameters:
+    OrgId:
+      name: X-Org-ID
+      in: header
+      required: true
+      schema: { type: string }
+    ScheduleId:
+      name: schedule_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 255 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    ScheduleStatus:
+      type: string
+      enum: [active, paused, completed]
+    ScheduleCreate:
+      type: object
+      required: [text, timezone]
+      oneOf:
+        - required: [run_at]
+        - required: [cron]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 100000 }
+        timezone: { type: string, description: IANA time-zone identifier, examples: [Asia/Kolkata] }
+        run_at: { type: string, format: date-time, description: One-time execution time }
+        cron: { type: string, description: Five-field Linux cron expression }
+    Schedule:
+      allOf:
+        - $ref: '#/components/schemas/ScheduleCreate'
+        - type: object
+          required: [id, org_id, silicon_id, status, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            org_id: { type: string }
+            silicon_id: { type: string }
+            status: { $ref: '#/components/schemas/ScheduleStatus' }
+            next_run_at: { type: [string, 'null'], format: date-time }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    Execution:
+      type: object
+      required: [id, schedule_id, scheduled_for, status]
+      properties:
+        id: { type: string, format: uuid, description: Stable idempotency identifier for this occurrence }
+        schedule_id: { type: string, format: uuid }
+        scheduled_for: { type: string, format: date-time }
+        attempted_at: { type: [string, 'null'], format: date-time }
+        delivered_at: { type: [string, 'null'], format: date-time }
+        status: { type: string, enum: [pending, delivered, retrying, failed] }
+        hook_event_id: { type: [string, 'null'], format: uuid }
+        failure_reason: { type: [string, 'null'] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
