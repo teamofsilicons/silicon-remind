@@ -35,7 +35,12 @@ pub async fn materialize_due(
     let mut inserted = 0_u64;
 
     for schedule in schedules {
-        let next_run_at = recurring_next(&schedule.timezone, schedule.cron.as_deref(), now)?;
+        let next_run_at = next_after_materialization(
+            &schedule.timezone,
+            &schedule.schedule_kind,
+            &schedule.cron,
+            now,
+        )?;
         let occurrence = repository
             .materialize_locked_occurrence(
                 &mut transaction,
@@ -55,18 +60,23 @@ pub async fn materialize_due(
     Ok(inserted)
 }
 
-fn recurring_next(
+fn next_after_materialization(
     timezone: &str,
-    cron: Option<&str>,
+    schedule_kind: &str,
+    cron: &str,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Option<DateTime<Utc>>> {
-    let Some(expression) = cron else {
+    if schedule_kind == "one_time" {
         return Ok(None);
-    };
+    }
+    anyhow::ensure!(
+        schedule_kind == "recurring",
+        "stored schedule has an invalid kind"
+    );
     let timezone = timezone
         .parse::<Tz>()
         .map_err(|_| anyhow::anyhow!("stored schedule has an invalid timezone"))?;
-    let expression = CronExpression::parse(expression)
+    let expression = CronExpression::parse(cron)
         .map_err(|_| anyhow::anyhow!("stored schedule has an invalid cron expression"))?;
     Ok(Some(expression.next_after(timezone, now)?))
 }
@@ -75,19 +85,22 @@ fn recurring_next(
 mod tests {
     use chrono::{DateTime, Utc};
 
-    use super::recurring_next;
+    use super::next_after_materialization;
 
     #[test]
     fn one_time_has_no_next_occurrence() -> anyhow::Result<()> {
         let now = "2026-08-31T09:00:00Z".parse::<DateTime<Utc>>()?;
-        assert_eq!(recurring_next("UTC", None, now)?, None);
+        assert_eq!(
+            next_after_materialization("UTC", "one_time", "0 9 * * *", now)?,
+            None
+        );
         Ok(())
     }
 
     #[test]
     fn recurring_next_is_strictly_after_worker_time() -> anyhow::Result<()> {
         let now = "2026-08-31T09:00:00Z".parse::<DateTime<Utc>>()?;
-        let next = recurring_next("UTC", Some("0 9 * * *"), now)?;
+        let next = next_after_materialization("UTC", "recurring", "0 9 * * *", now)?;
         assert!(next.is_some_and(|next| next > now));
         Ok(())
     }

@@ -72,10 +72,10 @@ pub struct ScheduleRow {
     pub text: String,
     /// IANA time-zone identifier.
     pub timezone: String,
-    /// Absolute one-time instant.
-    pub run_at: Option<DateTime<Utc>>,
-    /// Five-field recurring expression.
-    pub cron: Option<String>,
+    /// One-time or recurring materialization behavior.
+    pub schedule_kind: String,
+    /// Five-field Linux cron expression.
+    pub cron: String,
     /// Database-validated lifecycle state.
     pub status: String,
     /// Next instant eligible for occurrence materialization.
@@ -109,10 +109,10 @@ pub struct CreateSchedule {
     pub text: String,
     /// Validated IANA time-zone identifier.
     pub timezone: String,
-    /// One-time instant, mutually exclusive with `cron`.
-    pub run_at: Option<DateTime<Utc>>,
-    /// Five-field expression, mutually exclusive with `run_at`.
-    pub cron: Option<String>,
+    /// One-time or recurring materialization behavior.
+    pub schedule_kind: String,
+    /// Five-field Linux cron expression.
+    pub cron: String,
     /// Calculated first occurrence.
     pub next_run_at: DateTime<Utc>,
 }
@@ -152,10 +152,10 @@ pub struct ScheduleReplacement {
     pub text: String,
     /// Resulting IANA time-zone identifier.
     pub timezone: String,
-    /// Resulting one-time instant.
-    pub run_at: Option<DateTime<Utc>>,
-    /// Resulting recurring expression.
-    pub cron: Option<String>,
+    /// Resulting one-time or recurring behavior.
+    pub schedule_kind: String,
+    /// Resulting five-field Linux cron expression.
+    pub cron: String,
     /// Resulting client-controlled status.
     pub status: MutableScheduleStatus,
     /// Recalculated next occurrence, retained while paused if desired.
@@ -467,10 +467,8 @@ pub(crate) struct ScheduleResponse {
     pub silicon_id: String,
     pub text: String,
     pub timezone: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cron: Option<String>,
+    pub kind: String,
+    pub cron: String,
     pub status: String,
     pub next_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -485,7 +483,7 @@ impl From<&ScheduleRow> for ScheduleResponse {
             silicon_id: row.silicon_id.clone(),
             text: row.text.clone(),
             timezone: row.timezone.clone(),
-            run_at: row.run_at,
+            kind: row.schedule_kind.clone(),
             cron: row.cron.clone(),
             status: row.status.clone(),
             next_run_at: row.next_run_at,

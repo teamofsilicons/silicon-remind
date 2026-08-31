@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        CreateScheduleCommand, ExecutionStatus, PatchScheduleCommand, PatchValue, ScheduleStatus,
+        CreateScheduleCommand, ExecutionStatus, PatchScheduleCommand, PatchValue, ScheduleKind,
+        ScheduleStatus,
     },
     infrastructure::postgres::{ExecutionRow, ScheduleRow},
 };
@@ -19,14 +20,17 @@ use crate::{
 pub struct CreateScheduleRequest {
     /// Reminder content.
     pub text: String,
-    /// IANA timezone identifier.
+    /// One-time or recurring materialization behavior.
+    pub kind: ScheduleKind,
+    /// IANA timezone identifier; omitted values use UTC.
+    #[serde(default = "default_timezone")]
     pub timezone: String,
-    /// Absolute one-time occurrence.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_at: Option<DateTime<Utc>>,
-    /// Five-field recurring expression.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cron: Option<String>,
+    /// Five-field Linux cron expression.
+    pub cron: String,
+}
+
+fn default_timezone() -> String {
+    crate::domain::DEFAULT_TIMEZONE.to_owned()
 }
 
 impl From<CreateScheduleRequest> for CreateScheduleCommand {
@@ -34,7 +38,7 @@ impl From<CreateScheduleRequest> for CreateScheduleCommand {
         Self {
             text: request.text,
             timezone: request.timezone,
-            run_at: request.run_at,
+            kind: request.kind,
             cron: request.cron,
         }
     }
@@ -50,10 +54,10 @@ pub struct PatchScheduleRequest {
     /// Replacement timezone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
-    /// One-time value, clear, or omission.
-    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
-    pub run_at: NullablePatch<DateTime<Utc>>,
-    /// Recurring value, clear, or omission.
+    /// Replacement materialization behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ScheduleKind>,
+    /// Cron value, invalid clear, or omission.
     #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
     pub cron: NullablePatch<String>,
     /// Active or paused. `completed` is parsed then rejected by domain policy.
@@ -66,7 +70,7 @@ impl From<PatchScheduleRequest> for PatchScheduleCommand {
         Self {
             text: request.text,
             timezone: request.timezone,
-            run_at: request.run_at.into_domain(),
+            kind: request.kind,
             cron: request.cron.into_domain(),
             status: request.status,
         }
@@ -166,12 +170,10 @@ pub struct ScheduleResponse {
     pub text: String,
     /// IANA timezone identifier.
     pub timezone: String,
-    /// One-time instant when applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_at: Option<DateTime<Utc>>,
-    /// Recurring expression when applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cron: Option<String>,
+    /// One-time or recurring materialization behavior.
+    pub kind: String,
+    /// Five-field Linux cron expression.
+    pub cron: String,
     /// Public lifecycle status.
     pub status: String,
     /// Next due instant or null.
@@ -190,7 +192,7 @@ impl From<&ScheduleRow> for ScheduleResponse {
             silicon_id: row.silicon_id.clone(),
             text: row.text.clone(),
             timezone: row.timezone.clone(),
-            run_at: row.run_at,
+            kind: row.schedule_kind.clone(),
             cron: row.cron.clone(),
             status: row.status.clone(),
             next_run_at: row.next_run_at,
@@ -402,7 +404,10 @@ pub struct InternalEventAccepted {
 
 #[cfg(test)]
 mod tests {
-    use super::{IamWebhookEvent, IamWebhookEventType, NullablePatch, PatchScheduleRequest};
+    use super::{
+        CreateScheduleRequest, IamWebhookEvent, IamWebhookEventType, NullablePatch,
+        PatchScheduleRequest,
+    };
 
     #[test]
     fn patch_distinguishes_omission_null_and_value() -> anyhow::Result<()> {
@@ -419,6 +424,31 @@ mod tests {
     #[test]
     fn request_rejects_unknown_properties() {
         let parsed = serde_json::from_str::<PatchScheduleRequest>(r#"{"unknown":true}"#);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn omitted_create_timezone_canonicalizes_to_utc() -> anyhow::Result<()> {
+        let omitted = serde_json::from_str::<CreateScheduleRequest>(
+            r#"{"text":"report","kind":"one_time","cron":"0 9 * * *"}"#,
+        )?;
+        let explicit = serde_json::from_str::<CreateScheduleRequest>(
+            r#"{"text":"report","kind":"one_time","cron":"0 9 * * *","timezone":"UTC"}"#,
+        )?;
+
+        assert_eq!(omitted.timezone, "UTC");
+        assert_eq!(
+            serde_json::to_value(omitted)?,
+            serde_json::to_value(explicit)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_rejects_the_removed_run_at_property() {
+        let parsed = serde_json::from_str::<CreateScheduleRequest>(
+            r#"{"text":"report","kind":"one_time","cron":"0 9 * * *","run_at":"2026-09-01T09:00:00Z"}"#,
+        );
         assert!(parsed.is_err());
     }
 

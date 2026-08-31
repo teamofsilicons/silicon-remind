@@ -66,7 +66,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::domain::{CreateScheduleCommand, Schedule};
+    use crate::domain::{CreateScheduleCommand, Schedule, ScheduleKind};
 
     fn sample_schedule() -> Result<Schedule, Box<dyn std::error::Error>> {
         let now = Utc
@@ -76,8 +76,8 @@ mod tests {
         let new_schedule = CreateScheduleCommand {
             text: "Prepare the report".to_owned(),
             timezone: "Asia/Kolkata".to_owned(),
-            run_at: Some(now + chrono::Duration::hours(1)),
-            cron: None,
+            kind: ScheduleKind::OneTime,
+            cron: "0 15 * * *".to_owned(),
         }
         .validate(now)?;
 

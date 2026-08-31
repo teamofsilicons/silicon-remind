@@ -148,8 +148,8 @@ async fn terminal_execution_only_completes_its_materialized_one_time_generation(
 
     let edited_id = seed_due_schedule(&database.pool, "edited:tos", now, "one_time").await?;
     let edited = materialize_schedule(&database.repository, edited_id, now, None).await?;
-    let replacement_run_at = now + Duration::hours(1);
-    replace_with_one_time(&database.pool, edited_id, replacement_run_at).await?;
+    let replacement_next_run_at = now + Duration::hours(1);
+    replace_with_one_time(&database.pool, edited_id, replacement_next_run_at).await?;
     claim_execution(&database.repository, edited.id, now).await?;
     database
         .repository
@@ -173,7 +173,7 @@ async fn terminal_execution_only_completes_its_materialized_one_time_generation(
     .await?;
     assert_eq!(recurring.schedule_version, 2);
     assert_eq!(recurring.schedule_kind, "recurring");
-    replace_with_one_time(&database.pool, changed_kind_id, replacement_run_at).await?;
+    replace_with_one_time(&database.pool, changed_kind_id, replacement_next_run_at).await?;
     claim_execution(&database.repository, recurring.id, now).await?;
     database
         .repository
@@ -238,8 +238,8 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         silicon_id: "assistant:tos".to_owned(),
         text: "Prepare report".to_owned(),
         timezone: "UTC".to_owned(),
-        run_at: Some(now + Duration::hours(1)),
-        cron: None,
+        schedule_kind: "one_time".to_owned(),
+        cron: "0 9 * * *".to_owned(),
         next_run_at: now + Duration::hours(1),
     };
     let idempotency = IdempotencyContext {
@@ -430,11 +430,10 @@ async fn seed_due_schedule(
     let schedule_id = Uuid::now_v7();
     let owner_principal_id = Uuid::now_v7();
     let due_at = now - Duration::minutes(1);
-    let (run_at, cron_expression) = match schedule_kind {
-        "one_time" => (Some(due_at), None),
-        "recurring" => (None, Some("* * * * *")),
-        unexpected => anyhow::bail!("unsupported test schedule kind: {unexpected}"),
-    };
+    anyhow::ensure!(
+        matches!(schedule_kind, "one_time" | "recurring"),
+        "unsupported test schedule kind: {schedule_kind}"
+    );
     sqlx::query(
         "INSERT INTO organization_lifecycle (org_id, state) \
          VALUES ('tos', 'active') ON CONFLICT (org_id) DO NOTHING",
@@ -452,15 +451,14 @@ async fn seed_due_schedule(
     sqlx::query(
         "INSERT INTO schedules (\
              id, org_id, owner_principal_id, silicon_id, reminder_text, \
-             timezone, run_at, cron_expression, status, next_run_at\
-         ) VALUES ($1, 'tos', $2, $3, 'generation test', 'UTC', $4, $5, \
-                   'active', $6)",
+             timezone, schedule_kind, cron_expression, status, next_run_at\
+         ) VALUES ($1, 'tos', $2, $3, 'generation test', 'UTC', $4, \
+                   '* * * * *', 'active', $5)",
     )
     .bind(schedule_id)
     .bind(owner_principal_id)
     .bind(silicon_id)
-    .bind(run_at)
-    .bind(cron_expression)
+    .bind(schedule_kind)
     .bind(due_at)
     .execute(pool)
     .await?;
@@ -518,15 +516,16 @@ async fn claim_execution(
 async fn replace_with_one_time(
     pool: &PgPool,
     schedule_id: Uuid,
-    run_at: DateTime<Utc>,
+    next_run_at: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let result = sqlx::query(
         "UPDATE schedules SET \
-             run_at = $1, cron_expression = NULL, next_run_at = $1, \
+             schedule_kind = 'one_time', cron_expression = '0 0 * * *', \
+             next_run_at = $1, \
              version = version + 1 \
          WHERE id = $2",
     )
-    .bind(run_at)
+    .bind(next_run_at)
     .bind(schedule_id)
     .execute(pool)
     .await?;
@@ -566,11 +565,11 @@ async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixtur
     sqlx::query(
         "INSERT INTO schedules (\
              id, org_id, owner_principal_id, silicon_id, reminder_text, \
-             timezone, cron_expression, status, next_run_at\
+             timezone, schedule_kind, cron_expression, status, next_run_at\
          ) VALUES \
-             ($1, 'tos', $4, 'removed:tos', 'target', 'UTC', '* * * * *', \
+             ($1, 'tos', $4, 'removed:tos', 'target', 'UTC', 'recurring', '* * * * *', \
               'active', $3), \
-             ($2, 'tos', $5, 'remaining:tos', 'other', 'UTC', '* * * * *', \
+             ($2, 'tos', $5, 'remaining:tos', 'other', 'UTC', 'recurring', '* * * * *', \
               'active', $3)",
     )
     .bind(target_schedule_id)

@@ -5,6 +5,11 @@ Silicon reminders. It authenticates callers through Silicon IAM, stores schedule
 and execution state in PostgreSQL, and submits signed, idempotent events to
 Silicon Hook when occurrences become due.
 
+Both reminder kinds use five-field Linux cron syntax. Clients select
+`one_time` or `recurring` explicitly and may omit the IANA timezone, in which
+case Remind canonicalizes it to UTC before calculating and storing the next
+occurrence.
+
 The service is a Rust modular monolith with three independently runnable
 processes:
 

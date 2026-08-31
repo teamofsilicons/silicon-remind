@@ -89,8 +89,8 @@ paths:
               properties:
                 text: { type: string, minLength: 1 }
                 timezone: { type: string, description: IANA time-zone identifier }
-                run_at: { type: [string, 'null'], format: date-time }
-                cron: { type: [string, 'null'] }
+                kind: { $ref: '#/components/schemas/ScheduleKind' }
+                cron: { type: string, description: Five-field Linux cron expression }
                 status: { $ref: '#/components/schemas/MutableScheduleStatus' }
       responses:
         '200':
@@ -186,23 +186,23 @@ components:
     MutableScheduleStatus:
       type: string
       enum: [active, paused]
+    ScheduleKind:
+      type: string
+      enum: [one_time, recurring]
     ScheduleCreate:
       type: object
-      required: [text, timezone]
+      required: [text, kind, cron]
       additionalProperties: false
-      oneOf:
-        - required: [run_at]
-        - required: [cron]
       properties:
         text: { type: string, minLength: 1, maxLength: 100000 }
-        timezone: { type: string, description: IANA time-zone identifier, examples: [Asia/Kolkata] }
-        run_at: { type: string, format: date-time, description: One-time execution time }
+        kind: { $ref: '#/components/schemas/ScheduleKind' }
         cron: { type: string, description: Five-field Linux cron expression }
+        timezone: { type: string, default: UTC, description: IANA time-zone identifier, examples: [Asia/Kolkata] }
     Schedule:
       allOf:
         - $ref: '#/components/schemas/ScheduleCreate'
         - type: object
-          required: [id, org_id, silicon_id, status, created_at, updated_at]
+          required: [id, org_id, silicon_id, timezone, status, created_at, updated_at]
           properties:
             id: { type: string, format: uuid }
             org_id: { $ref: '#/components/schemas/OrgId' }

@@ -13,8 +13,8 @@ use crate::{
     application::ports::Clock,
     domain::{
         Actor, ActorKind, CreateScheduleCommand, CronExpression, CursorKind, PageCursor,
-        PatchScheduleCommand, Schedule, ScheduleStatus, ScheduleTiming, ScheduleValidationError,
-        silicon_id_belongs_to_org,
+        PatchScheduleCommand, Schedule, ScheduleKind, ScheduleStatus, ScheduleTiming,
+        ScheduleValidationError, silicon_id_belongs_to_org,
     },
     error::AppError,
     infrastructure::postgres::{
@@ -102,8 +102,8 @@ impl ScheduleService {
             silicon_id: identity.silicon_id,
             text: validated.text().to_owned(),
             timezone: validated.timezone().name().to_owned(),
-            run_at: validated.timing().run_at(),
-            cron: validated.timing().cron().map(ToString::to_string),
+            schedule_kind: validated.timing().kind().as_str().to_owned(),
+            cron: validated.timing().cron().to_string(),
             next_run_at: validated.next_run_at(),
         };
         let audit = audit_context(actor);
@@ -221,8 +221,8 @@ impl ScheduleService {
             expected_version: current_row.version,
             text: schedule.text.clone(),
             timezone: schedule.timezone.name().to_owned(),
-            run_at: schedule.run_at(),
-            cron: schedule.cron().map(ToString::to_string),
+            schedule_kind: schedule.kind().as_str().to_owned(),
+            cron: schedule.cron().to_string(),
             status,
             next_run_at: schedule.next_run_at,
         };
@@ -362,19 +362,13 @@ fn schedule_from_row(row: &ScheduleRow) -> Result<Schedule, AppError> {
         .timezone
         .parse::<Tz>()
         .map_err(|error| AppError::internal("stored_schedule_timezone", error))?;
-    let timing = match (row.run_at, row.cron.as_deref()) {
-        (Some(run_at), None) => ScheduleTiming::OneTime { run_at },
-        (None, Some(cron)) => ScheduleTiming::Recurring {
-            expression: CronExpression::parse(cron)
-                .map_err(|error| AppError::internal("stored_schedule_cron", error))?,
-        },
-        _ => {
-            return Err(AppError::internal(
-                "stored_schedule_timing",
-                anyhow::anyhow!("schedule timing invariant violated"),
-            ));
-        }
-    };
+    let kind = row
+        .schedule_kind
+        .parse::<ScheduleKind>()
+        .map_err(|error| AppError::internal("stored_schedule_kind", error))?;
+    let expression = CronExpression::parse(&row.cron)
+        .map_err(|error| AppError::internal("stored_schedule_cron", error))?;
+    let timing = ScheduleTiming::new(kind, expression);
     let status = match row.status.as_str() {
         "active" => ScheduleStatus::Active,
         "paused" => ScheduleStatus::Paused,

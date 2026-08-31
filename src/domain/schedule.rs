@@ -14,6 +14,48 @@ pub const MAX_TEXT_BYTES: usize = 100_000;
 /// Number of days for which completed and deleted schedules are retained.
 pub const ARCHIVE_RETENTION_DAYS: i64 = 45;
 
+/// Canonical timezone used when a client omits one.
+pub const DEFAULT_TIMEZONE: &str = "UTC";
+
+/// Whether a cron expression materializes one occurrence or repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleKind {
+    /// Materialize only the first matching occurrence.
+    OneTime,
+    /// Materialize every matching occurrence until paused or archived.
+    Recurring,
+}
+
+impl ScheduleKind {
+    /// Returns the stable persistence and API representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OneTime => "one_time",
+            Self::Recurring => "recurring",
+        }
+    }
+}
+
+impl fmt::Display for ScheduleKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ScheduleKind {
+    type Err = ScheduleValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "one_time" => Ok(Self::OneTime),
+            "recurring" => Ok(Self::Recurring),
+            _ => Err(ScheduleValidationError::InvalidScheduleKind),
+        }
+    }
+}
+
 /// Public lifecycle states for a schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,14 +173,14 @@ impl FromStr for CronExpression {
     }
 }
 
-/// The mutually exclusive timing representation for a schedule.
+/// A five-field cron expression paired with its materialization policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScheduleTiming {
-    /// A single execution at an absolute UTC instant.
+    /// The first matching cron occurrence is materialized once.
     OneTime {
-        /// The immutable absolute execution instant.
-        run_at: DateTime<Utc>,
+        /// The validated five-field expression.
+        expression: CronExpression,
     },
     /// Repeated wall-clock evaluation in the schedule's IANA timezone.
     Recurring {
@@ -148,21 +190,29 @@ pub enum ScheduleTiming {
 }
 
 impl ScheduleTiming {
-    /// Returns the one-time instant, if this is a one-time schedule.
+    /// Constructs timing from the public kind and validated expression.
     #[must_use]
-    pub const fn run_at(&self) -> Option<DateTime<Utc>> {
-        match self {
-            Self::OneTime { run_at } => Some(*run_at),
-            Self::Recurring { .. } => None,
+    pub const fn new(kind: ScheduleKind, expression: CronExpression) -> Self {
+        match kind {
+            ScheduleKind::OneTime => Self::OneTime { expression },
+            ScheduleKind::Recurring => Self::Recurring { expression },
         }
     }
 
-    /// Returns the cron expression, if this is a recurring schedule.
+    /// Returns the materialization policy.
     #[must_use]
-    pub const fn cron(&self) -> Option<&CronExpression> {
+    pub const fn kind(&self) -> ScheduleKind {
         match self {
-            Self::OneTime { .. } => None,
-            Self::Recurring { expression } => Some(expression),
+            Self::OneTime { .. } => ScheduleKind::OneTime,
+            Self::Recurring { .. } => ScheduleKind::Recurring,
+        }
+    }
+
+    /// Returns the shared cron expression.
+    #[must_use]
+    pub const fn cron(&self) -> &CronExpression {
+        match self {
+            Self::OneTime { expression } | Self::Recurring { expression } => expression,
         }
     }
 
@@ -177,10 +227,7 @@ impl ScheduleTiming {
         timezone: Tz,
         after: DateTime<Utc>,
     ) -> Result<DateTime<Utc>, ScheduleValidationError> {
-        match self {
-            Self::OneTime { run_at } => Ok(*run_at),
-            Self::Recurring { expression } => expression.next_after(timezone, after),
-        }
+        self.cron().next_after(timezone, after)
     }
 }
 
@@ -224,12 +271,12 @@ impl NewSchedule {
 pub struct CreateScheduleCommand {
     /// Reminder text, preserved verbatim after validation.
     pub text: String,
-    /// IANA timezone name.
+    /// Canonical IANA timezone name.
     pub timezone: String,
-    /// Absolute instant for a one-time schedule.
-    pub run_at: Option<DateTime<Utc>>,
-    /// Five-field expression for a recurring schedule.
-    pub cron: Option<String>,
+    /// One-time or recurring materialization behavior.
+    pub kind: ScheduleKind,
+    /// Five-field Linux cron expression.
+    pub cron: String,
 }
 
 impl CreateScheduleCommand {
@@ -237,23 +284,12 @@ impl CreateScheduleCommand {
     ///
     /// # Errors
     ///
-    /// Returns [`ScheduleValidationError`] when text or timezone validation
-    /// fails, the timing fields are missing or conflict, `run_at` is not in the
-    /// future, the cron expression is invalid, or no future occurrence exists.
+    /// Returns [`ScheduleValidationError`] when text, timezone, or cron
+    /// validation fails, or when no future occurrence exists.
     pub fn validate(self, now: DateTime<Utc>) -> Result<NewSchedule, ScheduleValidationError> {
         let text = validate_text(self.text)?;
         let timezone = parse_timezone(&self.timezone)?;
-        let timing = match (self.run_at, self.cron) {
-            (Some(run_at), None) => {
-                validate_future_run_at(run_at, now)?;
-                ScheduleTiming::OneTime { run_at }
-            }
-            (None, Some(expression)) => ScheduleTiming::Recurring {
-                expression: CronExpression::parse(expression)?,
-            },
-            (None, None) => return Err(ScheduleValidationError::TimingRequired),
-            (Some(_), Some(_)) => return Err(ScheduleValidationError::TimingConflict),
-        };
+        let timing = ScheduleTiming::new(self.kind, CronExpression::parse(self.cron)?);
         let next_run_at = timing.next_after(timezone, now)?;
 
         Ok(NewSchedule {
@@ -292,9 +328,9 @@ pub struct PatchScheduleCommand {
     pub text: Option<String>,
     /// Replacement IANA timezone when present.
     pub timezone: Option<String>,
-    /// One-time instant merge-patch operation.
-    pub run_at: PatchValue<DateTime<Utc>>,
-    /// Cron expression merge-patch operation.
+    /// Replacement materialization behavior when present.
+    pub kind: Option<ScheduleKind>,
+    /// Cron expression merge-patch operation; explicit null is invalid.
     pub cron: PatchValue<String>,
     /// Requested public lifecycle status.
     pub status: Option<ScheduleStatus>,
@@ -318,7 +354,7 @@ impl PatchScheduleCommand {
     ) -> Result<ValidatedSchedulePatch, ScheduleValidationError> {
         if self.text.is_none()
             && self.timezone.is_none()
-            && self.run_at.is_unchanged()
+            && self.kind.is_none()
             && self.cron.is_unchanged()
             && self.status.is_none()
         {
@@ -337,33 +373,23 @@ impl PatchScheduleCommand {
             None => current.timezone,
         };
 
-        let run_at_was_set = matches!(self.run_at, PatchValue::Set(_));
-        let merged_run_at = merge_patch_value(self.run_at, current.timing.run_at());
-        if run_at_was_set && let Some(run_at) = merged_run_at {
-            validate_future_run_at(run_at, now)?;
-        }
-
-        let merged_cron = match self.cron {
-            PatchValue::Unchanged => current.timing.cron().cloned(),
-            PatchValue::Clear => None,
-            PatchValue::Set(expression) => Some(CronExpression::parse(expression)?),
+        let expression = match self.cron {
+            PatchValue::Unchanged => current.timing.cron().clone(),
+            PatchValue::Clear => return Err(ScheduleValidationError::CronRequired),
+            PatchValue::Set(expression) => CronExpression::parse(expression)?,
         };
-        let timing = match (merged_run_at, merged_cron) {
-            (Some(run_at), None) => ScheduleTiming::OneTime { run_at },
-            (None, Some(expression)) => ScheduleTiming::Recurring { expression },
-            (None, None) => return Err(ScheduleValidationError::TimingRequired),
-            (Some(_), Some(_)) => return Err(ScheduleValidationError::TimingConflict),
-        };
+        let kind = self.kind.unwrap_or(current.timing.kind());
+        let timing = ScheduleTiming::new(kind, expression);
 
         let status = self.status.unwrap_or(current.status);
         current.status.validate_client_transition(status)?;
 
         let timing_changed = timing != current.timing;
-        let timezone_changes_recurrence = timezone != current.timezone && timing.cron().is_some();
+        let timezone_changed = timezone != current.timezone;
         let resumed = current.status == ScheduleStatus::Paused && status == ScheduleStatus::Active;
         let next_run_at = match status {
             ScheduleStatus::Paused => None,
-            ScheduleStatus::Active if timing_changed || timezone_changes_recurrence || resumed => {
+            ScheduleStatus::Active if timing_changed || timezone_changed || resumed => {
                 Some(timing.next_after(timezone, now)?)
             }
             ScheduleStatus::Active => current.next_run_at,
@@ -463,15 +489,15 @@ impl Schedule {
         }
     }
 
-    /// Returns the one-time instant exposed by the public API.
+    /// Returns the schedule's materialization behavior.
     #[must_use]
-    pub const fn run_at(&self) -> Option<DateTime<Utc>> {
-        self.timing.run_at()
+    pub const fn kind(&self) -> ScheduleKind {
+        self.timing.kind()
     }
 
-    /// Returns the recurring expression exposed by the public API.
+    /// Returns the cron expression exposed by the public API.
     #[must_use]
-    pub const fn cron(&self) -> Option<&CronExpression> {
+    pub const fn cron(&self) -> &CronExpression {
         self.timing.cron()
     }
 
@@ -602,15 +628,12 @@ pub enum ScheduleValidationError {
         /// Rejected timezone identifier.
         timezone: String,
     },
-    /// Neither timing representation remains after validation.
-    #[error("exactly one of run_at or cron is required")]
-    TimingRequired,
-    /// Both mutually exclusive timing representations remain after validation.
-    #[error("run_at and cron cannot both be set")]
-    TimingConflict,
-    /// A newly supplied one-time instant is not strictly in the future.
-    #[error("run_at must be strictly after the current time")]
-    RunAtNotFuture,
+    /// A stored or externally supplied kind is not supported.
+    #[error("schedule kind must be one_time or recurring")]
+    InvalidScheduleKind,
+    /// A patch attempted to remove the required cron expression.
+    #[error("cron is required")]
+    CronRequired,
     /// A cron expression does not contain exactly five fields.
     #[error("cron must contain exactly five fields, received {actual}")]
     InvalidCronFieldCount {
@@ -713,24 +736,6 @@ fn parse_timezone(timezone: &str) -> Result<Tz, ScheduleValidationError> {
     })
 }
 
-fn validate_future_run_at(
-    run_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> Result<(), ScheduleValidationError> {
-    if run_at <= now {
-        return Err(ScheduleValidationError::RunAtNotFuture);
-    }
-    Ok(())
-}
-
-fn merge_patch_value<T>(patch: PatchValue<T>, current: Option<T>) -> Option<T> {
-    match patch {
-        PatchValue::Unchanged => current,
-        PatchValue::Clear => None,
-        PatchValue::Set(value) => Some(value),
-    }
-}
-
 fn next_version(version: u64) -> Result<u64, ScheduleValidationError> {
     version
         .checked_add(1)
@@ -761,8 +766,17 @@ mod tests {
         CreateScheduleCommand {
             text: "Daily report".to_owned(),
             timezone: "Asia/Kolkata".to_owned(),
-            run_at: None,
-            cron: Some("0 9 * * *".to_owned()),
+            kind: ScheduleKind::Recurring,
+            cron: "0 9 * * *".to_owned(),
+        }
+    }
+
+    fn one_time_command() -> CreateScheduleCommand {
+        CreateScheduleCommand {
+            text: "One-time report".to_owned(),
+            timezone: "UTC".to_owned(),
+            kind: ScheduleKind::OneTime,
+            cron: "0 12 * * *".to_owned(),
         }
     }
 
@@ -780,30 +794,17 @@ mod tests {
     }
 
     #[test]
-    fn create_requires_exactly_one_timing_representation() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn both_schedule_kinds_use_the_same_cron_syntax() -> Result<(), Box<dyn std::error::Error>> {
         let now = instant(2026, 8, 31, 9, 0)?;
-        let neither = CreateScheduleCommand {
-            text: "Reminder".to_owned(),
-            timezone: "UTC".to_owned(),
-            run_at: None,
-            cron: None,
-        };
-        let both = CreateScheduleCommand {
-            text: "Reminder".to_owned(),
-            timezone: "UTC".to_owned(),
-            run_at: Some(now + Duration::hours(1)),
-            cron: Some("0 9 * * *".to_owned()),
-        };
+        let recurring = recurring_command().validate(now)?;
+        let one_time = one_time_command().validate(now)?;
 
-        assert_eq!(
-            neither.validate(now),
-            Err(ScheduleValidationError::TimingRequired)
-        );
-        assert_eq!(
-            both.validate(now),
-            Err(ScheduleValidationError::TimingConflict)
-        );
+        assert_eq!(recurring.timing().kind(), ScheduleKind::Recurring);
+        assert_eq!(one_time.timing().kind(), ScheduleKind::OneTime);
+        assert_eq!(recurring.timing().cron().as_str(), "0 9 * * *");
+        assert_eq!(one_time.timing().cron().as_str(), "0 12 * * *");
+        assert!(recurring.next_run_at() > now);
+        assert!(one_time.next_run_at() > now);
         Ok(())
     }
 
@@ -814,8 +815,8 @@ mod tests {
         let command = CreateScheduleCommand {
             text: exact.clone(),
             timezone: "UTC".to_owned(),
-            run_at: Some(now + Duration::minutes(1)),
-            cron: None,
+            kind: ScheduleKind::OneTime,
+            cron: "* * * * *".to_owned(),
         };
         let validated = command.validate(now)?;
         assert_eq!(validated.text(), exact);
@@ -823,8 +824,8 @@ mod tests {
         let too_long = CreateScheduleCommand {
             text: format!("{exact}é"),
             timezone: "UTC".to_owned(),
-            run_at: Some(now + Duration::minutes(1)),
-            cron: None,
+            kind: ScheduleKind::OneTime,
+            cron: "* * * * *".to_owned(),
         };
         assert_eq!(
             too_long.validate(now),
@@ -843,8 +844,8 @@ mod tests {
         let empty = CreateScheduleCommand {
             text: " \n\t ".to_owned(),
             timezone: "UTC".to_owned(),
-            run_at: Some(now + Duration::minutes(1)),
-            cron: None,
+            kind: ScheduleKind::OneTime,
+            cron: "* * * * *".to_owned(),
         };
         assert_eq!(empty.validate(now), Err(ScheduleValidationError::EmptyText));
 
@@ -852,8 +853,8 @@ mod tests {
         let valid = CreateScheduleCommand {
             text: original.to_owned(),
             timezone: "UTC".to_owned(),
-            run_at: Some(now + Duration::minutes(1)),
-            cron: None,
+            kind: ScheduleKind::OneTime,
+            cron: "* * * * *".to_owned(),
         }
         .validate(now)?;
         assert_eq!(valid.text(), original);
@@ -861,20 +862,12 @@ mod tests {
     }
 
     #[test]
-    fn one_time_instant_must_be_strictly_future() -> Result<(), Box<dyn std::error::Error>> {
+    fn one_time_cron_selects_only_its_first_future_occurrence()
+    -> Result<(), Box<dyn std::error::Error>> {
         let now = instant(2026, 8, 31, 9, 0)?;
-        for run_at in [now - Duration::seconds(1), now] {
-            let command = CreateScheduleCommand {
-                text: "Reminder".to_owned(),
-                timezone: "UTC".to_owned(),
-                run_at: Some(run_at),
-                cron: None,
-            };
-            assert_eq!(
-                command.validate(now),
-                Err(ScheduleValidationError::RunAtNotFuture)
-            );
-        }
+        let validated = one_time_command().validate(now)?;
+
+        assert_eq!(validated.next_run_at(), instant(2026, 8, 31, 12, 0)?);
         Ok(())
     }
 
@@ -884,8 +877,8 @@ mod tests {
         let command = CreateScheduleCommand {
             text: "Reminder".to_owned(),
             timezone: "IST".to_owned(),
-            run_at: Some(now + Duration::minutes(1)),
-            cron: None,
+            kind: ScheduleKind::OneTime,
+            cron: "* * * * *".to_owned(),
         };
 
         assert_eq!(
@@ -990,30 +983,61 @@ mod tests {
     }
 
     #[test]
-    fn switching_timing_requires_explicitly_clearing_the_old_field()
+    fn changing_kind_or_cron_recalculates_the_next_occurrence()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut schedule = active_recurring_schedule()?;
         let now = instant(2026, 8, 31, 10, 0)?;
-        let run_at = now + Duration::hours(2);
-        let conflict = PatchScheduleCommand {
-            run_at: PatchValue::Set(run_at),
-            ..PatchScheduleCommand::default()
-        };
-        assert_eq!(
-            conflict.validate(&schedule, now),
-            Err(ScheduleValidationError::TimingConflict)
-        );
-
-        let valid = PatchScheduleCommand {
-            run_at: PatchValue::Set(run_at),
-            cron: PatchValue::Clear,
+        let patch = PatchScheduleCommand {
+            kind: Some(ScheduleKind::OneTime),
+            cron: PatchValue::Set("30 12 * * *".to_owned()),
             ..PatchScheduleCommand::default()
         }
         .validate(&schedule, now)?;
-        schedule.apply_patch(valid)?;
-        assert_eq!(schedule.run_at(), Some(run_at));
-        assert!(schedule.cron().is_none());
-        assert_eq!(schedule.next_run_at, Some(run_at));
+        schedule.apply_patch(patch)?;
+
+        assert_eq!(schedule.kind(), ScheduleKind::OneTime);
+        assert_eq!(schedule.cron().as_str(), "30 12 * * *");
+        assert_eq!(schedule.next_run_at, Some(instant(2026, 9, 1, 7, 0)?));
+        Ok(())
+    }
+
+    #[test]
+    fn clearing_the_required_cron_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = active_recurring_schedule()?;
+        let now = instant(2026, 8, 31, 10, 0)?;
+        let patch = PatchScheduleCommand {
+            cron: PatchValue::Clear,
+            ..PatchScheduleCommand::default()
+        };
+
+        assert_eq!(
+            patch.validate(&schedule, now),
+            Err(ScheduleValidationError::CronRequired)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn timezone_change_recalculates_a_one_time_cron() -> Result<(), Box<dyn std::error::Error>> {
+        let created_at = instant(2026, 8, 31, 9, 0)?;
+        let validated = one_time_command().validate(created_at)?;
+        let mut schedule = Schedule::new(
+            Uuid::from_u128(8),
+            "org-1",
+            "00000000-0000-0000-0000-000000000008",
+            "silicon-1",
+            validated,
+            created_at,
+        );
+        let patch = PatchScheduleCommand {
+            timezone: Some("Asia/Kolkata".to_owned()),
+            ..PatchScheduleCommand::default()
+        }
+        .validate(&schedule, instant(2026, 8, 31, 10, 0)?)?;
+        schedule.apply_patch(patch)?;
+
+        assert_eq!(schedule.kind(), ScheduleKind::OneTime);
+        assert_eq!(schedule.next_run_at, Some(instant(2026, 9, 1, 6, 30)?));
         Ok(())
     }
 
@@ -1103,13 +1127,7 @@ mod tests {
     fn only_one_time_worker_flow_can_complete_a_schedule() -> Result<(), Box<dyn std::error::Error>>
     {
         let now = instant(2026, 8, 31, 9, 0)?;
-        let one_time = CreateScheduleCommand {
-            text: "Reminder".to_owned(),
-            timezone: "UTC".to_owned(),
-            run_at: Some(now + Duration::minutes(1)),
-            cron: None,
-        }
-        .validate(now)?;
+        let one_time = one_time_command().validate(now)?;
         let mut one_time = Schedule::new(
             Uuid::from_u128(1),
             "org-1",

@@ -351,6 +351,14 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
             == BTreeSet::from(["active".to_owned(), "paused".to_owned()]),
         "clients must not set the worker-owned completed status"
     );
+    let schedule_kinds = document
+        .pointer("/components/schemas/ScheduleKind/enum")
+        .context("ScheduleKind enum is missing")?;
+    ensure!(
+        string_set(schedule_kinds, "ScheduleKind enum")?
+            == BTreeSet::from(["one_time".to_owned(), "recurring".to_owned()]),
+        "ScheduleKind values changed"
+    );
 
     let create = object_at(&document, "/components/schemas/ScheduleCreate")?;
     ensure!(
@@ -359,44 +367,30 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
                 .get("required")
                 .context("ScheduleCreate.required is missing")?,
             "ScheduleCreate.required",
-        )? == BTreeSet::from(["text".to_owned(), "timezone".to_owned()]),
-        "ScheduleCreate must require text and timezone"
+        )? == BTreeSet::from(["cron".to_owned(), "kind".to_owned(), "text".to_owned()]),
+        "ScheduleCreate must require text, kind, and cron"
     );
-    let alternatives = create
-        .get("oneOf")
-        .and_then(Value::as_array)
-        .context("ScheduleCreate.oneOf is missing")?;
     ensure!(
-        alternatives.len() == 2,
-        "ScheduleCreate must have exactly two timing alternatives"
-    );
-    let timing_requirements = alternatives
-        .iter()
-        .map(|alternative| {
-            string_set(
-                alternative
-                    .get("required")
-                    .context("timing alternative must have required")?,
-                "timing alternative required",
-            )
-        })
-        .collect::<Result<BTreeSet<_>>>()?;
-    ensure!(
-        timing_requirements
-            == BTreeSet::from([
-                BTreeSet::from(["run_at".to_owned()]),
-                BTreeSet::from(["cron".to_owned()]),
-            ]),
-        "ScheduleCreate must require exactly one timing representation"
+        create.get("oneOf").is_none(),
+        "ScheduleCreate must use explicit kind plus cron, not timing alternatives"
     );
     ensure!(
         document.pointer("/components/schemas/ScheduleCreate/properties/text/minLength")
             == Some(&json!(1))
             && document.pointer("/components/schemas/ScheduleCreate/properties/text/maxLength")
                 == Some(&json!(100_000))
-            && document.pointer("/components/schemas/ScheduleCreate/properties/run_at/format")
-                == Some(&Value::String("date-time".to_owned())),
-        "ScheduleCreate text or run_at constraints changed"
+            && document.pointer("/components/schemas/ScheduleCreate/properties/kind/$ref")
+                == Some(&Value::String(
+                    "#/components/schemas/ScheduleKind".to_owned(),
+                ))
+            && document.pointer("/components/schemas/ScheduleCreate/properties/cron/type")
+                == Some(&Value::String("string".to_owned()))
+            && document.pointer("/components/schemas/ScheduleCreate/properties/timezone/default")
+                == Some(&Value::String("UTC".to_owned()))
+            && document
+                .pointer("/components/schemas/ScheduleCreate/properties/run_at")
+                .is_none(),
+        "ScheduleCreate cron-only timing constraints changed"
     );
 
     let schedule_required = document
@@ -409,6 +403,7 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
                 "org_id".to_owned(),
                 "silicon_id".to_owned(),
                 "status".to_owned(),
+                "timezone".to_owned(),
                 "created_at".to_owned(),
                 "updated_at".to_owned(),
             ]),
@@ -430,6 +425,23 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
                 "/paths/~1schedules~1{schedule_id}/patch/requestBody/content/application~1json/schema/minProperties",
             ) == Some(&json!(1)),
         "create and patch request schema contracts changed"
+    );
+    assert_patch_uses_cron_timing(&document)?;
+    Ok(())
+}
+
+fn assert_patch_uses_cron_timing(document: &Value) -> Result<()> {
+    let base = "/paths/~1schedules~1{schedule_id}/patch/requestBody/content/\
+                application~1json/schema/properties";
+    ensure!(
+        document.pointer(&format!("{base}/kind/$ref"))
+            == Some(&Value::String(
+                "#/components/schemas/ScheduleKind".to_owned(),
+            ))
+            && document.pointer(&format!("{base}/cron/type"))
+                == Some(&Value::String("string".to_owned()))
+            && document.pointer(&format!("{base}/run_at")).is_none(),
+        "PATCH must expose kind plus cron without run_at"
     );
     Ok(())
 }

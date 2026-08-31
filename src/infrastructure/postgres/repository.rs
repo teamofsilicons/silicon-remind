@@ -25,12 +25,12 @@ const MAX_FAILURE_REASON_BYTES: usize = 4_096;
 
 const SCHEDULE_COLUMNS: &str = "\
     s.id, s.org_id, s.owner_principal_id, s.silicon_id, s.reminder_text AS text, s.timezone, \
-    s.run_at, s.cron_expression AS cron, s.status, s.next_run_at, s.version, \
+    s.schedule_kind, s.cron_expression AS cron, s.status, s.next_run_at, s.version, \
     s.completed_at, s.deleted_at, s.purge_after, s.created_at, s.updated_at";
 
 const SCHEDULE_RETURNING_COLUMNS: &str = "\
     id, org_id, owner_principal_id, silicon_id, reminder_text AS text, timezone, \
-    run_at, cron_expression AS cron, status, next_run_at, version, \
+    schedule_kind, cron_expression AS cron, status, next_run_at, version, \
     completed_at, deleted_at, purge_after, created_at, updated_at";
 
 const EXECUTION_COLUMNS: &str = "\
@@ -463,7 +463,7 @@ impl PostgresRepository {
         let sql = format!(
             "INSERT INTO schedules (\
                  id, org_id, owner_principal_id, silicon_id, reminder_text, \
-                 timezone, run_at, cron_expression, status, next_run_at\
+                 timezone, schedule_kind, cron_expression, status, next_run_at\
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9) \
              RETURNING {SCHEDULE_RETURNING_COLUMNS}"
         );
@@ -474,7 +474,7 @@ impl PostgresRepository {
             .bind(&schedule.silicon_id)
             .bind(&schedule.text)
             .bind(&schedule.timezone)
-            .bind(schedule.run_at)
+            .bind(&schedule.schedule_kind)
             .bind(&schedule.cron)
             .bind(schedule.next_run_at)
             .fetch_one(&mut *transaction)
@@ -489,7 +489,7 @@ impl PostgresRepository {
             Some(schedule.id.to_string()),
             json!({
                 "owner_silicon_id": schedule.silicon_id,
-                "kind": if schedule.run_at.is_some() { "one_time" } else { "recurring" },
+                "kind": schedule.schedule_kind,
                 "version": row.version,
             }),
         )
@@ -568,7 +568,7 @@ impl PostgresRepository {
 
         let update_sql = format!(
             "UPDATE schedules SET \
-                 reminder_text = $1, timezone = $2, run_at = $3, \
+                 reminder_text = $1, timezone = $2, schedule_kind = $3, \
                  cron_expression = $4, status = $5, next_run_at = $6, \
                  version = version + 1 \
              WHERE id = $7 AND org_id = $8 AND owner_principal_id = $9 \
@@ -578,7 +578,7 @@ impl PostgresRepository {
         let row = sqlx::query_as::<_, ScheduleRow>(AssertSqlSafe(update_sql))
             .bind(&replacement.text)
             .bind(&replacement.timezone)
-            .bind(replacement.run_at)
+            .bind(&replacement.schedule_kind)
             .bind(&replacement.cron)
             .bind(replacement.status.as_str())
             .bind(replacement.next_run_at)
@@ -601,7 +601,7 @@ impl PostgresRepository {
                 "previous_version": current.version,
                 "version": row.version,
                 "status": row.status,
-                "kind": if row.run_at.is_some() { "one_time" } else { "recurring" },
+                "kind": row.schedule_kind,
             }),
         )
         .await?;
@@ -819,7 +819,7 @@ impl PostgresRepository {
                     "schedule_version": generation.schedule_version,
                     "schedule_kind": generation.schedule_kind,
                     "scheduled_for": generation.scheduled_for,
-                    "coalesced": schedule.cron.is_some()
+                    "coalesced": schedule.schedule_kind == "recurring"
                         && generation.scheduled_for < worker_now,
                 }),
             )
@@ -1785,22 +1785,25 @@ fn materialization_generation(
         ));
     }
 
-    let schedule_kind = if schedule.cron.is_some() {
-        let next = next_run_at.ok_or(RepositoryError::InvalidInput(
-            "a recurring materialization requires its next occurrence",
-        ))?;
-        if next <= worker_now {
+    let schedule_kind = match schedule.schedule_kind.as_str() {
+        "recurring" => {
+            let next = next_run_at.ok_or(RepositoryError::InvalidInput(
+                "a recurring materialization requires its next occurrence",
+            ))?;
+            if next <= worker_now {
+                return Err(RepositoryError::InvalidInput(
+                    "the next recurring occurrence must be after worker time",
+                ));
+            }
+            "recurring"
+        }
+        "one_time" if next_run_at.is_none() => "one_time",
+        "one_time" => {
             return Err(RepositoryError::InvalidInput(
-                "the next recurring occurrence must be after worker time",
+                "a one-time materialization must clear next_run_at",
             ));
         }
-        "recurring"
-    } else if next_run_at.is_some() {
-        return Err(RepositoryError::InvalidInput(
-            "a one-time materialization must clear next_run_at",
-        ));
-    } else {
-        "one_time"
+        _ => return Err(RepositoryError::InvalidState),
     };
     let schedule_version = schedule
         .version
@@ -1828,7 +1831,7 @@ async fn complete_one_time_schedule(
              status = 'completed', completed_at = $1, next_run_at = NULL, \
              version = version + 1 \
          WHERE id = $2 AND org_id = $3 AND silicon_id = $4 \
-           AND version = $5 AND run_at IS NOT NULL AND cron_expression IS NULL \
+           AND version = $5 AND schedule_kind = 'one_time' \
            AND deleted_at IS NULL AND status IN ('active', 'paused')",
     )
     .bind(completed_at)
@@ -2506,14 +2509,13 @@ async fn append_iam_lifecycle_audits(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration as ChronoDuration, Utc};
+    use chrono::Utc;
     use uuid::Uuid;
 
     use super::{CreateSchedule, page_from_rows, validate_create_schedule};
 
     #[test]
-    fn one_time_create_requires_next_run_to_equal_run_at() {
-        let run_at = Utc::now() + ChronoDuration::hours(1);
+    fn create_rejects_an_unknown_schedule_kind() {
         let schedule = CreateSchedule {
             id: Uuid::now_v7(),
             org_id: "tos".to_owned(),
@@ -2521,9 +2523,9 @@ mod tests {
             silicon_id: "assistant:tos".to_owned(),
             text: "Prepare report".to_owned(),
             timezone: "Asia/Kolkata".to_owned(),
-            run_at: Some(run_at),
-            cron: None,
-            next_run_at: run_at + ChronoDuration::seconds(1),
+            schedule_kind: "sometimes".to_owned(),
+            cron: "0 9 * * *".to_owned(),
+            next_run_at: Utc::now(),
         };
 
         assert!(validate_create_schedule(&schedule).is_err());
@@ -2711,17 +2713,9 @@ fn validate_create_schedule(schedule: &CreateSchedule) -> Result<(), RepositoryE
     validate_schedule_values(
         &schedule.text,
         &schedule.timezone,
-        schedule.run_at,
-        schedule.cron.as_deref(),
+        &schedule.schedule_kind,
+        &schedule.cron,
     )?;
-    if schedule
-        .run_at
-        .is_some_and(|run_at| run_at != schedule.next_run_at)
-    {
-        return Err(RepositoryError::InvalidInput(
-            "a one-time schedule's next run must equal run_at",
-        ));
-    }
     Ok(())
 }
 
@@ -2731,21 +2725,12 @@ fn validate_schedule_replacement(replacement: &ScheduleReplacement) -> Result<()
     validate_schedule_values(
         &replacement.text,
         &replacement.timezone,
-        replacement.run_at,
-        replacement.cron.as_deref(),
+        &replacement.schedule_kind,
+        &replacement.cron,
     )?;
     if replacement.expected_version <= 0 {
         return Err(RepositoryError::InvalidInput(
             "expected schedule version must be positive",
-        ));
-    }
-    if replacement
-        .run_at
-        .zip(replacement.next_run_at)
-        .is_some_and(|(run_at, next_run_at)| run_at != next_run_at)
-    {
-        return Err(RepositoryError::InvalidInput(
-            "a one-time schedule's next run must equal run_at when present",
         ));
     }
     Ok(())
@@ -2754,8 +2739,8 @@ fn validate_schedule_replacement(replacement: &ScheduleReplacement) -> Result<()
 fn validate_schedule_values(
     text: &str,
     timezone: &str,
-    run_at: Option<DateTime<Utc>>,
-    cron: Option<&str>,
+    schedule_kind: &str,
+    cron: &str,
 ) -> Result<(), RepositoryError> {
     if text.trim().is_empty() || text.len() > 100_000 {
         return Err(RepositoryError::InvalidInput(
@@ -2767,14 +2752,12 @@ fn validate_schedule_values(
             "timezone must be a non-empty identifier",
         ));
     }
-    if run_at.is_some() == cron.is_some() {
+    if !matches!(schedule_kind, "one_time" | "recurring") {
         return Err(RepositoryError::InvalidInput(
-            "exactly one of run_at and cron is required",
+            "schedule kind must be one_time or recurring",
         ));
     }
-    if let Some(expression) = cron
-        && (expression.len() > 1_000 || expression.split_whitespace().count() != 5)
-    {
+    if cron.len() > 1_000 || cron.split_whitespace().count() != 5 {
         return Err(RepositoryError::InvalidInput(
             "cron must contain exactly five fields",
         ));

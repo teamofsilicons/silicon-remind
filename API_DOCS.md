@@ -71,16 +71,18 @@ failure. A recurring schedule remains active until paused or deleted.
 Creates a one-time or recurring schedule for the authenticated Silicon.
 
 - **Authentication:** Silicon bearer token.
-- **Required:** Reminder `text`, IANA `timezone`, and exactly one of `run_at` or `cron`.
+- **Required:** Reminder `text`, `kind` (`one_time` or `recurring`), and `cron`.
+- **Optional:** IANA `timezone`; omission canonicalizes to `UTC`.
 - **Required header:** `Idempotency-Key`.
 - **Returns:** Created schedule.
 
-`run_at` is an absolute date-time for a one-time execution. `cron` is a
-five-field Vixie/Linux expression interpreted in the supplied time zone. Sunday
-may be `0`, `7`, or `SUN`; restricted day-of-month and day-of-week fields match
-as a union. Quartz-only `L`, `W`, and `#` extensions are rejected. A nonexistent
-DST wall time is skipped, while both real instants in a repeated interval are
-eligible.
+Both kinds use the same five-field Vixie/Linux cron expression interpreted in
+the selected time zone. A `one_time` schedule materializes only its first future
+match; a `recurring` schedule continues calculating matches until paused or
+deleted. Sunday may be `0`, `7`, or `SUN`; restricted day-of-month and
+day-of-week fields match as a union. Quartz-only `L`, `W`, and `#` extensions
+are rejected. A nonexistent DST wall time is skipped, while both real instants
+in a repeated interval are eligible.
 
 The creator's stable IAM principal becomes the owner, while responses expose its
 public global Silicon ID. Trusted Hook provisioning must establish that binding
@@ -105,11 +107,13 @@ Organization boundaries must be checked even when the caller knows the schedule 
 Updates a schedule owned by the authenticated Silicon.
 
 - **Authentication:** Silicon bearer token.
-- **Input:** Text, timezone, `run_at`, `cron`, or `active`/`paused` status.
+- **Input:** Text, timezone, cron, kind, or `active`/`paused` status.
 - **Required header:** `Idempotency-Key`.
 - **Returns:** Updated schedule.
 
-Changing between one-time and recurring behavior requires clearing the old field. The resulting schedule must contain exactly one of `run_at` or `cron`.
+Changing cron, kind, or timezone recalculates the next UTC occurrence from the
+update time. A text-only patch preserves the stored next occurrence. Cron is
+required and cannot be cleared.
 
 Pausing prevents new materialization without deleting history. Resuming
 recalculates the next occurrence. An already materialized execution retains its
@@ -171,8 +175,8 @@ Remind marks the execution delivered after Hook durably accepts it, not after th
 ### One-time reminder
 
 ```text
-Silicon creates schedule with run_at
-  -> Remind stores and calculates next_run_at
+Silicon creates one_time + cron, optionally with timezone
+  -> Remind defaults an omitted timezone to UTC and stores the first match
   -> scheduler materializes a durable execution with a stable ID
   -> delivery worker claims that execution
   -> Remind sends signed Hook event
@@ -183,7 +187,7 @@ Silicon creates schedule with run_at
 ### Recurring reminder
 
 ```text
-Silicon creates cron + timezone schedule
+Silicon creates recurring + cron, optionally with timezone
   -> Remind calculates next occurrence
   -> scheduler materializes the due occurrence and atomically advances next_run_at
   -> downtime coalesces missed recurring times into one due execution
@@ -198,6 +202,7 @@ The compact public schema does not encode every operational rule. The server
 policies above are stable and recorded in [`decisions.md`](./decisions.md):
 
 - cron day matching, DST behavior, and strict-next evaluation (D-007, D-022);
+- shared one-time/recurring cron timing and UTC defaulting (D-034);
 - missed recurring occurrence coalescing (D-009);
 - retry classification, attempt limits, and terminal history (D-011);
 - deletion, completion, and 45-day retention (D-012, D-023);

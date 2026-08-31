@@ -64,9 +64,9 @@ CREATE TABLE schedules (
     owner_principal_id uuid NOT NULL,
     silicon_id text NOT NULL,
     reminder_text text NOT NULL,
-    timezone text NOT NULL,
-    run_at timestamptz,
-    cron_expression text,
+    timezone text NOT NULL DEFAULT 'UTC',
+    schedule_kind text NOT NULL,
+    cron_expression text NOT NULL,
     status text NOT NULL DEFAULT 'active',
     next_run_at timestamptz,
     version bigint NOT NULL DEFAULT 1,
@@ -91,17 +91,14 @@ CREATE TABLE schedules (
         CHECK (octet_length(reminder_text) <= 100000),
     CONSTRAINT schedules_timezone_not_blank
         CHECK (length(btrim(timezone)) BETWEEN 1 AND 255),
-    CONSTRAINT schedules_exactly_one_kind
-        CHECK (num_nonnulls(run_at, cron_expression) = 1),
+    CONSTRAINT schedules_kind_valid
+        CHECK (schedule_kind IN ('one_time', 'recurring')),
     CONSTRAINT schedules_five_field_cron
         CHECK (
-            cron_expression IS NULL
-            OR (
-                length(btrim(cron_expression)) BETWEEN 1 AND 1000
-                AND cardinality(
-                    regexp_split_to_array(btrim(cron_expression), E'\\s+')
-                ) = 5
-            )
+            length(btrim(cron_expression)) BETWEEN 1 AND 1000
+            AND cardinality(
+                regexp_split_to_array(btrim(cron_expression), E'\\s+')
+            ) = 5
         ),
     CONSTRAINT schedules_status_valid
         CHECK (status IN ('active', 'paused', 'completed')),
@@ -110,7 +107,7 @@ CREATE TABLE schedules (
     CONSTRAINT schedules_completed_state_consistent
         CHECK ((status = 'completed') = (completed_at IS NOT NULL)),
     CONSTRAINT schedules_only_one_time_completes
-        CHECK (completed_at IS NULL OR run_at IS NOT NULL),
+        CHECK (completed_at IS NULL OR schedule_kind = 'one_time'),
     CONSTRAINT schedules_terminal_not_due
         CHECK (status <> 'completed' OR next_run_at IS NULL),
     CONSTRAINT schedules_deleted_not_due

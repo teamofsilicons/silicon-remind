@@ -491,3 +491,31 @@ recognized and their aggregate/data projections remain fail-closed. Remind
 does not infer a public organization or principal UUID from IAM internal IDs.
 The checked-in IAM producer must still migrate its removal payload and aggregate
 type to the published application-webhook contract before deployment.
+
+## D-034 — One-time and recurring reminders share cron timing
+
+**Status:** Accepted; supersedes D-006 and clarifies D-007, D-008, D-009,
+D-023, and D-024
+
+Every public reminder uses one normalized five-field Vixie/Linux cron
+expression. The client selects an explicit `one_time` or `recurring` kind;
+`run_at` is not part of the create, patch, response, domain, or persistence
+contract. The schedule kind is stored independently from its non-null cron
+expression so a one-time cron cannot be mistaken for a recurring schedule.
+
+Create requires `text`, `kind`, and `cron`. Timezone is optional at the HTTP
+boundary and canonicalizes to `UTC` during deserialization, before the
+idempotency fingerprint is calculated, so omission and explicit UTC are the
+same request. Responses always include the canonical timezone. Changing kind,
+cron, or timezone on an active schedule recalculates the next UTC occurrence;
+a text-only patch preserves it.
+
+A one-time schedule stores the first cron match strictly after creation or its
+latest timing change. Materialization creates that one execution and clears
+`next_run_at`; the existing delivery-terminal generation check continues to
+mark it completed only if it is still the current one-time generation.
+Recurring materialization continues to calculate strictly after worker time,
+preserving Vixie day matching, DST behavior, and D-009 missed-occurrence
+coalescing. Because Remind is still unreleased, D-028 permits consolidating
+`schedule_kind`, non-null `cron_expression`, and the UTC timezone default into
+the baseline schema.
