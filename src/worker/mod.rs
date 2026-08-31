@@ -173,10 +173,12 @@ async fn serve_worker(
                     Ok(result) if result != retention::RetentionResult::default() => {
                         tracing::info!(
                             schedules = result.schedules,
+                            deleted_reminders_logged = result.deleted_reminders_logged,
+                            deleted_reminders_trimmed = result.deleted_reminders_trimmed,
                             idempotency_records = result.idempotency_records,
                             hook_destinations = result.hook_destinations,
                             destinations_rewrapped = result.destinations_rewrapped,
-                            "retention sweep removed expired records"
+                            "retention sweep processed expired records"
                         );
                     }
                     Ok(_) => {}

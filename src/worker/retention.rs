@@ -14,6 +14,10 @@ use crate::infrastructure::{
 pub struct RetentionResult {
     /// Completed/deleted schedules removed with cascading execution history.
     pub schedules: u64,
+    /// Deleted-reminder ledger records written before schedule removal.
+    pub deleted_reminders_logged: u64,
+    /// Oldest deleted-reminder records removed to maintain the rolling bound.
+    pub deleted_reminders_trimmed: u64,
     /// Expired idempotency replay records removed.
     pub idempotency_records: u64,
     /// Disabled encrypted Hook destinations removed.
@@ -38,7 +42,7 @@ pub async fn sweep(
 ) -> anyhow::Result<RetentionResult> {
     let destinations_rewrapped =
         rewrap_destinations(repository, encryption, worker_id, limit).await?;
-    let schedules = repository
+    let schedule_purge = repository
         .purge_expired_schedules(now, limit, worker_id)
         .await?;
     let hook_destinations = repository
@@ -46,7 +50,9 @@ pub async fn sweep(
         .await?;
     let idempotency_records = repository.purge_expired_idempotency(now, limit).await?;
     Ok(RetentionResult {
-        schedules,
+        schedules: schedule_purge.purged,
+        deleted_reminders_logged: schedule_purge.logged,
+        deleted_reminders_trimmed: schedule_purge.trimmed,
         idempotency_records,
         hook_destinations,
         destinations_rewrapped,

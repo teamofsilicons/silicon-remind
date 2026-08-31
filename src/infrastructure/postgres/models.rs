@@ -427,6 +427,17 @@ pub struct RevokedResourceCleanup {
     pub destinations_disabled: u64,
 }
 
+/// Result of one atomic expired-schedule purge and ledger-maintenance pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SchedulePurgeResult {
+    /// Schedules permanently removed with their cascading execution history.
+    pub purged: u64,
+    /// Deleted-reminder records durably written before schedule removal.
+    pub logged: u64,
+    /// Oldest ledger records removed to preserve the global rolling bound.
+    pub trimmed: u64,
+}
+
 /// Exact HTTP response retained for an unexpired idempotency key.
 #[derive(Clone, Debug)]
 pub struct StoredIdempotentResponse {

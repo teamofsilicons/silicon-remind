@@ -24,6 +24,13 @@ const REQUIRED_SCHEMA_FIELDS: &[(&str, &str)] = &[
     ("schedules", "version"),
     ("executions", "schedule_version"),
     ("executions", "lease_expires_at"),
+    ("deleted_reminders", "schedule_id"),
+    ("deleted_reminders", "owner_principal_id"),
+    ("deleted_reminders", "schedule_kind"),
+    ("deleted_reminders", "cron_expression"),
+    ("deleted_reminders", "last_triggered_at"),
+    ("deleted_reminders", "purged_at"),
+    ("deleted_reminders", "record_text"),
     ("hook_destinations", "signing_secret_ciphertext"),
     ("hook_destinations", "encryption_key_version"),
     ("idempotency_records", "request_hash"),
@@ -174,7 +181,7 @@ fn migrations_are_current(applied: &[(i64, Vec<u8>, bool)]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIGRATOR, migrations_are_current};
+    use super::{MIGRATOR, REQUIRED_SCHEMA_FIELDS, migrations_are_current};
 
     fn applied_migrations() -> Vec<(i64, Vec<u8>, bool)> {
         MIGRATOR
@@ -207,5 +214,20 @@ mod tests {
             first.1.fill(0);
         }
         assert!(!migrations_are_current(&changed));
+    }
+
+    #[test]
+    fn readiness_requires_deleted_reminder_ledger_fields() {
+        for field in [
+            ("deleted_reminders", "schedule_id"),
+            ("deleted_reminders", "owner_principal_id"),
+            ("deleted_reminders", "schedule_kind"),
+            ("deleted_reminders", "cron_expression"),
+            ("deleted_reminders", "last_triggered_at"),
+            ("deleted_reminders", "purged_at"),
+            ("deleted_reminders", "record_text"),
+        ] {
+            assert!(REQUIRED_SCHEMA_FIELDS.contains(&field));
+        }
     }
 }

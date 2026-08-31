@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{ContainerAsync, ImageExt as _, runners::AsyncRunner as _};
@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::domain::ReminderReadScope;
 
+use super::repository::{DELETED_REMINDER_LEDGER_LIMIT, trim_deleted_reminder_ledger};
 use super::{
     ActorType, AuditContext, CreateSchedule, ExecutionRow, IamLifecycleOutcome, IdempotencyContext,
     IdempotentMutation, ListSchedules, NewHookDestination, NewInternalEvent, PostgresRepository,
@@ -224,6 +225,37 @@ fn visibility_filters(
     }
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct DeletedReminderRow {
+    id: i64,
+    schedule_id: Uuid,
+    org_id: String,
+    owner_principal_id: Uuid,
+    silicon_id: String,
+    reminder_text: String,
+    schedule_kind: String,
+    cron_expression: String,
+    timezone: String,
+    last_triggered_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    archived_at: DateTime<Utc>,
+    purge_after: DateTime<Utc>,
+    purged_at: DateTime<Utc>,
+    purge_reason: String,
+    record_text: String,
+}
+
+struct PurgeFixture {
+    now: DateTime<Utc>,
+    archived_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    schedule_id: Uuid,
+    owner_principal_id: Uuid,
+    reminder_text: &'static str,
+    cron_expression: &'static str,
+    last_trigger: DateTime<Utc>,
+}
+
 #[tokio::test]
 async fn iam_silicon_removal_is_atomic_and_replay_safe() -> anyhow::Result<()> {
     let database = test_database().await?;
@@ -319,6 +351,248 @@ async fn idempotent_response_lookup_validates_hash_and_expiry() -> anyhow::Resul
         .find_idempotent_response("tos", "schedule.create", None, &expired_context)
         .await?;
     assert!(expired.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn schedule_purge_logs_full_snapshot_and_trims_deterministic_oldest() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let fixture = seed_expired_schedule(&database.pool).await?;
+    let result = database
+        .repository
+        .purge_expired_schedules(fixture.now, 100, "retention-test-worker")
+        .await?;
+    assert_eq!(result.purged, 1);
+    assert_eq!(result.logged, 1);
+    assert_eq!(result.trimmed, 0);
+
+    let ledger_id = assert_deleted_reminder_snapshot(&database.pool, &fixture).await?;
+    assert_purge_source_removed_and_audited(&database.pool, &fixture, ledger_id).await?;
+    assert_trim_keeps_deterministic_newest(&database.pool, &fixture).await?;
+    assert_ledger_conflict_preserves_source(&database).await?;
+    Ok(())
+}
+
+async fn seed_expired_schedule(pool: &PgPool) -> anyhow::Result<PurgeFixture> {
+    let now = "2030-01-01T00:00:00Z".parse::<DateTime<Utc>>()?;
+    let archived_at = now - Duration::days(45);
+    let created_at = archived_at - Duration::days(30);
+    let schedule_id = Uuid::now_v7();
+    let owner_principal_id = Uuid::now_v7();
+    let reminder_text = "Take medication\nwith water";
+    let cron_expression = "0 9 * * 1";
+    sqlx::query(
+        "INSERT INTO schedules ( \
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, deleted_at, created_at, \
+             updated_at \
+         ) VALUES ($1, 'tos', $2, 'assistant:tos', $3, 'Asia/Kolkata', 'recurring', $4, \
+             'paused', NULL, $5, $6, $5)",
+    )
+    .bind(schedule_id)
+    .bind(owner_principal_id)
+    .bind(reminder_text)
+    .bind(cron_expression)
+    .bind(archived_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+
+    let first_trigger = archived_at - Duration::days(2);
+    let last_trigger = archived_at - Duration::days(1);
+    for scheduled_for in [first_trigger, last_trigger] {
+        sqlx::query(
+            "INSERT INTO executions ( \
+                 id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
+                 scheduled_for, reminder_text, timezone, status, attempt_count, \
+                 attempted_at, failure_reason, created_at, updated_at \
+             ) VALUES ($1, $2, 'tos', 'assistant:tos', 1, 'recurring', $3, $4, \
+                 'Asia/Kolkata', 'failed', 1, $3, 'retention fixture', $3, $3)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(schedule_id)
+        .bind(scheduled_for)
+        .bind(reminder_text)
+        .execute(pool)
+        .await?;
+    }
+    Ok(PurgeFixture {
+        now,
+        archived_at,
+        created_at,
+        schedule_id,
+        owner_principal_id,
+        reminder_text,
+        cron_expression,
+        last_trigger,
+    })
+}
+
+async fn assert_deleted_reminder_snapshot(
+    pool: &PgPool,
+    fixture: &PurgeFixture,
+) -> anyhow::Result<i64> {
+    let ledger = sqlx::query_as::<_, DeletedReminderRow>(
+        "SELECT id, schedule_id, org_id, owner_principal_id, silicon_id, \
+                reminder_text, schedule_kind, cron_expression, timezone, \
+                last_triggered_at, created_at, archived_at, purge_after, purged_at, \
+                purge_reason, record_text \
+         FROM deleted_reminders WHERE schedule_id = $1",
+    )
+    .bind(fixture.schedule_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(ledger.schedule_id, fixture.schedule_id);
+    assert_eq!(ledger.org_id, "tos");
+    assert_eq!(ledger.owner_principal_id, fixture.owner_principal_id);
+    assert_eq!(ledger.silicon_id, "assistant:tos");
+    assert_eq!(ledger.reminder_text, fixture.reminder_text);
+    assert_eq!(ledger.schedule_kind, "recurring");
+    assert_eq!(ledger.cron_expression, fixture.cron_expression);
+    assert_eq!(ledger.timezone, "Asia/Kolkata");
+    assert_eq!(ledger.last_triggered_at, Some(fixture.last_trigger));
+    assert_eq!(ledger.created_at, fixture.created_at);
+    assert_eq!(ledger.archived_at, fixture.archived_at);
+    assert_eq!(ledger.purge_after, fixture.now);
+    assert_eq!(ledger.purged_at, fixture.now);
+    assert_eq!(ledger.purge_reason, "deleted");
+    assert!(!ledger.record_text.contains(['\n', '\r']));
+    let record = serde_json::from_str::<Value>(&ledger.record_text)?;
+    assert_eq!(
+        record,
+        json!({
+            "schema_version": "1.0",
+            "schedule_id": fixture.schedule_id,
+            "org_id": "tos",
+            "owner_principal_id": fixture.owner_principal_id,
+            "silicon_id": "assistant:tos",
+            "reminder_text": fixture.reminder_text,
+            "schedule_kind": "recurring",
+            "cron_expression": fixture.cron_expression,
+            "timezone": "Asia/Kolkata",
+            "last_triggered_at": fixture.last_trigger,
+            "created_at": fixture.created_at,
+            "archived_at": fixture.archived_at,
+            "purge_after": fixture.now,
+            "purged_at": fixture.now,
+            "purge_reason": "deleted",
+        })
+    );
+    Ok(ledger.id)
+}
+
+async fn assert_purge_source_removed_and_audited(
+    pool: &PgPool,
+    fixture: &PurgeFixture,
+    ledger_id: i64,
+) -> anyhow::Result<()> {
+    let source_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT (SELECT count(*) FROM schedules WHERE id = $1) \
+              + (SELECT count(*) FROM executions WHERE schedule_id = $1)",
+    )
+    .bind(fixture.schedule_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(source_rows, 0);
+    let audit_metadata = sqlx::query_scalar::<_, Value>(
+        "SELECT metadata FROM audit_records \
+         WHERE action = 'schedule.purged' AND resource_id = $1",
+    )
+    .bind(fixture.schedule_id.to_string())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        audit_metadata,
+        json!({
+            "deleted_reminder_id": ledger_id,
+            "purge_reason": "deleted",
+        })
+    );
+    Ok(())
+}
+
+async fn assert_trim_keeps_deterministic_newest(
+    pool: &PgPool,
+    fixture: &PurgeFixture,
+) -> anyhow::Result<()> {
+    assert_eq!(DELETED_REMINDER_LEDGER_LIMIT, 100_000);
+    let mut newest_schedule_ids = Vec::new();
+    for index in 0..4 {
+        let trim_schedule_id = Uuid::now_v7();
+        newest_schedule_ids.push(trim_schedule_id);
+        sqlx::query(
+            "INSERT INTO deleted_reminders ( \
+                 schedule_id, org_id, owner_principal_id, silicon_id, reminder_text, \
+                 schedule_kind, cron_expression, timezone, created_at, archived_at, purge_after, \
+                 purged_at, purge_reason, record_text \
+             ) VALUES ($1, 'tos', $2, 'assistant:tos', $3, 'one_time', '0 0 * * *', 'UTC', \
+                 $4, $5, $6, $7, 'deleted', '{}'::text)",
+        )
+        .bind(trim_schedule_id)
+        .bind(Uuid::now_v7())
+        .bind(format!("trim fixture {index}"))
+        .bind(fixture.created_at)
+        .bind(fixture.archived_at)
+        .bind(fixture.now)
+        .bind(fixture.now)
+        .execute(pool)
+        .await?;
+    }
+    let mut transaction = pool.begin().await?;
+    let trimmed = trim_deleted_reminder_ledger(&mut transaction, 3).await?;
+    transaction.commit().await?;
+    assert_eq!(trimmed, 2);
+    let remaining =
+        sqlx::query_scalar::<_, Uuid>("SELECT schedule_id FROM deleted_reminders ORDER BY id")
+            .fetch_all(pool)
+            .await?;
+    assert_eq!(remaining, newest_schedule_ids[1..]);
+    Ok(())
+}
+
+async fn assert_ledger_conflict_preserves_source(database: &TestDatabase) -> anyhow::Result<()> {
+    let fixture = seed_expired_schedule(&database.pool).await?;
+    sqlx::query(
+        "INSERT INTO deleted_reminders ( \
+             schedule_id, org_id, owner_principal_id, silicon_id, reminder_text, \
+             schedule_kind, cron_expression, timezone, last_triggered_at, created_at, \
+             archived_at, purge_after, purged_at, purge_reason, record_text \
+         ) VALUES ($1, 'tos', $2, 'assistant:tos', $3, 'recurring', $4, \
+             'Asia/Kolkata', $5, $6, $7, $8, $9, 'deleted', '{}'::text)",
+    )
+    .bind(fixture.schedule_id)
+    .bind(fixture.owner_principal_id)
+    .bind(fixture.reminder_text)
+    .bind(fixture.cron_expression)
+    .bind(fixture.last_trigger)
+    .bind(fixture.created_at)
+    .bind(fixture.archived_at)
+    .bind(fixture.now)
+    .bind(fixture.now)
+    .execute(&database.pool)
+    .await?;
+
+    let result = database
+        .repository
+        .purge_expired_schedules(fixture.now, 100, "retention-test-worker")
+        .await;
+    assert!(matches!(result, Err(RepositoryError::Database(_))));
+    let source_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT (SELECT count(*) FROM schedules WHERE id = $1) \
+              + (SELECT count(*) FROM executions WHERE schedule_id = $1)",
+    )
+    .bind(fixture.schedule_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(source_rows, 3);
+    let audit_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM audit_records \
+         WHERE action = 'schedule.purged' AND resource_id = $1",
+    )
+    .bind(fixture.schedule_id.to_string())
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(audit_rows, 0);
     Ok(())
 }
 

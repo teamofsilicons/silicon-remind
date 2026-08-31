@@ -185,7 +185,10 @@ Important invariants include:
   operation budgets, one poll interval, and a five-second safety margin. Retry
   maximum delay must not be shorter than the base delay.
 - Schedule history and disabled Hook destinations have a fixed 45-day retention
-  policy. IAM lifecycle tombstones remain authoritative while worker cycles
+  policy. Before a retained schedule is permanently removed, the worker writes
+  an internal, one-line JSON deleted-reminder record containing its reminder,
+  trigger, and creator snapshots. The ledger keeps the newest 100,000 records
+  globally. IAM lifecycle tombstones remain authoritative while worker cycles
   drain affected resources in bounded batches.
 - Runtime and migrator database URLs should use separate least-privilege roles
   in deployed environments.

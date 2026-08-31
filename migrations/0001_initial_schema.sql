@@ -225,6 +225,68 @@ CREATE UNIQUE INDEX executions_hook_event_unique
     ON executions (hook_event_id)
     WHERE hook_event_id IS NOT NULL;
 
+-- A bounded, durable record of reminders after their recoverable schedule and
+-- execution rows are permanently removed. This table intentionally has no
+-- foreign keys: its purpose is to survive the source schedule's cascade.
+CREATE TABLE deleted_reminders (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    schedule_id uuid NOT NULL,
+    org_id text NOT NULL,
+    owner_principal_id uuid NOT NULL,
+    silicon_id text NOT NULL,
+    reminder_text text NOT NULL,
+    schedule_kind text NOT NULL,
+    cron_expression text NOT NULL,
+    timezone text NOT NULL,
+    last_triggered_at timestamptz,
+    created_at timestamptz NOT NULL,
+    archived_at timestamptz NOT NULL,
+    purge_after timestamptz NOT NULL,
+    purged_at timestamptz NOT NULL,
+    purge_reason text NOT NULL,
+    record_text text NOT NULL,
+
+    CONSTRAINT deleted_reminders_schedule_unique
+        UNIQUE (schedule_id),
+    CONSTRAINT deleted_reminders_org_id_valid
+        CHECK (org_id ~ '^[a-z0-9_-]{3,50}$'),
+    CONSTRAINT deleted_reminders_silicon_id_valid
+        CHECK (
+            silicon_id ~ '^[a-z0-9_-]{3,50}:[a-z0-9_-]{3,50}$'
+            AND split_part(silicon_id, ':', 2) = org_id
+        ),
+    CONSTRAINT deleted_reminders_text_not_blank
+        CHECK (reminder_text ~ '[^[:space:]]'),
+    CONSTRAINT deleted_reminders_text_size
+        CHECK (octet_length(reminder_text) <= 100000),
+    CONSTRAINT deleted_reminders_schedule_kind_valid
+        CHECK (schedule_kind IN ('one_time', 'recurring')),
+    CONSTRAINT deleted_reminders_five_field_cron
+        CHECK (
+            length(btrim(cron_expression)) BETWEEN 1 AND 1000
+            AND cardinality(
+                regexp_split_to_array(btrim(cron_expression), E'\\s+')
+            ) = 5
+        ),
+    CONSTRAINT deleted_reminders_timezone_not_blank
+        CHECK (length(btrim(timezone)) BETWEEN 1 AND 255),
+    CONSTRAINT deleted_reminders_archive_order
+        CHECK (archived_at >= created_at),
+    CONSTRAINT deleted_reminders_retention_consistent
+        CHECK (purge_after = archived_at + interval '3888000 seconds'),
+    CONSTRAINT deleted_reminders_purge_order
+        CHECK (purged_at >= purge_after),
+    CONSTRAINT deleted_reminders_purge_reason_valid
+        CHECK (purge_reason IN ('completed', 'deleted')),
+    CONSTRAINT deleted_reminders_record_one_line
+        CHECK (
+            position(E'\n' IN record_text) = 0
+            AND position(E'\r' IN record_text) = 0
+        ),
+    CONSTRAINT deleted_reminders_record_is_object
+        CHECK (jsonb_typeof(record_text::jsonb) = 'object')
+);
+
 CREATE TABLE hook_destinations (
     id uuid PRIMARY KEY,
     org_id text NOT NULL,

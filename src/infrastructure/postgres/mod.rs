@@ -17,6 +17,7 @@ pub use models::{
     HookDestinationRewrap, HookDestinationRow, IamLifecycleOutcome, IdempotencyContext,
     IdempotentMutation, InternalEventReceiptRow, ListSchedules, MutableScheduleStatus,
     NewHookDestination, NewInternalEvent, Page, RevokedResourceCleanup, ScheduleCursor,
-    ScheduleReplacement, ScheduleRow, SiliconIdentityRow, StoredIdempotentResponse,
+    SchedulePurgeResult, ScheduleReplacement, ScheduleRow, SiliconIdentityRow,
+    StoredIdempotentResponse,
 };
 pub use repository::PostgresRepository;

@@ -556,3 +556,24 @@ and its current introspection result does not publish the required access
 projection. IAM must implement the audience-bound token-exchange/issuance flow
 and authoritative projection before public Remind traffic is enabled. Remind
 does not reconstruct authority from a broad organization-directory response.
+
+## D-036 — Permanent reminder deletion writes a bounded internal ledger
+
+**Status:** Accepted; extends D-012 and D-031
+
+Every schedule purge first stores one durable `deleted_reminders` snapshot with
+the original schedule UUID, organization, stable creator principal and public
+Silicon IDs, reminder text, trigger definition, timezone, most recent execution
+instant, lifecycle timestamps, and purge reason. The same values are also
+serialized as compact, one-line JSON text with schema version `1.0`. The ledger
+has no foreign key to schedules or identities because it must survive their
+lifecycle and is not exposed through the public API.
+
+The purge transaction acquires a PostgreSQL transaction-scoped advisory lock
+before it selects candidates. While holding that lock it captures each complete
+snapshot and the maximum execution `scheduled_for`, inserts every unique ledger
+row without conflict suppression, appends an audit record that omits reminder
+and trigger content, deletes the source schedules and cascading executions, and
+trims deterministic oldest identity values. Any failure rolls the whole pass
+back. The identity insertion order defines “latest,” and exactly the newest
+100,000 records are retained globally.
