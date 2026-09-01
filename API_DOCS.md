@@ -137,6 +137,36 @@ recalculates the next occurrence. An already materialized execution retains its
 immutable text, timezone, public destination, scheduled instant, schedule kind,
 and generation. Archived reminders are immutable.
 
+### `PATCH /schedules`
+
+Atomically pauses or resumes a set of reminders owned by the authenticated
+Silicon.
+
+- **Authentication:** Silicon bearer token.
+- **Required:** Between 1 and 100 unique schedule UUIDs and one `active` or
+  `paused` status.
+- **Required header:** `Idempotency-Key`.
+- **Returns:** One compact result containing `id`, `status`, `next_run_at`, and
+  `updated_at` for each selected reminder in the supplied UUID order.
+
+The batch is all-or-nothing. Remind validates and locks every selected reminder
+before changing any of them. A missing, cross-organization, or expired reminder
+returns `404`; if none are missing, a reminder owned by another Silicon returns
+`403`; if all are owned but any is archived or completed, the request returns
+`409`. No reminder changes when one of these checks fails. Carbon callers are
+read-only and receive `403` before resource inspection.
+
+A reminder already in the requested status is a successful no-op. Pausing an
+active reminder keeps it in the current section, clears its next occurrence,
+and prevents future materialization. Resuming a paused reminder recalculates
+the first cron occurrence strictly after the batch's shared operation time.
+Executions that were already materialized remain durable and continue through
+their existing delivery lifecycle.
+
+The UUID array order is part of the idempotency fingerprint. An exact replay
+returns the original `200` response, while changing the UUIDs, their order, or
+the requested status under the same key returns `409 idempotency_conflict`.
+
 ### `DELETE /schedules/{schedule_id}`
 
 Archives a schedule owned by the authenticated Silicon.
@@ -241,6 +271,6 @@ policies above are stable and recorded in [`decisions.md`](./decisions.md):
 - OBO Access for applications is not included in this OpenAPI contract.
 - Cron validation and human-readable schedule preview endpoints are absent.
 - Manual trigger and execution-redelivery operations are absent.
-- Bulk pause, resume, and organization-wide controls are absent.
+- Organization-wide pause and resume controls are absent.
 - IAM must publish the Remind-specific permitted-Silicon projection in token
   introspection; clients cannot supply or broaden it through this API.

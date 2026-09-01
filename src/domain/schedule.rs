@@ -11,6 +11,9 @@ use uuid::Uuid;
 /// Maximum UTF-8 size of reminder text accepted by the public contract.
 pub const MAX_TEXT_BYTES: usize = 100_000;
 
+/// Maximum number of reminders accepted by one atomic status change.
+pub const MAX_SCHEDULE_STATUS_BATCH_SIZE: usize = 100;
+
 /// Number of days for which archived schedules are retained.
 pub const ARCHIVE_RETENTION_DAYS: i64 = 45;
 

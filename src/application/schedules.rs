@@ -1,6 +1,10 @@
 //! Organization-scoped schedule and execution-history use cases.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -12,15 +16,17 @@ use uuid::Uuid;
 use crate::{
     application::ports::Clock,
     domain::{
-        Actor, ActorKind, CreateScheduleCommand, CronExpression, CursorKind, PageCursor,
-        PatchScheduleCommand, Schedule, ScheduleKind, ScheduleSection, ScheduleStatus,
-        ScheduleTiming, ScheduleValidationError, silicon_id_belongs_to_org,
+        Actor, ActorKind, CreateScheduleCommand, CronExpression, CursorKind,
+        MAX_SCHEDULE_STATUS_BATCH_SIZE, PageCursor, PatchScheduleCommand, Schedule, ScheduleKind,
+        ScheduleSection, ScheduleStatus, ScheduleTiming, ScheduleValidationError,
+        silicon_id_belongs_to_org,
     },
     error::AppError,
     infrastructure::postgres::{
-        ActorType, AuditContext, CreateSchedule, ExecutionCursor, ExecutionRow, IdempotencyContext,
-        IdempotentMutation, ListSchedules, MutableScheduleStatus, Page, PostgresRepository,
-        ScheduleCursor, ScheduleReplacement, ScheduleRow,
+        ActorType, AuditContext, BulkScheduleStatusReplacement, CreateSchedule, ExecutionCursor,
+        ExecutionRow, IdempotencyContext, IdempotentMutation, ListSchedules, MutableScheduleStatus,
+        Page, PostgresRepository, ScheduleCursor, ScheduleReplacement, ScheduleRow,
+        ScheduleStatusChange,
     },
     request_context,
 };
@@ -232,6 +238,91 @@ impl ScheduleService {
         let mutation = self
             .repository
             .replace_schedule_idempotent(&replacement, &idempotency, &audit_context(actor))
+            .await?;
+        Ok(mutation_response(mutation, 200))
+    }
+
+    /// Sets the desired status of a bounded reminder set atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, validation, conflict, idempotency, or persistence
+    /// errors. A failure leaves every reminder unchanged.
+    pub async fn update_statuses(
+        &self,
+        actor: &Actor,
+        schedule_ids: Vec<Uuid>,
+        status: ScheduleStatus,
+        idempotency_key: String,
+        request_hash: [u8; 32],
+    ) -> Result<MutationResponse, AppError> {
+        require_silicon(actor)?;
+        validate_schedule_status_batch(&schedule_ids, status)?;
+        validate_idempotency_key(&idempotency_key)?;
+
+        let now = self.clock.now();
+        let idempotency = self.idempotency(actor, idempotency_key, request_hash, now)?;
+        if let Some(stored) = self
+            .repository
+            .find_idempotent_response(&actor.org_id, "schedule.bulk_status", None, &idempotency)
+            .await?
+        {
+            return Ok(MutationResponse {
+                status_code: stored.status_code,
+                body: stored.response_body,
+            });
+        }
+
+        let rows = self
+            .repository
+            .get_schedules_for_status_change(&actor.org_id, &schedule_ids)
+            .await?;
+        if rows.len() != schedule_ids.len() {
+            return Err(AppError::NotFound);
+        }
+
+        let rows_by_id: HashMap<Uuid, ScheduleRow> =
+            rows.into_iter().map(|row| (row.id, row)).collect();
+        let ordered_rows = schedule_ids
+            .iter()
+            .map(|schedule_id| rows_by_id.get(schedule_id).ok_or(AppError::NotFound))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let owner_principal_id = principal_id(actor)?;
+        if ordered_rows
+            .iter()
+            .any(|row| row.owner_principal_id != owner_principal_id)
+        {
+            return Err(AppError::Forbidden);
+        }
+        if ordered_rows
+            .iter()
+            .any(|row| row.archived_at().is_some() || row.status == "completed")
+        {
+            return Err(AppError::conflict("invalid_schedule_state"));
+        }
+
+        let mutable_status = mutable_schedule_status(status)?;
+        let schedules = ordered_rows
+            .into_iter()
+            .map(|row| {
+                let next_run_at = desired_next_run_at(row, status, now)?;
+                Ok(ScheduleStatusChange {
+                    id: row.id,
+                    expected_version: row.version,
+                    next_run_at,
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let replacement = BulkScheduleStatusReplacement {
+            org_id: actor.org_id.clone(),
+            owner_principal_id,
+            status: mutable_status,
+            schedules,
+        };
+        let mutation = self
+            .repository
+            .replace_schedule_statuses_idempotent(&replacement, &idempotency, &audit_context(actor))
             .await?;
         Ok(mutation_response(mutation, 200))
     }
@@ -455,6 +546,53 @@ fn validate_page_limit(limit: Option<u32>) -> Result<u32, AppError> {
     }
 }
 
+fn validate_schedule_status_batch(
+    schedule_ids: &[Uuid],
+    status: ScheduleStatus,
+) -> Result<(), AppError> {
+    if schedule_ids.is_empty()
+        || schedule_ids.len() > MAX_SCHEDULE_STATUS_BATCH_SIZE
+        || schedule_ids.iter().copied().collect::<HashSet<_>>().len() != schedule_ids.len()
+        || status == ScheduleStatus::Completed
+    {
+        Err(AppError::Validation)
+    } else {
+        Ok(())
+    }
+}
+
+const fn mutable_schedule_status(
+    status: ScheduleStatus,
+) -> Result<MutableScheduleStatus, AppError> {
+    match status {
+        ScheduleStatus::Active => Ok(MutableScheduleStatus::Active),
+        ScheduleStatus::Paused => Ok(MutableScheduleStatus::Paused),
+        ScheduleStatus::Completed => Err(AppError::Validation),
+    }
+}
+
+fn desired_next_run_at(
+    row: &ScheduleRow,
+    status: ScheduleStatus,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, AppError> {
+    if row.status == schedule_status_name(status) {
+        return Ok(row.next_run_at);
+    }
+
+    let mut schedule = schedule_from_row(row)?;
+    let patch = PatchScheduleCommand {
+        status: Some(status),
+        ..PatchScheduleCommand::default()
+    }
+    .validate(&schedule, now)
+    .map_err(|error| map_patch_validation(&error))?;
+    schedule
+        .apply_patch(patch)
+        .map_err(|error| map_patch_validation(&error))?;
+    Ok(schedule.next_run_at)
+}
+
 const fn schedule_status_name(status: ScheduleStatus) -> &'static str {
     match status {
         ScheduleStatus::Active => "active",
@@ -474,10 +612,7 @@ fn map_patch_validation(error: &ScheduleValidationError) -> AppError {
     }
 }
 
-fn mutation_response(
-    mutation: IdempotentMutation<ScheduleRow>,
-    applied_status: u16,
-) -> MutationResponse {
+fn mutation_response<T>(mutation: IdempotentMutation<T>, applied_status: u16) -> MutationResponse {
     match mutation {
         IdempotentMutation::Applied { response_body, .. } => MutationResponse {
             status_code: applied_status,
@@ -497,7 +632,12 @@ fn mutation_response(
 mod tests {
     use serde::Serialize;
 
-    use super::{request_hash, validate_idempotency_key, validate_page_limit};
+    use super::{
+        desired_next_run_at, request_hash, validate_idempotency_key, validate_page_limit,
+        validate_schedule_status_batch,
+    };
+    use crate::domain::{MAX_SCHEDULE_STATUS_BATCH_SIZE, ScheduleStatus};
+    use crate::infrastructure::postgres::ScheduleRow;
 
     #[derive(Serialize)]
     struct Input<'a> {
@@ -520,5 +660,52 @@ mod tests {
         assert!(validate_idempotency_key("short").is_err());
         assert_eq!(validate_page_limit(None).ok(), Some(20));
         assert!(validate_page_limit(Some(101)).is_err());
+    }
+
+    #[test]
+    fn validates_bulk_status_contract() {
+        let first = uuid::Uuid::now_v7();
+        let second = uuid::Uuid::now_v7();
+
+        assert!(validate_schedule_status_batch(&[first, second], ScheduleStatus::Paused).is_ok());
+        assert!(validate_schedule_status_batch(&[], ScheduleStatus::Active).is_err());
+        assert!(validate_schedule_status_batch(&[first, first], ScheduleStatus::Paused).is_err());
+        assert!(validate_schedule_status_batch(&[first], ScheduleStatus::Completed).is_err());
+        assert!(
+            validate_schedule_status_batch(
+                &vec![uuid::Uuid::nil(); MAX_SCHEDULE_STATUS_BATCH_SIZE + 1],
+                ScheduleStatus::Active,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resumed_schedule_uses_first_cron_occurrence_after_shared_time() -> anyhow::Result<()> {
+        let now = "2026-09-01T10:00:30Z".parse()?;
+        let row = ScheduleRow {
+            id: uuid::Uuid::now_v7(),
+            org_id: "org_test".to_owned(),
+            owner_principal_id: uuid::Uuid::now_v7(),
+            silicon_id: "silicon_test_org_test".to_owned(),
+            text: "wake up".to_owned(),
+            timezone: "UTC".to_owned(),
+            schedule_kind: "recurring".to_owned(),
+            cron: "* * * * *".to_owned(),
+            status: "paused".to_owned(),
+            next_run_at: None,
+            version: 2,
+            completed_at: None,
+            deleted_at: None,
+            purge_after: None,
+            created_at: "2026-09-01T09:00:00Z".parse()?,
+            updated_at: "2026-09-01T09:30:00Z".parse()?,
+        };
+
+        assert_eq!(
+            desired_next_run_at(&row, ScheduleStatus::Active, now)?,
+            Some("2026-09-01T10:01:00Z".parse()?)
+        );
+        Ok(())
     }
 }

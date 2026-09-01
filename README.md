@@ -10,6 +10,11 @@ Both reminder kinds use five-field Linux cron syntax. Clients select
 case Remind canonicalizes it to UTC before calculating and storing the next
 occurrence.
 
+An owner Silicon can pause or resume one reminder through its individual PATCH
+operation, or atomically apply the same status to a batch of up to 100 owned
+reminders. Paused reminders remain in the current section and retain their
+history; resuming recalculates their next future cron occurrence.
+
 The default schedule view contains current reminders. Owner-archived reminders
 and one-time reminders whose cron trigger has materialized remain readable in
 the archived section, with execution history, for exactly 45 days before the
@@ -150,7 +155,9 @@ introspection response containing `principal_id`, `actor_type`, public `org_id`,
 also contain the explicit `remind_permitted_silicon_principal_ids` array. Remind
 applies that owner UUID projection inside PostgreSQL before pagination; Silicons
 receive organization-wide reads, Carbons receive read-only projected access,
-and only an owner Silicon can mutate its reminder.
+and only an owner Silicon can mutate its reminder. Bulk pause and resume apply
+only when every selected reminder belongs to the authenticated Silicon; batches
+never partially update another owner's reminder.
 
 The checked-in IAM runtime must add a token-exchange/issuance path for
 Remind-audience application tokens and populate this authoritative projection

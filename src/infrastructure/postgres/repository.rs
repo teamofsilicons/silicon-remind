@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -6,18 +9,20 @@ use sqlx::{AssertSqlSafe, FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::domain::{
-    ARCHIVE_RETENTION_DAYS, ReminderReadScope, ScheduleSection, is_valid_iam_label,
-    silicon_id_belongs_to_org,
+    ARCHIVE_RETENTION_DAYS, MAX_SCHEDULE_STATUS_BATCH_SIZE, ReminderReadScope, ScheduleSection,
+    is_valid_iam_label, silicon_id_belongs_to_org,
 };
 
 use super::{
     error::RepositoryError,
     models::{
-        ActorType, AuditContext, CreateSchedule, DueMaterialization, ExecutionCursor, ExecutionRow,
-        HookDestinationRewrap, HookDestinationRow, IamLifecycleOutcome, IdempotencyContext,
-        IdempotentMutation, InternalEventReceiptRow, ListSchedules, NewHookDestination,
-        NewInternalEvent, Page, RevokedResourceCleanup, SchedulePurgeResult, ScheduleReplacement,
-        ScheduleResponse, ScheduleRow, SiliconIdentityRow, StoredIdempotentResponse,
+        ActorType, AuditContext, BulkScheduleStatusReplacement, CreateSchedule, DueMaterialization,
+        ExecutionCursor, ExecutionRow, HookDestinationRewrap, HookDestinationRow,
+        IamLifecycleOutcome, IdempotencyContext, IdempotentMutation, InternalEventReceiptRow,
+        ListSchedules, MutableScheduleStatus, NewHookDestination, NewInternalEvent, Page,
+        RevokedResourceCleanup, SchedulePurgeResult, ScheduleReplacement, ScheduleResponse,
+        ScheduleRow, ScheduleStatusBatchResponse, ScheduleStatusResponse, SiliconIdentityRow,
+        StoredIdempotentResponse,
     },
 };
 
@@ -222,6 +227,48 @@ impl PostgresRepository {
         query
             .build_query_as::<ScheduleRow>()
             .fetch_optional(&self.pool)
+            .await
+            .map_err(RepositoryError::from)
+    }
+
+    /// Reads a bounded set of retained schedules for desired-status validation.
+    ///
+    /// The result is UUID-ordered and intentionally does not filter by owner.
+    /// This lets the application distinguish an invisible ID from a visible
+    /// same-organization schedule owned by another Silicon. Retained archived
+    /// rows are included so lifecycle errors can be reported after visibility
+    /// and ownership checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input error for an invalid organization or ID batch and a
+    /// database error when the query fails.
+    pub async fn get_schedules_for_status_change(
+        &self,
+        org_id: &str,
+        schedule_ids: &[Uuid],
+    ) -> Result<Vec<ScheduleRow>, RepositoryError> {
+        validate_org_id(org_id)?;
+        validate_schedule_status_ids(schedule_ids)?;
+
+        let sql = format!(
+            "SELECT {SCHEDULE_COLUMNS} \
+             FROM schedules s \
+             JOIN silicon_identities identity \
+               ON identity.org_id = s.org_id \
+              AND identity.principal_id = s.owner_principal_id \
+              AND identity.silicon_id = s.silicon_id \
+             JOIN organization_lifecycle organization \
+               ON organization.org_id = s.org_id \
+             WHERE s.org_id = $1 AND s.id = ANY($2) \
+               AND (s.purge_after IS NULL OR s.purge_after > clock_timestamp()) \
+               AND identity.state = 'active' AND organization.state = 'active' \
+             ORDER BY s.id"
+        );
+        sqlx::query_as::<_, ScheduleRow>(AssertSqlSafe(sql))
+            .bind(org_id)
+            .bind(schedule_ids)
+            .fetch_all(&self.pool)
             .await
             .map_err(RepositoryError::from)
     }
@@ -650,6 +697,68 @@ impl PostgresRepository {
 
         Ok(IdempotentMutation::Applied {
             value: row,
+            response_body,
+        })
+    }
+
+    /// Applies one desired status to a bounded set of schedules atomically.
+    ///
+    /// Rows are locked in UUID order to prevent caller-controlled lock-order
+    /// inversions. The returned values and exact idempotency response retain
+    /// API request order. Schedules already in the desired status are returned
+    /// without changing their version, timestamp, next occurrence, or audit
+    /// history.
+    ///
+    /// # Errors
+    ///
+    /// Returns not found when any target is outside the active tenant/IAM
+    /// projection or owner scope, invalid state for an archived schedule,
+    /// version conflict when any application snapshot is stale, idempotency
+    /// conflict for incompatible key reuse, or a database error. Every failure
+    /// rolls back the whole batch.
+    pub async fn replace_schedule_statuses_idempotent(
+        &self,
+        replacement: &BulkScheduleStatusReplacement,
+        idempotency: &IdempotencyContext,
+        audit: &AuditContext,
+    ) -> Result<IdempotentMutation<Vec<ScheduleRow>>, RepositoryError> {
+        validate_bulk_schedule_status_replacement(replacement)?;
+        validate_mutating_silicon(idempotency, replacement.owner_principal_id)?;
+
+        let mut transaction = self.pool.begin().await?;
+        let reservation = reserve_idempotency(
+            &mut transaction,
+            &replacement.org_id,
+            "schedule.bulk_status",
+            None,
+            idempotency,
+        )
+        .await?;
+
+        if let Reservation::Replay {
+            status_code,
+            response_body,
+        } = reservation
+        {
+            transaction.commit().await?;
+            return Ok(IdempotentMutation::Replayed {
+                status_code,
+                response_body,
+            });
+        }
+
+        let rows_by_id = lock_schedule_status_rows(&mut transaction, replacement).await?;
+        let rows =
+            apply_schedule_status_changes(&mut transaction, replacement, audit, rows_by_id).await?;
+
+        let response_body = serde_json::to_value(ScheduleStatusBatchResponse {
+            items: rows.iter().map(ScheduleStatusResponse::from).collect(),
+        })?;
+        complete_idempotency(&mut transaction, reservation, 200, &response_body).await?;
+        transaction.commit().await?;
+
+        Ok(IdempotentMutation::Applied {
+            value: rows,
             response_body,
         })
     }
@@ -3146,6 +3255,54 @@ fn validate_schedule_replacement(replacement: &ScheduleReplacement) -> Result<()
     Ok(())
 }
 
+fn validate_bulk_schedule_status_replacement(
+    replacement: &BulkScheduleStatusReplacement,
+) -> Result<(), RepositoryError> {
+    validate_org_id(&replacement.org_id)?;
+    let schedule_ids = replacement
+        .schedules
+        .iter()
+        .map(|schedule| schedule.id)
+        .collect::<Vec<_>>();
+    validate_schedule_status_ids(&schedule_ids)?;
+
+    if replacement
+        .schedules
+        .iter()
+        .any(|schedule| schedule.expected_version <= 0)
+    {
+        return Err(RepositoryError::InvalidInput(
+            "expected schedule versions must be positive",
+        ));
+    }
+    if replacement.status == MutableScheduleStatus::Paused
+        && replacement
+            .schedules
+            .iter()
+            .any(|schedule| schedule.next_run_at.is_some())
+    {
+        return Err(RepositoryError::InvalidInput(
+            "a paused schedule cannot have a next occurrence",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_schedule_status_ids(schedule_ids: &[Uuid]) -> Result<(), RepositoryError> {
+    if !(1..=MAX_SCHEDULE_STATUS_BATCH_SIZE).contains(&schedule_ids.len()) {
+        return Err(RepositoryError::InvalidInput(
+            "schedule status batch must contain 1 to 100 IDs",
+        ));
+    }
+    let unique_ids = schedule_ids.iter().copied().collect::<HashSet<_>>();
+    if unique_ids.len() != schedule_ids.len() {
+        return Err(RepositoryError::InvalidInput(
+            "schedule status batch IDs must be unique",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_schedule_values(
     text: &str,
     timezone: &str,
@@ -3189,25 +3346,167 @@ fn validate_mutating_silicon(
     Ok(())
 }
 
+async fn lock_schedule_status_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    replacement: &BulkScheduleStatusReplacement,
+) -> Result<HashMap<Uuid, ScheduleRow>, RepositoryError> {
+    // IAM lifecycle writers acquire organization and identity tuples before
+    // schedule tuples. Preserve that global ordering to serialize revocation
+    // without introducing an inverse-lock deadlock.
+    let bound_silicon_id = lock_active_silicon_identity(
+        transaction,
+        &replacement.org_id,
+        replacement.owner_principal_id,
+    )
+    .await?;
+
+    let mut lock_ids = replacement
+        .schedules
+        .iter()
+        .map(|schedule| schedule.id)
+        .collect::<Vec<_>>();
+    lock_ids.sort_unstable();
+    let lock_sql = format!(
+        "SELECT {SCHEDULE_COLUMNS} \
+         FROM schedules s \
+         WHERE s.org_id = $1 AND s.id = ANY($2) \
+           AND (s.purge_after IS NULL OR s.purge_after > clock_timestamp()) \
+         ORDER BY s.id \
+         FOR UPDATE OF s"
+    );
+    let locked = sqlx::query_as::<_, ScheduleRow>(AssertSqlSafe(lock_sql))
+        .bind(&replacement.org_id)
+        .bind(&lock_ids)
+        .fetch_all(&mut **transaction)
+        .await?;
+    if locked.len() != replacement.schedules.len() {
+        return Err(RepositoryError::NotFound);
+    }
+
+    let rows_by_id = locked
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect::<HashMap<_, _>>();
+    validate_locked_schedule_status_rows(replacement, &bound_silicon_id, &rows_by_id)?;
+    Ok(rows_by_id)
+}
+
+fn validate_locked_schedule_status_rows(
+    replacement: &BulkScheduleStatusReplacement,
+    bound_silicon_id: &str,
+    rows_by_id: &HashMap<Uuid, ScheduleRow>,
+) -> Result<(), RepositoryError> {
+    if rows_by_id.values().any(|row| {
+        row.owner_principal_id != replacement.owner_principal_id
+            || row.silicon_id != bound_silicon_id
+    }) {
+        return Err(RepositoryError::NotFound);
+    }
+    if rows_by_id
+        .values()
+        .any(|row| row.deleted_at.is_some() || row.status == "completed")
+    {
+        return Err(RepositoryError::InvalidState);
+    }
+    if replacement.schedules.iter().any(|change| {
+        rows_by_id
+            .get(&change.id)
+            .is_none_or(|row| row.version != change.expected_version)
+    }) {
+        return Err(RepositoryError::VersionConflict);
+    }
+    if replacement.status == MutableScheduleStatus::Active
+        && replacement.schedules.iter().any(|change| {
+            rows_by_id.get(&change.id).is_some_and(|row| {
+                row.status != replacement.status.as_str() && change.next_run_at.is_none()
+            })
+        })
+    {
+        return Err(RepositoryError::InvalidInput(
+            "a resumed schedule must have a next occurrence",
+        ));
+    }
+    Ok(())
+}
+
+async fn apply_schedule_status_changes(
+    transaction: &mut Transaction<'_, Postgres>,
+    replacement: &BulkScheduleStatusReplacement,
+    audit: &AuditContext,
+    mut rows_by_id: HashMap<Uuid, ScheduleRow>,
+) -> Result<Vec<ScheduleRow>, RepositoryError> {
+    let update_sql = format!(
+        "UPDATE schedules SET \
+             status = $1, next_run_at = $2, version = version + 1 \
+         WHERE id = $3 AND org_id = $4 AND owner_principal_id = $5 \
+           AND deleted_at IS NULL AND status <> 'completed' AND version = $6 \
+         RETURNING {SCHEDULE_RETURNING_COLUMNS}"
+    );
+    let mut rows = Vec::with_capacity(replacement.schedules.len());
+    for change in &replacement.schedules {
+        let current = rows_by_id
+            .remove(&change.id)
+            .ok_or(RepositoryError::NotFound)?;
+        if current.status == replacement.status.as_str() {
+            rows.push(current);
+            continue;
+        }
+
+        let row = sqlx::query_as::<_, ScheduleRow>(AssertSqlSafe(update_sql.clone()))
+            .bind(replacement.status.as_str())
+            .bind(change.next_run_at)
+            .bind(change.id)
+            .bind(&replacement.org_id)
+            .bind(replacement.owner_principal_id)
+            .bind(change.expected_version)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RepositoryError::VersionConflict)?;
+        append_audit(
+            transaction,
+            Some(&replacement.org_id),
+            audit,
+            "schedule.status_changed",
+            "schedule",
+            Some(change.id.to_string()),
+            json!({
+                "previous_version": current.version,
+                "version": row.version,
+                "previous_status": current.status,
+                "status": row.status,
+            }),
+        )
+        .await?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+async fn lock_active_silicon_identity(
+    transaction: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    principal_id: Uuid,
+) -> Result<String, RepositoryError> {
+    let Some((organization_state, identity_state, silicon_id)) =
+        lock_silicon_lifecycle_projection(transaction, org_id, principal_id).await?
+    else {
+        return Err(RepositoryError::NotFound);
+    };
+    if organization_state != "active" || identity_state != "active" {
+        return Err(RepositoryError::NotFound);
+    }
+    silicon_id.ok_or(RepositoryError::NotFound)
+}
+
 async fn lock_schedulable_silicon_identity(
     transaction: &mut Transaction<'_, Postgres>,
     org_id: &str,
     principal_id: Uuid,
     silicon_id: &str,
 ) -> Result<(), RepositoryError> {
-    let lifecycle = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "SELECT identity.state, organization.state, identity.silicon_id \
-         FROM silicon_identities identity \
-         JOIN organization_lifecycle organization \
-           ON organization.org_id = identity.org_id \
-         WHERE identity.org_id = $1 AND identity.principal_id = $2 \
-         FOR UPDATE OF identity, organization",
-    )
-    .bind(org_id)
-    .bind(principal_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-    let Some((identity_state, organization_state, bound_silicon_id)) = lifecycle else {
+    let Some((organization_state, identity_state, bound_silicon_id)) =
+        lock_silicon_lifecycle_projection(transaction, org_id, principal_id).await?
+    else {
         return Err(RepositoryError::WebhookNotConfigured);
     };
     if identity_state != "active"
@@ -3221,7 +3520,7 @@ async fn lock_schedulable_silicon_identity(
         "SELECT true FROM hook_destinations \
          WHERE org_id = $1 AND owner_principal_id = $2 AND silicon_id = $3 \
            AND disabled_at IS NULL \
-         FOR UPDATE",
+         FOR SHARE",
     )
     .bind(org_id)
     .bind(principal_id)
@@ -3232,6 +3531,33 @@ async fn lock_schedulable_silicon_identity(
         return Err(RepositoryError::WebhookNotConfigured);
     }
     Ok(())
+}
+
+async fn lock_silicon_lifecycle_projection(
+    transaction: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    principal_id: Uuid,
+) -> Result<Option<(String, String, Option<String>)>, RepositoryError> {
+    let organization_state = sqlx::query_scalar::<_, String>(
+        "SELECT state FROM organization_lifecycle WHERE org_id = $1 FOR SHARE",
+    )
+    .bind(org_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(organization_state) = organization_state else {
+        return Ok(None);
+    };
+
+    let identity = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT state, silicon_id FROM silicon_identities \
+         WHERE org_id = $1 AND principal_id = $2 FOR SHARE",
+    )
+    .bind(org_id)
+    .bind(principal_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(identity
+        .map(|(identity_state, silicon_id)| (organization_state, identity_state, silicon_id)))
 }
 
 fn validate_org_id(value: &str) -> Result<(), RepositoryError> {

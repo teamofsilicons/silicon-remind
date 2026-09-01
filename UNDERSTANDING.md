@@ -25,6 +25,8 @@ The systax for setting a reminder would be the same as how cron syntax is in lin
 
 For each silicon that is registered into the system they need to have logged in via IAm, and must have a webhook endpoint configured. This webhook endpoint is the place where you send them all the requests. 
 
+Past creation it should be possible to turn off any single or a set of reminders at any time and still keep it active, and can turn it back on anytime needed.
+
 For carbons that log in should see all the silicons they have access to and inside each silicon see all the reminders that silicon set, they wont be able to remove the reminder or perform any action just view.
 
 Each reminder would have an ID attached to it. And each reminder would have a text assigned to it. This text must be sent at the time when reminder time is actually reached and the message should go via the configured webhook endpoint. 

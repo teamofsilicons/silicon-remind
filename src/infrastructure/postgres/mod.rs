@@ -13,11 +13,11 @@ mod tests;
 pub use connection::{HealthCheckError, connect, health_check, migrate};
 pub use error::RepositoryError;
 pub use models::{
-    ActorType, AuditContext, CreateSchedule, DueMaterialization, ExecutionCursor, ExecutionRow,
-    HookDestinationRewrap, HookDestinationRow, IamLifecycleOutcome, IdempotencyContext,
-    IdempotentMutation, InternalEventReceiptRow, ListSchedules, MutableScheduleStatus,
-    NewHookDestination, NewInternalEvent, Page, RevokedResourceCleanup, ScheduleCursor,
-    SchedulePurgeResult, ScheduleReplacement, ScheduleRow, SiliconIdentityRow,
-    StoredIdempotentResponse,
+    ActorType, AuditContext, BulkScheduleStatusReplacement, CreateSchedule, DueMaterialization,
+    ExecutionCursor, ExecutionRow, HookDestinationRewrap, HookDestinationRow, IamLifecycleOutcome,
+    IdempotencyContext, IdempotentMutation, InternalEventReceiptRow, ListSchedules,
+    MutableScheduleStatus, NewHookDestination, NewInternalEvent, Page, RevokedResourceCleanup,
+    ScheduleCursor, SchedulePurgeResult, ScheduleReplacement, ScheduleRow, ScheduleStatusChange,
+    SiliconIdentityRow, StoredIdempotentResponse,
 };
 pub use repository::PostgresRepository;

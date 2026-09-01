@@ -131,7 +131,7 @@ fn contract_is_openapi_31_and_every_local_reference_resolves() -> Result<()> {
 }
 
 #[test]
-fn contract_exposes_exactly_the_six_documented_operations() -> Result<()> {
+fn contract_exposes_exactly_the_seven_documented_operations() -> Result<()> {
     let document = load_contract()?;
     let paths = object_at(&document, "/paths")?;
     let mut actual = BTreeSet::new();
@@ -153,6 +153,7 @@ fn contract_exposes_exactly_the_six_documented_operations() -> Result<()> {
 
     let expected = [
         ("get", "/schedules", "listSchedules"),
+        ("patch", "/schedules", "updateScheduleStatuses"),
         ("post", "/schedules", "createSchedule"),
         ("get", "/schedules/{schedule_id}", "getSchedule"),
         ("patch", "/schedules/{schedule_id}", "updateSchedule"),
@@ -230,71 +231,74 @@ fn authentication_and_shared_parameter_definitions_are_stable() -> Result<()> {
     Ok(())
 }
 
+const OPERATION_PARAMETERS: &[(&str, &str, &[&str])] = &[
+    (
+        "/schedules",
+        "get",
+        &[
+            "#/components/parameters/OrgId",
+            "#/components/parameters/Cursor",
+            "#/components/parameters/Limit",
+        ],
+    ),
+    (
+        "/schedules",
+        "patch",
+        &[
+            "#/components/parameters/OrgId",
+            "#/components/parameters/IdempotencyKey",
+        ],
+    ),
+    (
+        "/schedules",
+        "post",
+        &[
+            "#/components/parameters/OrgId",
+            "#/components/parameters/IdempotencyKey",
+        ],
+    ),
+    (
+        "/schedules/{schedule_id}",
+        "get",
+        &[
+            "#/components/parameters/OrgId",
+            "#/components/parameters/ScheduleId",
+        ],
+    ),
+    (
+        "/schedules/{schedule_id}",
+        "patch",
+        &[
+            "#/components/parameters/OrgId",
+            "#/components/parameters/ScheduleId",
+            "#/components/parameters/IdempotencyKey",
+        ],
+    ),
+    (
+        "/schedules/{schedule_id}",
+        "delete",
+        &[
+            "#/components/parameters/OrgId",
+            "#/components/parameters/ScheduleId",
+        ],
+    ),
+    (
+        "/schedules/{schedule_id}/executions",
+        "get",
+        &[
+            "#/components/parameters/OrgId",
+            "#/components/parameters/ScheduleId",
+            "#/components/parameters/Cursor",
+            "#/components/parameters/Limit",
+        ],
+    ),
+];
+
 #[test]
 fn each_operation_has_expected_auth_tenant_and_mutation_contract() -> Result<()> {
     let document = load_contract()?;
     let bearer_security = json!([{ "bearerAuth": [] }]);
-    let operations = [
-        (
-            "/schedules",
-            "get",
-            [
-                "#/components/parameters/OrgId",
-                "#/components/parameters/Cursor",
-                "#/components/parameters/Limit",
-            ]
-            .as_slice(),
-        ),
-        (
-            "/schedules",
-            "post",
-            [
-                "#/components/parameters/OrgId",
-                "#/components/parameters/IdempotencyKey",
-            ]
-            .as_slice(),
-        ),
-        (
-            "/schedules/{schedule_id}",
-            "get",
-            [
-                "#/components/parameters/OrgId",
-                "#/components/parameters/ScheduleId",
-            ]
-            .as_slice(),
-        ),
-        (
-            "/schedules/{schedule_id}",
-            "patch",
-            [
-                "#/components/parameters/OrgId",
-                "#/components/parameters/ScheduleId",
-                "#/components/parameters/IdempotencyKey",
-            ]
-            .as_slice(),
-        ),
-        (
-            "/schedules/{schedule_id}",
-            "delete",
-            [
-                "#/components/parameters/OrgId",
-                "#/components/parameters/ScheduleId",
-            ]
-            .as_slice(),
-        ),
-        (
-            "/schedules/{schedule_id}/executions",
-            "get",
-            [
-                "#/components/parameters/OrgId",
-                "#/components/parameters/ScheduleId",
-                "#/components/parameters/Cursor",
-                "#/components/parameters/Limit",
-            ]
-            .as_slice(),
-        ),
-    ];
-    for (path, method, expected_references) in operations {
+    for &(path, method, expected_references) in OPERATION_PARAMETERS {
         let operation = operation(&document, path, method)?;
         let effective_security = operation
             .get("security")
@@ -403,6 +407,7 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
         "create and patch request schema contracts changed"
     );
     assert_archive_contract(&document)?;
+    assert_bulk_status_update_contract(&document)?;
     assert_patch_uses_cron_timing(&document)?;
     Ok(())
 }
@@ -435,6 +440,149 @@ fn assert_schedule_enums(document: &Value) -> Result<()> {
         string_set(schedule_kinds, "ScheduleKind enum")?
             == BTreeSet::from(["one_time".to_owned(), "recurring".to_owned()]),
         "ScheduleKind values changed"
+    );
+    Ok(())
+}
+
+fn assert_bulk_status_update_contract(document: &Value) -> Result<()> {
+    ensure!(
+        document
+            .pointer("/paths/~1schedules/patch/requestBody/content/application~1json/schema/$ref",)
+            == Some(&json!("#/components/schemas/ScheduleStatusBatchUpdate"))
+            && document.pointer(
+                "/paths/~1schedules/patch/responses/200/content/application~1json/schema/$ref",
+            ) == Some(&json!(
+                "#/components/schemas/ScheduleStatusBatchUpdateResponse"
+            )),
+        "bulk status operation must use its stable request and response schemas"
+    );
+
+    assert_bulk_status_request_contract(document)?;
+    assert_bulk_status_response_contract(document)?;
+    assert_bulk_status_result_contract(document)
+}
+
+fn assert_bulk_status_request_contract(document: &Value) -> Result<()> {
+    let request = object_at(document, "/components/schemas/ScheduleStatusBatchUpdate")?;
+    ensure!(
+        string_set(
+            request
+                .get("required")
+                .context("ScheduleStatusBatchUpdate.required is missing")?,
+            "ScheduleStatusBatchUpdate.required",
+        )? == BTreeSet::from(["schedule_ids".to_owned(), "status".to_owned()])
+            && request.get("additionalProperties") == Some(&Value::Bool(false)),
+        "bulk status request must require only its bounded ID set and status"
+    );
+    let request_properties = object_at(
+        document,
+        "/components/schemas/ScheduleStatusBatchUpdate/properties",
+    )?;
+    ensure!(
+        request_properties.keys().cloned().collect::<BTreeSet<_>>()
+            == BTreeSet::from(["schedule_ids".to_owned(), "status".to_owned()]),
+        "bulk status request properties changed"
+    );
+    let schedule_ids = object_at(
+        document,
+        "/components/schemas/ScheduleStatusBatchUpdate/properties/schedule_ids",
+    )?;
+    ensure!(
+        schedule_ids.get("type") == Some(&json!("array"))
+            && schedule_ids.get("minItems") == Some(&json!(1))
+            && schedule_ids.get("maxItems") == Some(&json!(100))
+            && schedule_ids.get("uniqueItems") == Some(&Value::Bool(true))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusBatchUpdate/properties/schedule_ids/items/type",
+            ) == Some(&json!("string"))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusBatchUpdate/properties/schedule_ids/items/format",
+            ) == Some(&json!("uuid"))
+            && document
+                .pointer("/components/schemas/ScheduleStatusBatchUpdate/properties/status/$ref",)
+                == Some(&json!("#/components/schemas/MutableScheduleStatus")),
+        "bulk status request must contain 1 through 100 unique UUIDs and a mutable status"
+    );
+    Ok(())
+}
+
+fn assert_bulk_status_response_contract(document: &Value) -> Result<()> {
+    let response = object_at(
+        document,
+        "/components/schemas/ScheduleStatusBatchUpdateResponse",
+    )?;
+    ensure!(
+        response.get("required") == Some(&json!(["items"]))
+            && response.get("additionalProperties") == Some(&Value::Bool(false))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusBatchUpdateResponse/properties/items/type",
+            ) == Some(&json!("array"))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusBatchUpdateResponse/properties/items/minItems",
+            ) == Some(&json!(1))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusBatchUpdateResponse/properties/items/maxItems",
+            ) == Some(&json!(100))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusBatchUpdateResponse/properties/items/items/$ref",
+            ) == Some(&json!("#/components/schemas/ScheduleStatusResult")),
+        "bulk status response must contain one bounded compact result array"
+    );
+    Ok(())
+}
+
+fn assert_bulk_status_result_contract(document: &Value) -> Result<()> {
+    let result = object_at(document, "/components/schemas/ScheduleStatusResult")?;
+    ensure!(
+        string_set(
+            result
+                .get("required")
+                .context("ScheduleStatusResult.required is missing")?,
+            "ScheduleStatusResult.required",
+        )? == BTreeSet::from([
+            "id".to_owned(),
+            "next_run_at".to_owned(),
+            "status".to_owned(),
+            "updated_at".to_owned(),
+        ]) && result.get("additionalProperties") == Some(&Value::Bool(false)),
+        "compact schedule status result required fields changed"
+    );
+    let result_properties = object_at(
+        document,
+        "/components/schemas/ScheduleStatusResult/properties",
+    )?;
+    ensure!(
+        result_properties.keys().cloned().collect::<BTreeSet<_>>()
+            == BTreeSet::from([
+                "id".to_owned(),
+                "next_run_at".to_owned(),
+                "status".to_owned(),
+                "updated_at".to_owned(),
+            ])
+            && document.pointer("/components/schemas/ScheduleStatusResult/properties/id/type")
+                == Some(&json!("string"))
+            && document.pointer("/components/schemas/ScheduleStatusResult/properties/id/format")
+                == Some(&json!("uuid"))
+            && document.pointer("/components/schemas/ScheduleStatusResult/properties/status/$ref")
+                == Some(&json!("#/components/schemas/MutableScheduleStatus"))
+            && string_set(
+                document
+                    .pointer(
+                        "/components/schemas/ScheduleStatusResult/properties/next_run_at/type",
+                    )
+                    .context("ScheduleStatusResult.next_run_at type is missing")?,
+                "ScheduleStatusResult.next_run_at type",
+            )? == BTreeSet::from(["null".to_owned(), "string".to_owned()])
+            && document.pointer(
+                "/components/schemas/ScheduleStatusResult/properties/next_run_at/format",
+            ) == Some(&json!("date-time"))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusResult/properties/updated_at/type",
+            ) == Some(&json!("string"))
+            && document.pointer(
+                "/components/schemas/ScheduleStatusResult/properties/updated_at/format",
+            ) == Some(&json!("date-time")),
+        "compact schedule status result fields changed"
     );
     Ok(())
 }

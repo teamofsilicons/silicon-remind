@@ -77,6 +77,16 @@ impl From<PatchScheduleRequest> for PatchScheduleCommand {
     }
 }
 
+/// Atomic desired-status change for one or more owned reminders.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BulkScheduleStatusRequest {
+    /// Reminder identifiers in the order results must be returned.
+    pub schedule_ids: Vec<Uuid>,
+    /// Desired status. Application policy rejects the terminal status.
+    pub status: ScheduleStatus,
+}
+
 /// A JSON merge-patch field with omitted, null, and value states.
 #[derive(Clone, Debug, Default)]
 pub enum NullablePatch<T> {
@@ -418,8 +428,8 @@ pub struct InternalEventAccepted {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateScheduleRequest, IamWebhookEvent, IamWebhookEventType, ListSchedulesQuery,
-        NullablePatch, PatchScheduleRequest,
+        BulkScheduleStatusRequest, CreateScheduleRequest, IamWebhookEvent, IamWebhookEventType,
+        ListSchedulesQuery, NullablePatch, PatchScheduleRequest,
     };
     use crate::domain::ScheduleSection;
 
@@ -439,6 +449,28 @@ mod tests {
     fn request_rejects_unknown_properties() {
         let parsed = serde_json::from_str::<PatchScheduleRequest>(r#"{"unknown":true}"#);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn bulk_status_request_preserves_order_and_rejects_unknown_properties() -> anyhow::Result<()> {
+        let first = uuid::Uuid::parse_str("0199a759-1ef5-7aa2-b96f-10785a8f2341")?;
+        let second = uuid::Uuid::parse_str("0199a759-1ef5-7aa2-b96f-10785a8f2342")?;
+        let request: BulkScheduleStatusRequest = serde_json::from_value(serde_json::json!({
+            "schedule_ids": [first, second],
+            "status": "paused"
+        }))?;
+
+        assert_eq!(request.schedule_ids, vec![first, second]);
+        assert_eq!(request.status, crate::domain::ScheduleStatus::Paused);
+        assert!(
+            serde_json::from_value::<BulkScheduleStatusRequest>(serde_json::json!({
+                "schedule_ids": [first],
+                "status": "active",
+                "unknown": true
+            }))
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]

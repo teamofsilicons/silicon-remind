@@ -70,6 +70,33 @@ pub async fn create(
     mutation_response(mutation.status_code, mutation.body)
 }
 
+/// `PATCH /api/v1/schedules`.
+///
+/// # Errors
+///
+/// Returns validation, ownership, state, idempotency, or persistence errors.
+pub async fn update_statuses(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
+    body: Result<Json<models::BulkScheduleStatusRequest>, rejection::JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(request) = body.map_err(|error| map_json_rejection(&error))?;
+    let hash = request_hash(&request)?;
+    let idempotency_key = idempotency_key(&headers)?;
+    let mutation = state
+        .schedules
+        .update_statuses(
+            &actor,
+            request.schedule_ids,
+            request.status,
+            idempotency_key,
+            hash,
+        )
+        .await?;
+    mutation_response(mutation.status_code, mutation.body)
+}
+
 /// `GET /api/v1/schedules/{schedule_id}`.
 ///
 /// # Errors

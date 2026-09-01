@@ -634,3 +634,46 @@ archival. Inline webhook handling and deferred cleanup both use bounded
 execution batches across every schedule status, so an auto-archived one-time
 reminder cannot remain retryable after its principal or organization is
 revoked. Its original `completed_at` and retention deadline remain unchanged.
+
+## D-039 — Pause and resume support atomic owner batches
+
+**Status:** Accepted; extends D-005, D-008, D-013, D-015, D-019, D-035, and
+D-037, and supersedes only D-019's six-operation inventory
+
+Turning a reminder off maps to the existing `paused` status, and turning it back
+on maps to `active`; no second enabled flag is introduced. A paused reminder
+remains in the current section with its history intact. The existing individual
+schedule PATCH remains available, while `PATCH /schedules` applies one mutable
+status to an ordered array of 1 through 100 unique schedule UUIDs. Its compact
+response contains `id`, `status`, `next_run_at`, and `updated_at` for every
+requested UUID in request order, avoiding an unbounded multiplication of the
+100,000-byte reminder text limit.
+
+Only a Silicon may call the batch operation, and it may mutate only its own
+current reminders in the selected organization. Carbon callers receive `403`
+before resource inspection. Resource validation has deterministic precedence,
+independent of request order: any absent, cross-organization, or expired UUID
+returns `404`; otherwise any reminder owned by another Silicon returns `403`;
+otherwise any archived or completed reminder returns `409`. Invalid bodies
+return `422`. Every row is validated and locked before an update is applied, so
+the batch either commits completely or leaves every reminder unchanged. Locks
+are acquired in UUID order to make overlapping batches deterministic, while
+results are restored to request order. Each transaction first acquires shared
+organization and owner-identity lifecycle locks in that order. Disjoint batches
+can therefore proceed concurrently, while IAM revocation waits for them and
+prevents any later mutation from passing the active lifecycle check.
+
+Rows already in the requested status are successful no-ops: their version,
+timestamps, and next occurrence remain unchanged. Pausing an active reminder
+clears `next_run_at` and suppresses future materialization without cancelling
+an execution that is already durable. Resuming a paused reminder calculates
+the first cron occurrence strictly after one shared operation timestamp for
+the complete batch. Scheduler and status mutations serialize on their schedule
+locks, and an occurrence materialized before a pause retains its existing
+delivery lifecycle.
+
+The batch reserves idempotency under its own operation scope with no individual
+target UUID. The exact ordered request body is fingerprinted: an identical
+replay returns the original `200` status and compact response, while changing
+the UUID membership, UUID order, or requested status under the same key returns
+`409 idempotency_conflict`.

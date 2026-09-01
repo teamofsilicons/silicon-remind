@@ -187,6 +187,31 @@ pub struct ScheduleReplacement {
     pub next_run_at: Option<DateTime<Utc>>,
 }
 
+/// One schedule revision and desired next occurrence in an atomic status batch.
+#[derive(Clone, Debug)]
+pub struct ScheduleStatusChange {
+    /// Target schedule UUID.
+    pub id: Uuid,
+    /// Version observed during application-level validation.
+    pub expected_version: i64,
+    /// Desired next occurrence. This is `None` when pausing and is calculated
+    /// by the application when resuming a schedule.
+    pub next_run_at: Option<DateTime<Utc>>,
+}
+
+/// Validated desired-status changes persisted as one atomic operation.
+#[derive(Clone, Debug)]
+pub struct BulkScheduleStatusReplacement {
+    /// Organization scope shared by every target schedule.
+    pub org_id: String,
+    /// Stable owner principal required for mutation authority.
+    pub owner_principal_id: Uuid,
+    /// Desired state shared by every target schedule.
+    pub status: MutableScheduleStatus,
+    /// Target revisions in API request order.
+    pub schedules: Vec<ScheduleStatusChange>,
+}
+
 /// Opaque keyset position for schedule listings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScheduleCursor {
@@ -535,6 +560,37 @@ impl From<&ScheduleRow> for ScheduleResponse {
             archived_at,
             purge_after: row.purge_after,
             created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// Exact compact response stored for an atomic schedule status mutation.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ScheduleStatusBatchResponse {
+    /// Schedule results in API request order.
+    pub items: Vec<ScheduleStatusResponse>,
+}
+
+/// Public schedule fields changed or preserved by a desired-status request.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ScheduleStatusResponse {
+    /// Schedule UUID.
+    pub id: Uuid,
+    /// Resulting lifecycle status.
+    pub status: String,
+    /// Resulting next occurrence, or `None` while paused.
+    pub next_run_at: Option<DateTime<Utc>>,
+    /// Last mutation timestamp, preserved for a no-op.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&ScheduleRow> for ScheduleStatusResponse {
+    fn from(row: &ScheduleRow) -> Self {
+        Self {
+            id: row.id,
+            status: row.status.clone(),
+            next_run_at: row.next_run_at,
             updated_at: row.updated_at,
         }
     }

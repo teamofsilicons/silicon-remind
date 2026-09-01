@@ -96,7 +96,9 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
     let public_api = Router::new()
         .route(
             "/schedules",
-            get(handlers::schedules::list).post(handlers::schedules::create),
+            get(handlers::schedules::list)
+                .post(handlers::schedules::create)
+                .patch(handlers::schedules::update_statuses),
         )
         .route(
             "/schedules/{schedule_id}",

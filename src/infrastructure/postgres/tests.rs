@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -6,19 +8,33 @@ use testcontainers::{ContainerAsync, ImageExt as _, runners::AsyncRunner as _};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-use crate::domain::{ReminderReadScope, ScheduleSection};
+use crate::{
+    application::{ports::Clock, schedules::ScheduleService},
+    domain::{Actor, ReminderReadScope, ScheduleSection, ScheduleStatus},
+    error::AppError,
+};
 
 use super::repository::{DELETED_REMINDER_LEDGER_LIMIT, trim_deleted_reminder_ledger};
 use super::{
-    ActorType, AuditContext, CreateSchedule, ExecutionRow, IamLifecycleOutcome, IdempotencyContext,
-    IdempotentMutation, ListSchedules, NewHookDestination, NewInternalEvent, PostgresRepository,
-    RepositoryError, ScheduleCursor, health_check, migrate,
+    ActorType, AuditContext, BulkScheduleStatusReplacement, CreateSchedule, ExecutionRow,
+    IamLifecycleOutcome, IdempotencyContext, IdempotentMutation, ListSchedules,
+    MutableScheduleStatus, NewHookDestination, NewInternalEvent, PostgresRepository,
+    RepositoryError, ScheduleCursor, ScheduleStatusChange, health_check, migrate,
 };
 
 struct TestDatabase {
     _container: ContainerAsync<Postgres>,
     pool: PgPool,
     repository: PostgresRepository,
+}
+
+#[derive(Debug)]
+struct FixedClock(DateTime<Utc>);
+
+impl Clock for FixedClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
 }
 
 struct LifecycleFixture {
@@ -47,6 +63,18 @@ struct ExpiredArchiveFixture {
     leased_execution: Uuid,
     created_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
+}
+
+struct BulkScheduleStatusFixture {
+    owner_principal_id: Uuid,
+    active_schedule_id: Uuid,
+    paused_schedule_id: Uuid,
+    completed_schedule_id: Uuid,
+    archived_schedule_id: Uuid,
+    execution_id: Uuid,
+    execution_next_attempt_at: DateTime<Utc>,
+    active_updated_at: DateTime<Utc>,
+    paused_updated_at: DateTime<Utc>,
 }
 
 #[tokio::test]
@@ -218,6 +246,257 @@ async fn assert_empty_and_organization_scopes(
             .await?
             .is_some()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bulk_schedule_status_preserves_order_noops_executions_and_exact_replay()
+-> anyhow::Result<()> {
+    let database = test_database().await?;
+    let fixture = seed_bulk_schedule_status_fixture(&database.pool).await?;
+    let mut request_order = vec![fixture.active_schedule_id, fixture.paused_schedule_id];
+    request_order.sort_unstable();
+    request_order.reverse();
+
+    let (pause, idempotency, response) =
+        apply_and_assert_bulk_pause(&database, &fixture, &request_order).await?;
+    assert_exact_bulk_status_replay(&database, &pause, &idempotency, &response).await?;
+    apply_and_assert_bulk_resume(&database, &fixture, &request_order).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bulk_schedule_status_rolls_back_stale_and_archived_batches() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let fixture = seed_bulk_schedule_status_fixture(&database.pool).await?;
+    let initial_active = bulk_schedule_state(&database.pool, fixture.active_schedule_id).await?;
+    let initial_paused = bulk_schedule_state(&database.pool, fixture.paused_schedule_id).await?;
+
+    let stale = BulkScheduleStatusReplacement {
+        org_id: "tos".to_owned(),
+        owner_principal_id: fixture.owner_principal_id,
+        status: MutableScheduleStatus::Paused,
+        schedules: vec![
+            ScheduleStatusChange {
+                id: fixture.active_schedule_id,
+                expected_version: 3,
+                next_run_at: None,
+            },
+            ScheduleStatusChange {
+                id: fixture.paused_schedule_id,
+                expected_version: 6,
+                next_run_at: None,
+            },
+        ],
+    };
+    assert!(matches!(
+        database
+            .repository
+            .replace_schedule_statuses_idempotent(
+                &stale,
+                &bulk_status_idempotency(
+                    fixture.owner_principal_id,
+                    "bulk-status-stale",
+                    [33; 32],
+                ),
+                &service_audit(),
+            )
+            .await,
+        Err(RepositoryError::VersionConflict)
+    ));
+    assert_bulk_status_batch_unchanged(&database.pool, &fixture, &initial_active, &initial_paused)
+        .await?;
+
+    for (schedule_id, expected_version, key, request_hash) in [
+        (
+            fixture.archived_schedule_id,
+            5,
+            "bulk-status-archived",
+            [34; 32],
+        ),
+        (
+            fixture.completed_schedule_id,
+            2,
+            "bulk-status-completed",
+            [35; 32],
+        ),
+    ] {
+        let invalid_state = BulkScheduleStatusReplacement {
+            org_id: "tos".to_owned(),
+            owner_principal_id: fixture.owner_principal_id,
+            status: MutableScheduleStatus::Paused,
+            schedules: vec![
+                ScheduleStatusChange {
+                    id: fixture.active_schedule_id,
+                    expected_version: 3,
+                    next_run_at: None,
+                },
+                ScheduleStatusChange {
+                    id: schedule_id,
+                    expected_version,
+                    next_run_at: None,
+                },
+            ],
+        };
+        assert!(matches!(
+            database
+                .repository
+                .replace_schedule_statuses_idempotent(
+                    &invalid_state,
+                    &bulk_status_idempotency(fixture.owner_principal_id, key, request_hash,),
+                    &service_audit(),
+                )
+                .await,
+            Err(RepositoryError::InvalidState)
+        ));
+        assert_bulk_status_batch_unchanged(
+            &database.pool,
+            &fixture,
+            &initial_active,
+            &initial_paused,
+        )
+        .await?;
+    }
+
+    assert!(bulk_status_audits(&database.pool).await?.is_empty());
+    let idempotency_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM idempotency_records WHERE operation = 'schedule.bulk_status'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(idempotency_rows, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bulk_schedule_status_uses_deterministic_error_precedence() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let fixture = seed_bulk_schedule_status_fixture(&database.pool).await?;
+    let foreign_schedule_id = seed_foreign_bulk_status_schedule(&database.pool).await?;
+    let expired_schedule_id =
+        seed_expired_bulk_status_schedule(&database.pool, fixture.owner_principal_id).await?;
+    let service = ScheduleService::new(
+        database.repository.clone(),
+        Arc::new(FixedClock(Utc::now())),
+        std::time::Duration::from_hours(24),
+    );
+    let actor = Actor::silicon(
+        fixture.owner_principal_id.to_string(),
+        "tos",
+        Uuid::now_v7(),
+        1,
+    );
+
+    assert!(matches!(
+        service
+            .update_statuses(
+                &actor,
+                vec![
+                    expired_schedule_id,
+                    foreign_schedule_id,
+                    fixture.archived_schedule_id,
+                ],
+                ScheduleStatus::Paused,
+                "precedence-missing".to_owned(),
+                [41; 32],
+            )
+            .await,
+        Err(AppError::NotFound)
+    ));
+    assert!(matches!(
+        service
+            .update_statuses(
+                &actor,
+                vec![foreign_schedule_id, fixture.archived_schedule_id],
+                ScheduleStatus::Paused,
+                "precedence-forbidden".to_owned(),
+                [42; 32],
+            )
+            .await,
+        Err(AppError::Forbidden)
+    ));
+    assert!(matches!(
+        service
+            .update_statuses(
+                &actor,
+                vec![fixture.archived_schedule_id],
+                ScheduleStatus::Paused,
+                "precedence-archived".to_owned(),
+                [43; 32],
+            )
+            .await,
+        Err(AppError::Conflict { code }) if code == "invalid_schedule_state"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bulk_pause_serializes_after_scheduler_materialization() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let now = Utc::now();
+    let schedule_id = seed_due_schedule(&database.pool, "bulk-race:tos", now, "recurring").await?;
+    let owner_principal_id = schedule_owner(&database.pool, schedule_id).await?;
+    let mut scheduler_transaction = database.repository.begin().await?;
+    let schedule = database
+        .repository
+        .lock_due_schedules(&mut scheduler_transaction, now, 100)
+        .await?
+        .into_iter()
+        .find(|row| row.id == schedule_id)
+        .ok_or_else(|| anyhow::anyhow!("due schedule was not locked"))?;
+    let next_run_at = now + Duration::minutes(1);
+
+    let pause_repository = database.repository.clone();
+    let pause_replacement = BulkScheduleStatusReplacement {
+        org_id: "tos".to_owned(),
+        owner_principal_id,
+        status: MutableScheduleStatus::Paused,
+        schedules: vec![ScheduleStatusChange {
+            id: schedule_id,
+            expected_version: schedule.version,
+            next_run_at: None,
+        }],
+    };
+    let pause_idempotency =
+        bulk_status_idempotency(owner_principal_id, "bulk-race-pause", [44; 32]);
+    let mut pause_task = tokio::spawn(async move {
+        pause_repository
+            .replace_schedule_statuses_idempotent(
+                &pause_replacement,
+                &pause_idempotency,
+                &service_audit(),
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut pause_task)
+            .await
+            .is_err()
+    );
+
+    let materialized = database
+        .repository
+        .materialize_locked_occurrence(
+            &mut scheduler_transaction,
+            &schedule,
+            Uuid::now_v7(),
+            now,
+            Some(next_run_at),
+            &service_audit(),
+        )
+        .await?;
+    scheduler_transaction.commit().await?;
+
+    assert!(matches!(
+        pause_task.await?,
+        Err(RepositoryError::VersionConflict)
+    ));
+    let state = bulk_schedule_state(&database.pool, schedule_id).await?;
+    assert_eq!(state.0, "active");
+    assert_eq!(state.1, Some(next_run_at));
+    assert_eq!(state.2, 2);
+    assert!(materialized.inserted);
+    assert_eq!(materialized.execution.schedule_id, schedule_id);
     Ok(())
 }
 
@@ -1372,6 +1651,431 @@ async fn test_database() -> anyhow::Result<TestDatabase> {
         pool,
         repository,
     })
+}
+
+async fn apply_and_assert_bulk_pause(
+    database: &TestDatabase,
+    fixture: &BulkScheduleStatusFixture,
+    request_order: &[Uuid],
+) -> anyhow::Result<(BulkScheduleStatusReplacement, IdempotencyContext, Value)> {
+    let replacement = BulkScheduleStatusReplacement {
+        org_id: "tos".to_owned(),
+        owner_principal_id: fixture.owner_principal_id,
+        status: MutableScheduleStatus::Paused,
+        schedules: request_order
+            .iter()
+            .map(|id| ScheduleStatusChange {
+                id: *id,
+                expected_version: if *id == fixture.active_schedule_id {
+                    3
+                } else {
+                    7
+                },
+                next_run_at: None,
+            })
+            .collect(),
+    };
+    let idempotency =
+        bulk_status_idempotency(fixture.owner_principal_id, "bulk-status-pause", [31; 32]);
+    let (rows, response) = match database
+        .repository
+        .replace_schedule_statuses_idempotent(&replacement, &idempotency, &service_audit())
+        .await?
+    {
+        IdempotentMutation::Applied {
+            value,
+            response_body,
+        } => (value, response_body),
+        IdempotentMutation::Replayed { .. } => {
+            anyhow::bail!("the first bulk status request unexpectedly replayed")
+        }
+    };
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        request_order
+    );
+    assert_eq!(status_response_ids(&response)?, request_order);
+
+    let changed = rows
+        .iter()
+        .find(|row| row.id == fixture.active_schedule_id)
+        .ok_or_else(|| anyhow::anyhow!("changed schedule missing from response"))?;
+    assert_eq!(changed.status, "paused");
+    assert_eq!(changed.version, 4);
+    assert!(changed.next_run_at.is_none());
+    assert!(changed.updated_at > fixture.active_updated_at);
+
+    let unchanged = rows
+        .iter()
+        .find(|row| row.id == fixture.paused_schedule_id)
+        .ok_or_else(|| anyhow::anyhow!("no-op schedule missing from response"))?;
+    assert_eq!(unchanged.status, "paused");
+    assert_eq!(unchanged.version, 7);
+    assert!(unchanged.next_run_at.is_none());
+    assert_eq!(unchanged.updated_at, fixture.paused_updated_at);
+
+    assert_materialized_execution_unchanged(database, fixture).await?;
+    let audits = bulk_status_audits(&database.pool).await?;
+    let expected_resource_id = fixture.active_schedule_id.to_string();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].0.as_deref(), Some(expected_resource_id.as_str()));
+    assert_eq!(audits[0].1["previous_status"], "active");
+    assert_eq!(audits[0].1["status"], "paused");
+    Ok((replacement, idempotency, response))
+}
+
+async fn assert_materialized_execution_unchanged(
+    database: &TestDatabase,
+    fixture: &BulkScheduleStatusFixture,
+) -> anyhow::Result<()> {
+    let execution = sqlx::query_as::<_, (String, i64, Option<DateTime<Utc>>)>(
+        "SELECT status, schedule_version, next_attempt_at FROM executions WHERE id = $1",
+    )
+    .bind(fixture.execution_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(execution.0, "pending");
+    assert_eq!(execution.1, 3);
+    assert_eq!(execution.2, Some(fixture.execution_next_attempt_at));
+    Ok(())
+}
+
+async fn assert_exact_bulk_status_replay(
+    database: &TestDatabase,
+    replacement: &BulkScheduleStatusReplacement,
+    idempotency: &IdempotencyContext,
+    expected_response: &Value,
+) -> anyhow::Result<()> {
+    match database
+        .repository
+        .replace_schedule_statuses_idempotent(replacement, idempotency, &service_audit())
+        .await?
+    {
+        IdempotentMutation::Replayed {
+            status_code,
+            response_body,
+        } => {
+            assert_eq!(status_code, 200);
+            assert_eq!(&response_body, expected_response);
+        }
+        IdempotentMutation::Applied { .. } => {
+            anyhow::bail!("an exact bulk status retry did not replay")
+        }
+    }
+    let conflicting = IdempotencyContext {
+        request_hash: [99; 32],
+        ..idempotency.clone()
+    };
+    assert!(matches!(
+        database
+            .repository
+            .replace_schedule_statuses_idempotent(replacement, &conflicting, &service_audit(),)
+            .await,
+        Err(RepositoryError::IdempotencyConflict)
+    ));
+    assert_eq!(bulk_status_audits(&database.pool).await?.len(), 1);
+    Ok(())
+}
+
+async fn apply_and_assert_bulk_resume(
+    database: &TestDatabase,
+    fixture: &BulkScheduleStatusFixture,
+    request_order: &[Uuid],
+) -> anyhow::Result<()> {
+    let shared_next_run_at = Utc::now() + Duration::hours(6);
+    let replacement = BulkScheduleStatusReplacement {
+        org_id: "tos".to_owned(),
+        owner_principal_id: fixture.owner_principal_id,
+        status: MutableScheduleStatus::Active,
+        schedules: request_order
+            .iter()
+            .map(|id| ScheduleStatusChange {
+                id: *id,
+                expected_version: if *id == fixture.active_schedule_id {
+                    4
+                } else {
+                    7
+                },
+                next_run_at: Some(shared_next_run_at),
+            })
+            .collect(),
+    };
+    let rows = match database
+        .repository
+        .replace_schedule_statuses_idempotent(
+            &replacement,
+            &bulk_status_idempotency(fixture.owner_principal_id, "bulk-status-resume", [32; 32]),
+            &service_audit(),
+        )
+        .await?
+    {
+        IdempotentMutation::Applied { value, .. } => value,
+        IdempotentMutation::Replayed { .. } => {
+            anyhow::bail!("the first resume request unexpectedly replayed")
+        }
+    };
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        request_order
+    );
+    assert!(rows.iter().all(|row| row.status == "active"));
+    assert!(
+        rows.iter()
+            .all(|row| row.next_run_at == Some(shared_next_run_at))
+    );
+    assert_eq!(bulk_status_audits(&database.pool).await?.len(), 3);
+    Ok(())
+}
+
+async fn seed_bulk_schedule_status_fixture(
+    pool: &PgPool,
+) -> anyhow::Result<BulkScheduleStatusFixture> {
+    let now = Utc::now();
+    let created_at = now - Duration::days(2);
+    let completed_at = now - Duration::hours(4);
+    let archived_at = now - Duration::hours(1);
+    let fixture = BulkScheduleStatusFixture {
+        owner_principal_id: Uuid::now_v7(),
+        active_schedule_id: Uuid::now_v7(),
+        paused_schedule_id: Uuid::now_v7(),
+        completed_schedule_id: Uuid::now_v7(),
+        archived_schedule_id: Uuid::now_v7(),
+        execution_id: Uuid::now_v7(),
+        execution_next_attempt_at: now + Duration::minutes(10),
+        active_updated_at: now - Duration::hours(3),
+        paused_updated_at: now - Duration::hours(2),
+    };
+
+    sqlx::query("INSERT INTO organization_lifecycle (org_id, state) VALUES ('tos', 'active')")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO silicon_identities (org_id, principal_id, silicon_id, state) \
+         VALUES ('tos', $1, 'bulk-status:tos', 'active')",
+    )
+    .bind(fixture.owner_principal_id)
+    .execute(pool)
+    .await?;
+    seed_bulk_status_schedule_rows(pool, &fixture, now, created_at, completed_at, archived_at)
+        .await?;
+    sqlx::query(
+        "INSERT INTO executions (\
+             id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
+             scheduled_for, reminder_text, timezone, status, next_attempt_at\
+         ) VALUES (\
+             $1, $2, 'tos', 'bulk-status:tos', 3, 'recurring', $3, \
+             'already materialized', 'UTC', 'pending', $4\
+         )",
+    )
+    .bind(fixture.execution_id)
+    .bind(fixture.active_schedule_id)
+    .bind(now)
+    .bind(fixture.execution_next_attempt_at)
+    .execute(pool)
+    .await?;
+    Ok(fixture)
+}
+
+async fn seed_bulk_status_schedule_rows(
+    pool: &PgPool,
+    fixture: &BulkScheduleStatusFixture,
+    now: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    completed_at: DateTime<Utc>,
+    archived_at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, version, \
+             created_at, updated_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'bulk-status:tos', 'active bulk reminder', 'UTC', \
+             'recurring', '*/5 * * * *', 'active', $3, 3, $4, $5\
+         )",
+    )
+    .bind(fixture.active_schedule_id)
+    .bind(fixture.owner_principal_id)
+    .bind(now + Duration::hours(1))
+    .bind(created_at)
+    .bind(fixture.active_updated_at)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, version, \
+             created_at, updated_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'bulk-status:tos', 'paused bulk reminder', 'UTC', \
+             'recurring', '*/10 * * * *', 'paused', NULL, 7, $3, $4\
+         )",
+    )
+    .bind(fixture.paused_schedule_id)
+    .bind(fixture.owner_principal_id)
+    .bind(created_at)
+    .bind(fixture.paused_updated_at)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, version, \
+             completed_at, created_at, updated_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'bulk-status:tos', 'completed bulk reminder', 'UTC', \
+             'one_time', '0 9 * * *', 'completed', NULL, 2, $3, $4, $3\
+         )",
+    )
+    .bind(fixture.completed_schedule_id)
+    .bind(fixture.owner_principal_id)
+    .bind(completed_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, version, \
+             deleted_at, created_at, updated_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'bulk-status:tos', 'archived bulk reminder', 'UTC', \
+             'recurring', '0 12 * * *', 'active', NULL, 5, $3, $4, $3\
+         )",
+    )
+    .bind(fixture.archived_schedule_id)
+    .bind(fixture.owner_principal_id)
+    .bind(archived_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_foreign_bulk_status_schedule(pool: &PgPool) -> anyhow::Result<Uuid> {
+    let owner_principal_id = Uuid::now_v7();
+    let schedule_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO silicon_identities (org_id, principal_id, silicon_id, state) \
+         VALUES ('tos', $1, 'bulk-foreign:tos', 'active')",
+    )
+    .bind(owner_principal_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'bulk-foreign:tos', 'foreign bulk reminder', 'UTC', \
+             'recurring', '0 8 * * *', 'active', $3\
+         )",
+    )
+    .bind(schedule_id)
+    .bind(owner_principal_id)
+    .bind(Utc::now() + Duration::hours(1))
+    .execute(pool)
+    .await?;
+    Ok(schedule_id)
+}
+
+async fn seed_expired_bulk_status_schedule(
+    pool: &PgPool,
+    owner_principal_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let schedule_id = Uuid::now_v7();
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO schedules (\
+             id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
+             schedule_kind, cron_expression, status, next_run_at, deleted_at, created_at\
+         ) VALUES (\
+             $1, 'tos', $2, 'bulk-status:tos', 'expired bulk reminder', 'UTC', \
+             'recurring', '0 7 * * *', 'paused', NULL, $3, $4\
+         )",
+    )
+    .bind(schedule_id)
+    .bind(owner_principal_id)
+    .bind(now - Duration::days(46))
+    .bind(now - Duration::days(60))
+    .execute(pool)
+    .await?;
+    Ok(schedule_id)
+}
+
+fn bulk_status_idempotency(
+    owner_principal_id: Uuid,
+    key: &str,
+    request_hash: [u8; 32],
+) -> IdempotencyContext {
+    IdempotencyContext {
+        actor_type: ActorType::Silicon,
+        actor_id: owner_principal_id.to_string(),
+        key: key.to_owned(),
+        request_hash,
+        expires_at: Utc::now() + Duration::hours(24),
+    }
+}
+
+fn status_response_ids(response: &Value) -> anyhow::Result<Vec<Uuid>> {
+    response
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("bulk status response did not contain an items array"))?
+        .iter()
+        .map(|item| {
+            let object = item
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("bulk status response item was not an object"))?;
+            let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            anyhow::ensure!(
+                keys == ["id", "next_run_at", "status", "updated_at"],
+                "bulk status response item had an unexpected shape: {keys:?}"
+            );
+            let id = object.get("id").and_then(Value::as_str).ok_or_else(|| {
+                anyhow::anyhow!("bulk status response item did not contain an id")
+            })?;
+            Uuid::parse_str(id).map_err(Into::into)
+        })
+        .collect()
+}
+
+async fn bulk_status_audits(pool: &PgPool) -> anyhow::Result<Vec<(Option<String>, Value)>> {
+    sqlx::query_as(
+        "SELECT resource_id, metadata FROM audit_records \
+         WHERE action = 'schedule.status_changed' ORDER BY occurred_at, id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+type BulkScheduleState = (String, Option<DateTime<Utc>>, i64, DateTime<Utc>);
+
+async fn bulk_schedule_state(pool: &PgPool, id: Uuid) -> anyhow::Result<BulkScheduleState> {
+    sqlx::query_as("SELECT status, next_run_at, version, updated_at FROM schedules WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+}
+
+async fn assert_bulk_status_batch_unchanged(
+    pool: &PgPool,
+    fixture: &BulkScheduleStatusFixture,
+    initial_active: &BulkScheduleState,
+    initial_paused: &BulkScheduleState,
+) -> anyhow::Result<()> {
+    assert_eq!(
+        &bulk_schedule_state(pool, fixture.active_schedule_id).await?,
+        initial_active
+    );
+    assert_eq!(
+        &bulk_schedule_state(pool, fixture.paused_schedule_id).await?,
+        initial_paused
+    );
+    Ok(())
 }
 
 async fn seed_visibility_schedule(

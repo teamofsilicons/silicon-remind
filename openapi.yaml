@@ -50,6 +50,31 @@ paths:
                   items: { type: array, items: { $ref: '#/components/schemas/Schedule' } }
                   next_cursor: { type: [string, 'null'] }
         default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Schedules]
+      operationId: updateScheduleStatuses
+      summary: Atomically pause or resume owned current schedules
+      description: >-
+        Applies one active or paused status to every requested schedule in the
+        supplied order. The authenticated Silicon must own every schedule, and
+        every schedule must still be current. Validation is all-or-nothing;
+        failures leave the complete batch unchanged. The response contains one
+        compact status result per requested schedule in request order.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduleStatusBatchUpdate' }
+      responses:
+        '200':
+          description: Schedule status results in request order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduleStatusBatchUpdateResponse' }
+        default: { $ref: '#/components/responses/Error' }
     post:
       tags: [Schedules]
       operationId: createSchedule
@@ -205,6 +230,37 @@ components:
     MutableScheduleStatus:
       type: string
       enum: [active, paused]
+    ScheduleStatusBatchUpdate:
+      type: object
+      required: [schedule_ids, status]
+      additionalProperties: false
+      properties:
+        schedule_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/MutableScheduleStatus' }
+    ScheduleStatusBatchUpdateResponse:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: '#/components/schemas/ScheduleStatusResult' }
+    ScheduleStatusResult:
+      type: object
+      required: [id, status, next_run_at, updated_at]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/MutableScheduleStatus' }
+        next_run_at: { type: [string, 'null'], format: date-time }
+        updated_at: { type: string, format: date-time }
     ScheduleKind:
       type: string
       enum: [one_time, recurring]
