@@ -11,5 +11,10 @@ async fn main() -> anyhow::Result<()> {
     let pool = postgres::connect(&settings.database).await?;
     postgres::migrate(&pool).await?;
     pool.close().await;
+    if let Some(database) = &settings.testing_database {
+        let pool = postgres::connect(database).await?;
+        silicon_remind::infrastructure::testing::TestEnvironments::migrate(&pool).await?;
+        pool.close().await;
+    }
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac as _};
@@ -13,7 +13,6 @@ use sha2::Sha256;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use crate::domain::is_valid_global_silicon_id;
 
@@ -53,10 +52,10 @@ pub struct ReminderEvent {
     pub timezone: String,
 }
 
-/// Successful durable acceptance from Silicon Hook.
+/// Durable ingress receipt from Silicon Hook (not downstream acknowledgment).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HookReceipt {
-    /// Hook's stable event identifier.
+    /// Hook's receipt identifier; ingress does not reveal signature verification.
     pub event_id: Uuid,
 }
 
@@ -124,13 +123,13 @@ impl HookClient {
         })
     }
 
-    /// Sends one signed event and waits for Hook's durable acceptance.
+    /// Sends one signed event and waits for Hook's durable ingress receipt.
     ///
     /// # Errors
     ///
     /// Returns a classified delivery error for transport, protocol, or HTTP
-    /// failures. Ambiguous outcomes are retryable because the execution UUID is
-    /// reused as Hook's idempotency key.
+    /// failures. Ambiguous outcomes are retried with the same execution UUID.
+    /// Hook can retain duplicates; recipients deduplicate by execution UUID.
     pub async fn deliver(
         &self,
         destination: &HookDestination,
@@ -142,7 +141,12 @@ impl HookClient {
             reason: bounded_reason(format!("event serialization failed: {error}")),
         })?;
         let timestamp = now.timestamp().to_string();
-        let signature = signature(&destination.signing_secret, &timestamp, &body)?;
+        let signature = signature(
+            &destination.signing_secret,
+            event.execution_id,
+            &timestamp,
+            &body,
+        )?;
         let headers = request_headers(event.execution_id, &timestamp, &signature)?;
 
         let response = self
@@ -158,7 +162,7 @@ impl HookClient {
         let status = response.status();
         let response_body = read_bounded(response, self.max_response_bytes).await?;
 
-        if status == StatusCode::ACCEPTED {
+        if status == StatusCode::OK {
             let acceptance: Acceptance =
                 serde_json::from_slice(&response_body).map_err(|error| {
                     HookDeliveryError::Retryable {
@@ -167,13 +171,13 @@ impl HookClient {
                         )),
                     }
                 })?;
-            if acceptance.status != "accepted" {
+            if acceptance.status != "webhook.ok" {
                 return Err(HookDeliveryError::Retryable {
                     reason: bounded_reason("Hook returned an unexpected acceptance status"),
                 });
             }
             return Ok(HookReceipt {
-                event_id: acceptance.event_id,
+                event_id: acceptance.receipt_id,
             });
         }
 
@@ -229,7 +233,7 @@ struct EventPayload<'a> {
 
 #[derive(Debug, Deserialize)]
 struct Acceptance {
-    event_id: Uuid,
+    receipt_id: Uuid,
     status: String,
 }
 
@@ -237,47 +241,42 @@ type HmacSha256 = Hmac<Sha256>;
 
 fn signature(
     signing_secret: &SecretString,
+    execution_id: Uuid,
     timestamp: &str,
     body: &[u8],
 ) -> Result<String, HookDeliveryError> {
-    let key = decode_signing_key(signing_secret)?;
-    let mut mac = HmacSha256::new_from_slice(&key).map_err(|_| HookDeliveryError::Terminal {
-        reason: bounded_reason("Hook signing credential is invalid"),
-    })?;
-    mac.update(timestamp.as_bytes());
-    mac.update(b".");
-    mac.update(body);
-    Ok(format!("v1={}", hex::encode(mac.finalize().into_bytes())))
-}
-
-pub(crate) fn signing_secret_is_valid(secret: &SecretString) -> bool {
-    decode_signing_key(secret).is_ok()
-}
-
-fn decode_signing_key(secret: &SecretString) -> Result<Zeroizing<Vec<u8>>, HookDeliveryError> {
-    let encoded = secret
-        .expose_secret()
-        .strip_prefix("whsec_")
-        .ok_or_else(|| HookDeliveryError::Terminal {
-            reason: bounded_reason("Hook signing credential is invalid"),
-        })?;
-    let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
-        HookDeliveryError::Terminal {
-            reason: bounded_reason("Hook signing credential is invalid"),
-        }
-    })?);
-    if decoded.len() != 32 {
+    if !signing_secret_is_valid(signing_secret) {
         return Err(HookDeliveryError::Terminal {
             reason: bounded_reason("Hook signing credential is invalid"),
         });
     }
-    Ok(decoded)
+    let mut mac =
+        HmacSha256::new_from_slice(signing_secret.expose_secret().as_bytes()).map_err(|_| {
+            HookDeliveryError::Terminal {
+                reason: bounded_reason("Hook signing credential is invalid"),
+            }
+        })?;
+    mac.update(execution_id.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    Ok(format!(
+        "v1,{}",
+        STANDARD.encode(mac.finalize().into_bytes())
+    ))
+}
+
+pub(crate) fn signing_secret_is_valid(secret: &SecretString) -> bool {
+    let value = secret.expose_secret();
+    !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
 }
 
 pub(crate) fn destination_url_is_allowed(
     destination: &Url,
     base: &Url,
     expected_silicon_id: &str,
+    testing: bool,
 ) -> bool {
     if destination.scheme() != base.scheme()
         || destination.host_str() != base.host_str()
@@ -296,18 +295,24 @@ pub(crate) fn destination_url_is_allowed(
     if segments.last() == Some(&"") {
         segments.pop();
     }
-    let route = match segments.as_slice() {
-        ["silicon", silicon_id, endpoint_key]
-        | ["api", "v1", "silicon", silicon_id, endpoint_key] => Some((*silicon_id, *endpoint_key)),
+    let route = match (testing, segments.as_slice()) {
+        (
+            false,
+            ["silicon", silicon_id, endpoint_key]
+            | ["api", "v1", "silicon", silicon_id, endpoint_key],
+        )
+        | (true, ["test", "silicon", silicon_id, endpoint_key]) => {
+            Some((*silicon_id, *endpoint_key))
+        }
         _ => None,
     };
     route.is_some_and(|(silicon_id, endpoint_key)| {
         silicon_id == expected_silicon_id
             && is_valid_global_silicon_id(silicon_id)
-            && endpoint_key.len() == 6
+            && endpoint_key.len() == 8
             && endpoint_key
                 .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
     })
 }
 
@@ -322,8 +327,9 @@ fn request_headers(
         HeaderValue::from_static("application/json"),
     );
     insert_header(&mut headers, "idempotency-key", &execution_id.to_string())?;
-    insert_header(&mut headers, "x-hook-timestamp", timestamp)?;
-    insert_header(&mut headers, "x-hook-signature", signature)?;
+    insert_header(&mut headers, "webhook-id", &execution_id.to_string())?;
+    insert_header(&mut headers, "webhook-timestamp", timestamp)?;
+    insert_header(&mut headers, "webhook-signature", signature)?;
     Ok(headers)
 }
 
@@ -399,33 +405,44 @@ fn bounded_reason(reason: impl AsRef<str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use secrecy::SecretString;
     use url::Url;
 
     use super::{bounded_reason, destination_url_is_allowed, signature, signing_secret_is_valid};
 
     fn signing_secret() -> SecretString {
-        SecretString::from(format!("whsec_{}", URL_SAFE_NO_PAD.encode([7_u8; 32])))
+        SecretString::from("v1.abcdefghijklmnopqrstuvwxyz123456")
     }
 
     #[test]
-    fn signature_has_versioned_hex_format() {
-        let signature = signature(&signing_secret(), "123", br#"{"ok":true}"#);
+    fn signature_has_standard_webhooks_format() {
+        let signature = signature(
+            &signing_secret(),
+            uuid::Uuid::nil(),
+            "123",
+            br#"{"ok":true}"#,
+        );
         assert!(signature.is_ok());
         let Ok(signature) = signature else {
             return;
         };
-        assert_eq!(signature.len(), 67);
-        assert!(signature.starts_with("v1="));
-        assert!(signature[3..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(signature.len(), 47);
+        assert!(signature.starts_with("v1,"));
+        assert_eq!(
+            STANDARD
+                .decode(&signature[3..])
+                .map(|bytes| bytes.len())
+                .ok(),
+            Some(32)
+        );
     }
 
     #[test]
-    fn signing_secret_must_be_a_canonical_256_bit_hook_secret() {
+    fn signing_secret_is_bounded_text() {
         assert!(signing_secret_is_valid(&signing_secret()));
         assert!(!signing_secret_is_valid(&SecretString::from(
-            "not-a-hook-secret"
+            "has\ncontrol"
         )));
     }
 
@@ -433,32 +450,35 @@ mod tests {
     fn destination_accepts_only_normative_routes_for_the_expected_silicon() -> anyhow::Result<()> {
         let base = Url::parse("https://hook.teamofsilicons.com/api/v1")?;
         for path in [
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F",
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F/",
-            "https://hook.teamofsilicons.com/api/v1/silicon/cos:tos/40AE2F",
+            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z",
+            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z/",
+            "https://hook.teamofsilicons.com/api/v1/silicon/cos:tos/40AE2F9Z",
         ] {
             assert!(destination_url_is_allowed(
                 &Url::parse(path)?,
                 &base,
-                "cos:tos"
+                "cos:tos",
+                false
             ));
         }
         for path in [
-            "https://evil.example/silicon/cos:tos/40AE2F",
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40ae2f",
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F/extra",
-            "https://hook.teamofsilicons.com/silicon/not-global/40AE2F",
+            "https://evil.example/silicon/cos:tos/40AE2F9Z",
+            "https://hook.teamofsilicons.com/silicon/cos:tos/40ae2f9z",
+            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z/extra",
+            "https://hook.teamofsilicons.com/silicon/not-global/40AE2F9Z",
         ] {
             assert!(!destination_url_is_allowed(
                 &Url::parse(path)?,
                 &base,
-                "cos:tos"
+                "cos:tos",
+                false
             ));
         }
         assert!(!destination_url_is_allowed(
-            &Url::parse("https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F")?,
+            &Url::parse("https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z")?,
             &base,
-            "other:tos"
+            "other:tos",
+            false
         ));
         Ok(())
     }

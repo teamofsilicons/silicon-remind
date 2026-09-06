@@ -28,6 +28,8 @@ pub struct Settings {
     pub server: ServerSettings,
     /// Runtime PostgreSQL connection pool.
     pub database: DatabaseSettings,
+    /// Dedicated shared testing database; absent disables test environments.
+    pub testing_database: Option<DatabaseSettings>,
     /// Silicon IAM token-introspection client.
     pub iam: IamSettings,
     /// Credential accepted by Remind's internal API.
@@ -53,6 +55,8 @@ pub struct MigrationSettings {
     pub environment: RuntimeEnvironment,
     /// Privileged migration database connection.
     pub database: DatabaseSettings,
+    /// Privileged shared test-database connection, when configured.
+    pub testing_database: Option<DatabaseSettings>,
     /// Tracing filter directive.
     pub log_filter: String,
 }
@@ -135,18 +139,14 @@ pub struct DatabaseSettings {
 /// IAM's authenticated opaque-token introspection client.
 #[derive(Clone, Debug)]
 pub struct IamSettings {
-    /// Full IAM token-introspection endpoint.
-    pub introspection_url: Url,
+    /// IAM service origin used by the official client.
+    pub base_url: Url,
     /// HTTP Basic username registered for Remind.
     pub app_id: String,
     /// HTTP Basic password registered for Remind.
     pub app_secret: SecretString,
-    /// TCP/TLS connection establishment deadline.
-    pub connect_timeout: Duration,
-    /// End-to-end introspection request deadline.
+    /// End-to-end IAM request deadline.
     pub request_timeout: Duration,
-    /// Maximum accepted IAM response body size.
-    pub max_response_bytes: usize,
     /// Retained application-webhook signing secrets keyed by IAM version.
     pub webhook_keys: BTreeMap<i16, SecretString>,
 }
@@ -294,17 +294,16 @@ impl Settings {
         };
 
         let database = database_settings(source, DatabaseProfile::Runtime)?;
+        let testing_database = testing_database_settings(source, &database, environment)?;
         let iam = IamSettings {
-            introspection_url: parse_or(
+            base_url: parse_or(
                 source,
-                "REMIND_IAM_INTROSPECTION_URL",
-                "http://127.0.0.1:8081/api/v1/auth/tokens/introspect",
+                "REMIND_IAM_BASE_URL",
+                "https://backend.iam.teamofsilicons.com",
             )?,
             app_id: required(source, "REMIND_IAM_APP_ID")?,
             app_secret: required_secret(source, "REMIND_IAM_APP_SECRET")?,
-            connect_timeout: duration_millis(source, "REMIND_IAM_CONNECT_TIMEOUT_MS", 1_000)?,
             request_timeout: duration_millis(source, "REMIND_IAM_REQUEST_TIMEOUT_MS", 3_000)?,
-            max_response_bytes: positive_size(source, "REMIND_IAM_MAX_RESPONSE_BYTES", 65_536)?,
             webhook_keys: iam_webhook_keyring(source)?,
         };
         let internal_api = InternalApiSettings {
@@ -356,6 +355,7 @@ impl Settings {
             environment,
             server,
             database,
+            testing_database,
             iam,
             internal_api,
             encryption,
@@ -390,9 +390,31 @@ impl MigrationSettings {
         let database = database_settings(source, DatabaseProfile::Migrator)?;
         validate_database_transport(environment, &database, "REMIND_MIGRATOR_DATABASE_URL")?;
 
+        let testing_database = optional(source, "REMIND_TEST_MIGRATOR_DATABASE_URL").map(|url| {
+            let mut testing = database.clone();
+            testing.url = SecretString::from(url);
+            testing
+        });
+        if let Some(testing) = &testing_database {
+            validate_database_url(testing, "REMIND_TEST_MIGRATOR_DATABASE_URL")?;
+            validate_database_transport(environment, testing, "REMIND_TEST_MIGRATOR_DATABASE_URL")?;
+            if Url::parse(testing.url.expose_secret())
+                .ok()
+                .map(|u| u.path().to_owned())
+                == Url::parse(database.url.expose_secret())
+                    .ok()
+                    .map(|u| u.path().to_owned())
+            {
+                return Err(invalid(
+                    "REMIND_TEST_MIGRATOR_DATABASE_URL",
+                    "must name a different database from production",
+                ));
+            }
+        }
         Ok(Self {
             environment,
             database,
+            testing_database,
             log_filter: value_or(source, "REMIND_LOG_FILTER", "silicon_remind=info"),
         })
     }
@@ -543,7 +565,7 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
         ..
     } = settings;
     validate_http_url("REMIND_PUBLIC_BASE_URL", &server.public_base_url)?;
-    validate_http_url("REMIND_IAM_INTROSPECTION_URL", &iam.introspection_url)?;
+    validate_http_url("REMIND_IAM_BASE_URL", &iam.base_url)?;
     validate_http_url("REMIND_HOOK_BASE_URL", &hook.base_url)?;
 
     if iam.app_id.len() > 255 {
@@ -628,7 +650,7 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
 
     validate_database_transport(*environment, database, "REMIND_DATABASE_URL")?;
     require_https("REMIND_PUBLIC_BASE_URL", &server.public_base_url)?;
-    require_https("REMIND_IAM_INTROSPECTION_URL", &iam.introspection_url)?;
+    require_https("REMIND_IAM_BASE_URL", &iam.base_url)?;
     require_https("REMIND_HOOK_BASE_URL", &hook.base_url)?;
     validate_secret_strength("REMIND_IAM_APP_SECRET", &iam.app_secret)?;
     validate_secret_strength("REMIND_INTERNAL_API_TOKEN", &internal_api.bearer_token)?;
@@ -716,22 +738,18 @@ fn validate_encoded_key(name: &'static str, key: &SecretString) -> Result<(), Se
 }
 
 fn validate_iam_webhook_key(name: &'static str, key: &SecretString) -> Result<(), SettingsError> {
-    let encoded = key
-        .expose_secret()
-        .strip_prefix("whs_")
-        .ok_or_else(|| invalid(name, "every key must use the whs_ prefix"))?;
-    if encoded.len() != 43 {
+    if !key.expose_secret().starts_with("whs_") {
         return Err(invalid(
             name,
-            "every key must contain 43 unpadded base64url characters",
+            "every Application key must use the whs_ prefix",
         ));
     }
-    let decoded = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| invalid(name, "every key must be unpadded base64url"))?;
-    if decoded.len() != 32 {
-        return Err(invalid(name, "every key must decode to exactly 32 bytes"));
-    }
+    silicon_iam_client::WebhookSecret::new(key.expose_secret()).map_err(|_| {
+        invalid(
+            name,
+            "every key must be an official IAM webhook signing credential",
+        )
+    })?;
     Ok(())
 }
 
@@ -912,6 +930,35 @@ fn invalid(name: &'static str, reason: impl Into<String>) -> SettingsError {
     }
 }
 
+fn testing_database_settings(
+    source: &impl ConfigSource,
+    database: &DatabaseSettings,
+    environment: RuntimeEnvironment,
+) -> Result<Option<DatabaseSettings>, SettingsError> {
+    let testing_database = optional(source, "REMIND_TEST_DATABASE_URL").map(|url| {
+        let mut testing = database.clone();
+        testing.url = SecretString::from(url);
+        testing
+    });
+    if let Some(testing) = &testing_database {
+        validate_database_url(testing, "REMIND_TEST_DATABASE_URL")?;
+        validate_database_transport(environment, testing, "REMIND_TEST_DATABASE_URL")?;
+        if Url::parse(testing.url.expose_secret())
+            .ok()
+            .map(|u| u.path().to_owned())
+            == Url::parse(database.url.expose_secret())
+                .ok()
+                .map(|u| u.path().to_owned())
+        {
+            return Err(invalid(
+                "REMIND_TEST_DATABASE_URL",
+                "must use a separate database from production",
+            ));
+        }
+    }
+    Ok(testing_database)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, net::SocketAddr};
@@ -1031,7 +1078,7 @@ mod tests {
             "https://remind.example".to_owned(),
         );
         source.0.insert(
-            "REMIND_IAM_INTROSPECTION_URL",
+            "REMIND_IAM_BASE_URL",
             "https://iam.example/api/v1/auth/tokens/introspect".to_owned(),
         );
         source.0.insert(

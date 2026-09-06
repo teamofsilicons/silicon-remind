@@ -5,3 +5,5 @@ pub mod hook;
 pub mod iam;
 pub(crate) mod iam_webhook;
 pub mod postgres;
+
+pub mod testing;

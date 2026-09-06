@@ -23,6 +23,7 @@ pub mod retention;
 pub mod scheduler;
 
 struct WorkerRuntime {
+    tests: Option<crate::infrastructure::testing::TestEnvironments>,
     repository: PostgresRepository,
     encryption: SecretCipherKeyring,
     delivery: delivery::DeliveryProcessor,
@@ -75,7 +76,19 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     );
     let operational_listener =
         tokio::net::TcpListener::bind(settings.worker.operational_bind_addr).await?;
+    let tests = match &settings.testing_database {
+        Some(database) => Some(
+            crate::infrastructure::testing::TestEnvironments::connect(
+                database,
+                &settings.iam,
+                encryption.clone(),
+            )
+            .await?,
+        ),
+        None => None,
+    };
     let runtime = WorkerRuntime {
+        tests,
         repository,
         encryption,
         delivery,
@@ -102,6 +115,14 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn operational_router(runtime: &WorkerRuntime) -> axum::Router {
+    health::router(
+        runtime.repository.pool().clone(),
+        runtime.metrics.clone(),
+        runtime.tests.clone(),
+    )
+}
+
 async fn serve_worker(
     runtime: &WorkerRuntime,
     operational_listener: tokio::net::TcpListener,
@@ -118,8 +139,7 @@ async fn serve_worker(
     let shutdown = crate::shutdown::signal();
     tokio::pin!(shutdown);
 
-    let operational_app =
-        health::router(runtime.repository.pool().clone(), runtime.metrics.clone());
+    let operational_app = operational_router(runtime);
     let (operational_shutdown_sender, operational_shutdown_receiver) =
         tokio::sync::oneshot::channel::<()>();
     let mut operational_server = tokio::spawn(
@@ -137,6 +157,7 @@ async fn serve_worker(
         "Silicon Remind worker started"
     );
     let mut operational_failure = None;
+    let mut test_cursor = None;
     loop {
         tokio::select! {
             () = &mut shutdown => break,
@@ -161,8 +182,10 @@ async fn serve_worker(
                     runtime.clock.as_ref(),
                     &runtime.metrics,
                 ).await;
+                work_test_environments(runtime, &mut test_cursor).await;
             }
             _ = retention.tick() => {
+                sweep_test_environments(runtime).await;
                 match retention::sweep(
                     &runtime.repository,
                     &runtime.encryption,
@@ -253,5 +276,63 @@ async fn run_work_cycle(
             metrics.worker_errors.inc();
             tracing::error!(error = %error, "Hook delivery batch had failures");
         }
+    }
+}
+
+async fn run_test_cycles(
+    runtime: &WorkerRuntime,
+    tests: &crate::infrastructure::testing::TestEnvironments,
+    cursor: &mut Option<Uuid>,
+) -> Result<(), crate::error::AppError> {
+    let ids = tests.active_ids(*cursor).await?;
+    if ids.is_empty() {
+        *cursor = None;
+        return Ok(());
+    }
+    // Rotate through bounded pages, keeping production work between pages.
+    for id in ids.into_iter().take(8) {
+        *cursor = Some(id);
+        if let Some(lease) = tests.enter_worker(id).await? {
+            let repository = PostgresRepository::new(lease.pool.clone());
+            let delivery = runtime.delivery.with_repository(repository.clone());
+            run_work_cycle(
+                &repository,
+                &delivery,
+                &runtime.worker_id,
+                runtime.batch_size,
+                runtime.clock.as_ref(),
+                &runtime.metrics,
+            )
+            .await;
+            retention::sweep(
+                &repository,
+                &runtime.encryption,
+                &runtime.worker_id,
+                runtime.clock.now(),
+                runtime.retention_batch_size,
+            )
+            .await
+            .map_err(|e| crate::error::AppError::internal("test_retention", e))?;
+            lease.finish(false).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn sweep_test_environments(runtime: &WorkerRuntime) {
+    if let Some(tests) = &runtime.tests
+        && let Err(error) = tests.sweep().await
+    {
+        runtime.metrics.worker_errors.inc();
+        tracing::error!(error = %error, "test environment lifecycle sweep failed");
+    }
+}
+
+async fn work_test_environments(runtime: &WorkerRuntime, test_cursor: &mut Option<Uuid>) {
+    if let Some(tests) = &runtime.tests
+        && let Err(error) = run_test_cycles(runtime, tests, test_cursor).await
+    {
+        runtime.metrics.worker_errors.inc();
+        tracing::error!(error = %error, "test environment work cycle failed");
     }
 }

@@ -37,9 +37,17 @@ pub async fn upsert_hook_destination(
     body: Result<Json<models::HookDestinationRequest>, rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<models::HookDestinationResponse>), AppError> {
     let Json(request) = body.map_err(|error| map_json_rejection(&error))?;
+    save_destination(&state, request, &internal_audit()).await
+}
+
+pub(crate) async fn save_destination(
+    state: &ApiState,
+    request: models::HookDestinationRequest,
+    audit: &AuditContext,
+) -> Result<(StatusCode, Json<models::HookDestinationResponse>), AppError> {
     validate_iam_org_id(&request.org_id)?;
     validate_global_silicon_id(&request.silicon_id, &request.org_id)?;
-    validate_hook_destination(&state, &request)?;
+    validate_hook_destination(state, &request)?;
 
     let url_aad =
         destination_field_associated_data(&request.org_id, &request.silicon_id, "endpoint_url");
@@ -74,7 +82,7 @@ pub async fn upsert_hook_destination(
     };
     let row = state
         .repository
-        .upsert_hook_destination(&destination, &internal_audit())
+        .upsert_hook_destination(&destination, audit)
         .await?;
     let status = if row.version == 1 {
         StatusCode::CREATED
@@ -128,30 +136,40 @@ pub async fn accept_iam_event(
         .iam_webhook
         .verify(&headers, &body, received_at)
         .map_err(|_| AppError::Unauthenticated)?;
-    let payload = serde_json::from_slice::<Value>(&body).map_err(|_| AppError::Validation)?;
-    let event = serde_json::from_value::<models::IamWebhookEvent>(payload.clone())
-        .map_err(|_| AppError::Validation)?;
-    if verified.event_id != event.event_id {
-        return Err(AppError::Validation);
+    if verified.is_testing() {
+        // The SDK authenticated the raw outer body before this routing hint is read.
+        // Never persist or log the IAM root key carried in that envelope.
+        let wire: Value = serde_json::from_slice(&body).map_err(|_| AppError::Validation)?;
+        let key = wire
+            .pointer("/test/testing_key")
+            .and_then(Value::as_str)
+            .ok_or(AppError::Validation)?;
+        let tests = state.tests.as_ref().ok_or(AppError::Unauthenticated)?;
+        let ids = tests.webhook_environment_ids(key).await?;
+        if ids.is_empty() {
+            return Err(AppError::Unauthenticated);
+        }
+        let mut receipt_id = None;
+        for id in ids {
+            if let Some(lease) = tests.enter_worker(id).await? {
+                verified
+                    .verify_testing_environment(&lease.iam_key)
+                    .map_err(|_| AppError::Unauthenticated)?;
+                let repository =
+                    crate::infrastructure::postgres::PostgresRepository::new(lease.pool.clone());
+                receipt_id = Some(apply_verified_event(&repository, &verified, received_at).await?);
+                lease.finish(false).await?;
+            }
+        }
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(models::InternalEventAccepted {
+                receipt_id: receipt_id.ok_or(AppError::Unauthenticated)?,
+                status: "accepted",
+            }),
+        ));
     }
-    let (new_event, applies_lifecycle) =
-        prepare_iam_event(&event, payload, Sha256::digest(&body).into(), received_at)?;
-
-    let receipt_id = if applies_lifecycle {
-        state
-            .repository
-            .apply_iam_lifecycle_event(&new_event, &iam_webhook_audit())
-            .await?
-            .receipt
-            .id
-    } else {
-        state
-            .repository
-            .record_processed_internal_event(&new_event, &iam_webhook_audit())
-            .await?
-            .0
-            .id
-    };
+    let receipt_id = apply_verified_event(&state.repository, &verified, received_at).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(models::InternalEventAccepted {
@@ -159,6 +177,91 @@ pub async fn accept_iam_event(
             status: "accepted",
         }),
     ))
+}
+
+async fn apply_verified_event(
+    repository: &crate::infrastructure::postgres::PostgresRepository,
+    verified: &silicon_iam_client::VerifiedWebhook,
+    received_at: chrono::DateTime<Utc>,
+) -> Result<Uuid, AppError> {
+    let payload = serde_json::to_value(verified.event()).map_err(|_| AppError::Validation)?;
+    let event = serde_json::from_value::<models::IamWebhookEvent>(payload.clone())
+        .map_err(|_| AppError::Validation)?;
+    let payload_hash =
+        Sha256::digest(serde_json::to_vec(&payload).map_err(|_| AppError::Validation)?).into();
+    if event.data.contains_key("current") {
+        let org_id: Option<String> = match verified.event().organization_id {
+            Some(id) => {
+                sqlx::query_scalar(
+                    "SELECT org_id FROM iam_organization_bindings WHERE organization_id=$1",
+                )
+                .bind(id)
+                .fetch_optional(repository.pool())
+                .await?
+            }
+            None => None,
+        };
+        let current = &event.data["current"];
+        let organization = &current["organization"];
+        let organization_revoked = organization["status"].as_str() == Some("disabled")
+            || organization["authorization"].as_str() == Some("removed");
+        let mut principals = Vec::new();
+        if let Some(members) = current["members"].as_array() {
+            for member in members {
+                let resource = &member["resource"];
+                if resource["principal_type"].as_str() == Some("silicon")
+                    && (resource["status"].as_str() == Some("removed")
+                        || member["authorization"].as_str() == Some("removed")
+                        || member.pointer("/membership/status").and_then(Value::as_str)
+                            == Some("removed"))
+                {
+                    let id = resource["principal_id"]
+                        .as_str()
+                        .ok_or(AppError::Validation)?
+                        .parse()
+                        .map_err(|_| AppError::Validation)?;
+                    principals.push(id);
+                }
+            }
+        }
+        let new_event = NewInternalEvent {
+            id: Uuid::now_v7(),
+            source: "silicon-iam".into(),
+            event_id: event.event_id.to_string(),
+            event_type: event.event_type.as_str().into(),
+            org_id,
+            subject_id: None,
+            payload,
+            payload_hash,
+            received_at,
+        };
+        return Ok(repository
+            .apply_iam_projection(
+                &new_event,
+                organization_revoked,
+                principals,
+                &iam_webhook_audit(),
+            )
+            .await?
+            .id);
+    }
+    // The earlier minimal IAM projection remains readable for retained in-flight deliveries.
+    let (new_event, applies_lifecycle) =
+        prepare_iam_event(&event, payload, payload_hash, received_at)?;
+    let receipt_id = if applies_lifecycle {
+        repository
+            .apply_iam_lifecycle_event(&new_event, &iam_webhook_audit())
+            .await?
+            .receipt
+            .id
+    } else {
+        repository
+            .record_processed_internal_event(&new_event, &iam_webhook_audit())
+            .await?
+            .0
+            .id
+    };
+    Ok(receipt_id)
 }
 
 fn validate_hook_destination(
@@ -172,6 +275,7 @@ fn validate_hook_destination(
         &request.endpoint_url,
         &state.hook_base_url,
         &request.silicon_id,
+        state.is_test,
     ) || !secure_transport
         || !signing_secret_is_valid(&request.signing_secret)
     {
@@ -180,7 +284,7 @@ fn validate_hook_destination(
     Ok(())
 }
 
-fn map_json_rejection(rejection: &rejection::JsonRejection) -> AppError {
+pub(crate) fn map_json_rejection(rejection: &rejection::JsonRejection) -> AppError {
     if matches!(rejection, rejection::JsonRejection::BytesRejection(_)) {
         AppError::PayloadTooLarge
     } else {
@@ -514,11 +618,11 @@ mod tests {
         });
         let body = serde_json::to_vec(&payload)?;
         let credential = format!("whs_{}", URL_SAFE_NO_PAD.encode([0x5a_u8; 32]));
-        let verifier = IamWebhookVerifier::from_base64url(&BTreeMap::from([(
+        let verifier = IamWebhookVerifier::from_keys(&BTreeMap::from([(
             7,
             SecretString::from(credential.clone()),
         )]))?;
-        let timestamp = "1788177600";
+        let timestamp = Utc::now().timestamp().to_string();
         let mut mac = Hmac::<Sha256>::new_from_slice(credential.as_bytes())?;
         mac.update(timestamp.as_bytes());
         mac.update(b".");
@@ -531,7 +635,7 @@ mod tests {
         );
         headers.insert(
             "x-silicon-iam-timestamp",
-            HeaderValue::from_static(timestamp),
+            HeaderValue::from_str(&timestamp)?,
         );
         headers.insert("x-silicon-iam-key-version", HeaderValue::from_static("7"));
         headers.insert(
@@ -541,7 +645,7 @@ mod tests {
 
         let authentication = verifier.verify(&headers, &body, received_at())?;
         let event = serde_json::from_slice::<IamWebhookEvent>(&body)?;
-        assert_eq!(authentication.event_id, event.event_id);
+        assert_eq!(authentication.event_id(), event.event_id);
         let (event, applies_lifecycle) =
             prepare_iam_event(&event, payload, Sha256::digest(&body).into(), received_at())?;
         assert!(applies_lifecycle);

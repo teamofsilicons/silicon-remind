@@ -1,0 +1,25 @@
+[package]
+name = "silicon-remind-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Silicon Remind command line interface"
+license = "Apache-2.0"
+readme = "README.md"
+include = ["src/**", "docs/**", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "openapi.yaml"]
+repository = "https://github.com/teamofsilicons/silicon-remind"
+
+[[bin]]
+name = "remind"
+path = "src/main.rs"
+
+[dependencies]
+silicon-remind-client = { version = "0.1.0", path = "../client" }
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.48", features = ["derive", "env", "wrap_help"] }
+rpassword = "7.5.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1.26.0", features = ["serde", "v7"] }

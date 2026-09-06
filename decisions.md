@@ -1,3 +1,11 @@
+> Current integration update (2026-09-06): the updated UNDERSTANDING.md and
+> docs/ guides supersede older IAM custom-projection and Hook six-hex/whsec/202
+> assumptions below. IAM uses silicon-iam-client 1.2.1 and live Application
+> snapshots; all org members have reminder reads. Hook uses eight-character
+> routes, textual secrets, Standard Webhooks signatures and 200 ingress receipts.
+> Delivery is at least once; consumers deduplicate execution IDs. Older decisions
+> are retained as history, not current integration requirements.
+
 # Silicon Remind engineering decisions
 
 This file is the append-only decision log for the Silicon Remind backend.

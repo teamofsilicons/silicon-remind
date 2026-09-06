@@ -2,7 +2,7 @@
 
 Silicon Remind is the durable scheduling backend for one-time and recurring
 Silicon reminders. It authenticates callers through Silicon IAM, stores schedule
-and execution state in PostgreSQL, and submits signed, idempotent events to
+and execution state in PostgreSQL, and submits signed events with stable execution IDs to
 Silicon Hook when occurrences become due.
 
 Both reminder kinds use five-field Linux cron syntax. Clients select
@@ -79,6 +79,10 @@ Then start the API and worker profiles:
 docker compose --profile api --profile worker up --build
 ```
 
+A new Compose volume initializes both `remind` and `remind_testing`. For an
+existing volume, create the latter database explicitly before running migrations:
+`docker compose exec postgres createdb -U remind remind_testing`.
+
 The API is available at `http://127.0.0.1:8080`, the worker's operational server
 at `http://127.0.0.1:9090`, and PostgreSQL only on `127.0.0.1:5432`. The Compose
 file overrides database hostnames for its network. IAM and Hook URLs in `.env`
@@ -128,43 +132,36 @@ make openapi
 validation. `make help` lists all supported commands. Tests that exercise real
 PostgreSQL concurrency require a running Docker daemon for Testcontainers.
 
-## Internal integration bootstrap
+## CLI, client and IAM setup
 
-Before a Silicon can create a reminder, a trusted control-plane caller must
-register the Hook destination through `PUT /internal/v1/hook-destinations` with
-the IAM principal UUID, immutable public global Silicon ID, exact Hook endpoint,
-and one-time `whsec_` credential. This bearer-protected operation establishes
-the authorization-to-routing identity binding and encrypts the destination
-material. Until it succeeds, schedule creation fails closed with
-`409 webhook_not_configured` and `Set the webhook url first.`
+Build the public client and CLI with `cargo build --workspace`. The executable is
+`target/debug/remind`; run `remind -h` for commands. Obtain an organization-bound
+IAM SLT for `tos>remind`, then use:
 
-Destination rotation uses the same `PUT`; explicit disable uses
-`DELETE /internal/v1/hook-destinations/{org_id}/{silicon_id}`. IAM revocation
-events create irreversible principal or organization tombstones, so a later
-provisioning call cannot silently reactivate removed authority. The complete
-wire formats, HMAC rules, responses, and lifecycle behavior are documented in
-[INTERNAL_API.md](INTERNAL_API.md).
+```sh
+remind auth login --org tos --slt-stdin < /private/remind-slt
+remind webhook set <Hook-issued-endpoint> --secret-stdin < /private/hook-secret
+remind create --text 'Check the build' --cron '*/5 * * * *'
+```
 
-The IAM producer must emit its published `X-Silicon-IAM-*` application-webhook
-contract before deployment. Remind intentionally rejects the older
-`X-Silicon-*`/`timestamp.event_id.body` variant because it lacks the key version
-and lifecycle identity projection needed for fail-safe revocation; see D-030 in
-[decisions.md](decisions.md). IAM must likewise serve the published authenticated
-introspection response containing `principal_id`, `actor_type`, public `org_id`,
-`membership_id`, `authorization_epoch`, and `expires_at`. Carbon responses must
-also contain the explicit `remind_permitted_silicon_principal_ids` array. Remind
-applies that owner UUID projection inside PostgreSQL before pagination; Silicons
-receive organization-wide reads, Carbons receive read-only projected access,
-and only an owner Silicon can mutate its reminder. Bulk pause and resume apply
-only when every selected reminder belongs to the authenticated Silicon; batches
-never partially update another owner's reminder.
+Only Silicons configure destinations or mutate their own reminders. Both Carbon
+and Silicon members can read reminders throughout their organization. All IAM
+calls use the official published Rust client and live Application authorization
+snapshots; no Remind-specific permission projection is required from IAM.
 
-The checked-in IAM runtime must add a token-exchange/issuance path for
-Remind-audience application tokens and populate this authoritative projection
-before public Remind traffic is enabled. Its current native token audience and
-Carbon-only OAuth path cannot satisfy Remind's authenticated introspection
-contract. Remind fails closed rather than deriving Carbon access from an
-organization directory response.
+The registered IAM receiver is `POST /webhook/`. Configure its exact signing
+version and secret in the backend keyring. Registering the URL does not deploy
+it or complete IAM review. Test requests require a Remind root key and the
+linked IAM sandbox's own identity/Application credential. Test reminders only
+accept Hook test ingress; production reminders only accept production ingress.
+
+Detailed references live in [docs/](docs/README.md): [API](docs/api/README.md),
+[Rust client](docs/client/README.md), [CLI](docs/cli/README.md),
+[IAM](docs/iam.md), [testing environments](docs/testing-environments.md), and
+[Hook delivery](docs/hook-delivery.md). The
+[manual acceptance record](docs/MANUAL_ACCEPTANCE.md) identifies verified work
+and outstanding evidence. Internal provisioning is documented separately in
+[docs/internal-api.md](docs/internal-api.md) and is not exposed by the client.
 
 ## Configuration
 
@@ -178,7 +175,7 @@ Important invariants include:
 - IAM application credentials, retained `whs_` webhook signing versions, the
   internal bearer token, and every encryption key are secret values and must
   come from a secret manager in production.
-- IAM delivers application events to `POST /internal/v1/iam/events`. This route
+- IAM delivers application events to `POST /webhook/` (the internal alias remains). This route
   does not accept the internal bearer token as authentication: it verifies
   `X-Silicon-IAM-*` headers over the exact raw body, enforces the five-minute
   replay window, and deduplicates the signed event ID durably. Hook-destination
@@ -235,4 +232,5 @@ src/bin/              API, worker, and migration composition roots
 migrations/           Ordered PostgreSQL schema migrations
 ```
 
-This repository is proprietary and is not published as a crate.
+The backend crate is proprietary and is not published. The public client and CLI
+under `crates/` are separately licensed Apache-2.0 packages.

@@ -35,6 +35,7 @@ pub struct DeliveryProcessor {
     retry: RetrySettings,
     clock: Arc<dyn Clock>,
     metrics: Metrics,
+    testing: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +69,16 @@ impl DeliveryProcessor {
             retry: config.retry,
             clock,
             metrics,
+            testing: false,
         }
+    }
+
+    /// Reuses delivery policy against an isolated repository.
+    pub(crate) fn with_repository(&self, repository: PostgresRepository) -> Self {
+        let mut delivery = self.clone();
+        delivery.repository = repository;
+        delivery.testing = true;
+        delivery
     }
 
     /// Returns this process's maximum simultaneous outbound deliveries.
@@ -212,7 +222,12 @@ impl DeliveryProcessor {
             .map_err(|_| retryable("Hook signing credential could not be decrypted"))?;
         let endpoint_url = Url::parse(endpoint_url.expose_secret())
             .map_err(|_| terminal("Hook destination URL is malformed"))?;
-        if !destination_url_is_allowed(&endpoint_url, &self.hook_base_url, &row.silicon_id) {
+        if !destination_url_is_allowed(
+            &endpoint_url,
+            &self.hook_base_url,
+            &row.silicon_id,
+            self.testing,
+        ) {
             return Err(terminal(
                 "Hook destination is outside the configured origin",
             ));

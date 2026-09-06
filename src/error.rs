@@ -141,12 +141,18 @@ impl AppError {
         }
     }
 
-    const fn public_message(&self) -> &'static str {
+    fn public_message(&self) -> &'static str {
         match self {
             Self::Validation => "The request contains invalid data.",
             Self::Unauthenticated => "Authentication is required.",
             Self::Forbidden => "The actor is not authorized for this action.",
             Self::NotFound => "The requested resource was not found.",
+            Self::Conflict { code } if code.as_ref() == "test_reminder_limit" => {
+                "Test environments allow at most 100 retained reminders. This limit applies only to test environments."
+            }
+            Self::Conflict { code } if code.as_ref() == "test_iam_application_not_configured" => {
+                "Configure the test-only IAM Application secret first: remind --test <test_id> configure-iam. Production credentials are never used."
+            }
             Self::Conflict { .. } => "The request conflicts with the current resource state.",
             Self::WebhookNotConfigured => "Set the webhook url first.",
             Self::RateLimited { .. } => "Too many requests. Retry later.",
@@ -211,6 +217,15 @@ impl axum::response::IntoResponse for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(source: sqlx::Error) -> Self {
+        if let Some(database) = source.as_database_error() {
+            match database.constraint() {
+                Some("test_reminder_limit") => return Self::conflict("test_reminder_limit"),
+                Some("testing_environments_active_name") => {
+                    return Self::conflict("test_environment_name_taken");
+                }
+                _ => {}
+            }
+        }
         let category = match source {
             sqlx::Error::PoolTimedOut => "database_pool_timeout",
             sqlx::Error::PoolClosed => "database_pool_closed",

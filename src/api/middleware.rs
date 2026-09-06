@@ -81,6 +81,7 @@ pub async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let state = state.scoped(request.extensions());
     let result = async {
         let token = bearer_token(request.headers())?;
         let org_id = unique_header(request.headers(), ORG_HEADER)
@@ -91,6 +92,15 @@ pub async fn authenticate(
             .authenticate(&token, org_id, Utc::now())
             .await
             .map_err(|error| map_iam_error(&error))?;
+        if let Some(organization_id) = actor.organization_iam_id {
+            let mut tx = state.repository.pool().begin().await?;
+            sqlx::query("INSERT INTO iam_organization_bindings(organization_id,org_id) VALUES ($1,$2) ON CONFLICT DO NOTHING")
+                .bind(organization_id).bind(&actor.org_id).execute(&mut *tx).await?;
+            let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM iam_organization_bindings WHERE organization_id=$1 AND org_id=$2)")
+                .bind(organization_id).bind(&actor.org_id).fetch_one(&mut *tx).await?;
+            if !matches { return Err(AppError::Unauthenticated); }
+            tx.commit().await?;
+        }
         request.extensions_mut().insert(actor);
         Ok::<Response, AppError>(next.run(request).await)
     }

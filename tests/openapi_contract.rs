@@ -131,7 +131,7 @@ fn contract_is_openapi_31_and_every_local_reference_resolves() -> Result<()> {
 }
 
 #[test]
-fn contract_exposes_exactly_the_seven_documented_operations() -> Result<()> {
+fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
     let document = load_contract()?;
     let paths = object_at(&document, "/paths")?;
     let mut actual = BTreeSet::new();
@@ -152,6 +152,35 @@ fn contract_exposes_exactly_the_seven_documented_operations() -> Result<()> {
     }
 
     let expected = [
+        ("post", "/auth/login", "authLogin"),
+        ("post", "/auth/refresh", "authRefresh"),
+        ("post", "/auth/logout", "authLogout"),
+        ("get", "/auth/me", "getIdentity"),
+        ("get", "/webhook", "getWebhook"),
+        ("put", "/webhook", "configureWebhook"),
+        ("delete", "/webhook", "disableWebhook"),
+        ("get", "/silicons", "listSilicons"),
+        ("get", "/test-environments", "listTestEnvironments"),
+        ("post", "/test-environments", "createTestEnvironment"),
+        ("get", "/test-environments/{id}", "getTestEnvironment"),
+        ("delete", "/test-environments/{id}", "deleteTestEnvironment"),
+        ("get", "/test-environments/{id}/key", "getEnvironmentKey"),
+        (
+            "post",
+            "/test-environments/{id}/key-rotations",
+            "rotateEnvironmentKey",
+        ),
+        (
+            "post",
+            "/test-environments/{id}/restorations",
+            "restoreEnvironment",
+        ),
+        ("get", "/testing-environment", "currentEnvironment"),
+        ("post", "/testing-environment/cleanings", "cleanEnvironment"),
+        ("put", "/testing-environment/iam", "configureEnvironmentIam"),
+        ("get", "/health/live", "healthLive"),
+        ("get", "/health/ready", "healthReady"),
+        ("post", "/webhook/", "receiveIamWebhook"),
         ("get", "/schedules", "listSchedules"),
         ("patch", "/schedules", "updateScheduleStatuses"),
         ("post", "/schedules", "createSchedule"),
@@ -308,10 +337,11 @@ fn each_operation_has_expected_auth_tenant_and_mutation_contract() -> Result<()>
             "{method} {path} must require bearer authentication"
         );
         let references = effective_parameter_refs(&document, path, method)?;
-        let expected_references = expected_references
+        let mut expected_references = expected_references
             .iter()
             .map(ToString::to_string)
             .collect::<BTreeSet<_>>();
+        expected_references.insert("#/components/parameters/TestKey".into());
         ensure!(
             references == expected_references,
             "{method} {path} shared parameter requirements changed: {references:#?}"

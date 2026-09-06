@@ -10,6 +10,8 @@ WORKDIR /workspace
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY migrations ./migrations
+COPY testing ./testing
+COPY crates ./crates
 COPY src ./src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \

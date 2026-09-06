@@ -1133,7 +1133,9 @@ impl PostgresRepository {
         .map_err(RepositoryError::from)
     }
 
-    /// Marks a leased execution delivered after a validated Hook `202`.
+    /// Marks a leased execution delivered to ingress after a validated Hook `200`.
+    /// The historical `hook_event_id` column stores the receipt, which does not prove
+    /// signature verification or downstream consumer acknowledgment.
     ///
     /// # Errors
     ///
@@ -1710,6 +1712,73 @@ impl PostgresRepository {
 
         transaction.commit().await?;
         Ok(outcome)
+    }
+
+    /// Applies every revocation in one verified IAM projection atomically with its receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns event-id conflicts, invalid IAM input, or a database failure; all projected revocations share one transaction.
+    pub async fn apply_iam_projection(
+        &self,
+        event: &NewInternalEvent,
+        organization_revoked: bool,
+        mut principals: Vec<Uuid>,
+        audit: &AuditContext,
+    ) -> Result<InternalEventReceiptRow, RepositoryError> {
+        validate_internal_event(event)?;
+        if event.source != "silicon-iam" {
+            return Err(RepositoryError::InvalidInput("invalid IAM source"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let Some(receipt) = insert_internal_event_receipt(&mut tx, event).await? else {
+            let replay = load_iam_lifecycle_replay(&mut tx, event).await?;
+            tx.commit().await?;
+            return Ok(replay.receipt);
+        };
+        let now = sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
+            .fetch_one(&mut *tx)
+            .await?;
+        let mut targets = Vec::new();
+        if let Some(org_id) = &event.org_id {
+            if !is_valid_iam_label(org_id) {
+                return Err(RepositoryError::InvalidInput("invalid IAM organization"));
+            }
+            if organization_revoked {
+                targets.push(IamLifecycleTarget::Organization {
+                    org_id: org_id.clone(),
+                });
+            } else {
+                principals.sort_unstable();
+                principals.dedup();
+                for principal_id in principals {
+                    targets.push(IamLifecycleTarget::Silicon {
+                        org_id: org_id.clone(),
+                        principal_id,
+                    });
+                }
+            }
+        }
+        for target in targets {
+            block_iam_target(&mut tx, &target, now).await?;
+            soft_delete_iam_schedules(&mut tx, &target, now).await?;
+            fail_iam_target_unaccepted_executions(&mut tx, &target, IAM_INLINE_CLEANUP_LIMIT)
+                .await?;
+            disable_iam_destinations(&mut tx, &target, now).await?;
+            append_audit(
+                &mut tx,
+                Some(target.org_id()),
+                audit,
+                "iam.authority_revoked",
+                target.resource_type(),
+                Some(target.resource_id()),
+                json!({"event_id":event.event_id}),
+            )
+            .await?;
+        }
+        let receipt = mark_internal_event_processed(&mut tx, receipt.id, now).await?;
+        tx.commit().await?;
+        Ok(receipt)
     }
 
     /// Drains resources left behind by bounded IAM webhook cleanup.

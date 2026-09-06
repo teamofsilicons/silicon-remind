@@ -3,7 +3,10 @@
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac as _};
 use secrecy::SecretString;
@@ -69,13 +72,20 @@ fn header<'a>(request: &'a Request, name: &str) -> Result<&'a str> {
         .with_context(|| format!("{name} is not valid header text"))
 }
 
-fn expected_signature(timestamp: &str, body: &[u8]) -> Result<String> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(&SIGNING_KEY)
-        .map_err(|_| anyhow::anyhow!("test signing secret must be accepted by HMAC"))?;
+fn expected_signature(id: Uuid, timestamp: &str, body: &[u8]) -> Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(
+        format!("whsec_{}", URL_SAFE_NO_PAD.encode(SIGNING_KEY)).as_bytes(),
+    )
+    .map_err(|_| anyhow::anyhow!("test signing secret must be accepted by HMAC"))?;
+    mac.update(id.to_string().as_bytes());
+    mac.update(b".");
     mac.update(timestamp.as_bytes());
     mac.update(b".");
     mac.update(body);
-    Ok(format!("v1={}", hex::encode(mac.finalize().into_bytes())))
+    Ok(format!(
+        "v1,{}",
+        STANDARD.encode(mac.finalize().into_bytes())
+    ))
 }
 
 async fn deliver_with(
@@ -100,9 +110,9 @@ async fn accepted_delivery_has_exact_envelope_idempotency_and_hmac_contract() ->
     let hook_event_id = Uuid::from_u128(3);
     Mock::given(method("POST"))
         .and(path(ENDPOINT_PATH))
-        .respond_with(ResponseTemplate::new(202).set_body_json(json!({
-            "event_id": hook_event_id,
-            "status": "accepted",
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "receipt_id": hook_event_id,
+            "status": "webhook.ok",
         })))
         .mount(&server)
         .await;
@@ -147,12 +157,13 @@ async fn accepted_delivery_has_exact_envelope_idempotency_and_hmac_contract() ->
 
     let timestamp = fixture.now.timestamp().to_string();
     ensure!(
-        header(request, "x-hook-timestamp")? == timestamp,
+        header(request, "webhook-timestamp")? == timestamp,
         "Hook timestamp changed"
     );
     ensure!(
-        header(request, "x-hook-signature")? == expected_signature(&timestamp, &request.body)?,
-        "Hook HMAC must cover `<timestamp>.<raw_body>`"
+        header(request, "webhook-signature")?
+            == expected_signature(fixture.event.execution_id, &timestamp, &request.body)?,
+        "Hook HMAC must cover `<execution_id>.<timestamp>.<raw_body>`"
     );
 
     let body: Value = serde_json::from_slice(&request.body)?;
@@ -213,9 +224,9 @@ async fn definitive_4xx_responses_are_terminal() -> Result<()> {
 }
 
 #[tokio::test]
-async fn malformed_or_semantically_invalid_202_acceptance_is_retryable() -> Result<()> {
+async fn malformed_or_semantically_invalid_acceptance_is_retryable() -> Result<()> {
     let malformed = deliver_with(
-        ResponseTemplate::new(202).set_body_raw(b"not-json".to_vec(), "application/json"),
+        ResponseTemplate::new(200).set_body_raw(b"not-json".to_vec(), "application/json"),
     )
     .await?;
     let Err(malformed) = malformed else {
@@ -223,8 +234,8 @@ async fn malformed_or_semantically_invalid_202_acceptance_is_retryable() -> Resu
     };
     ensure!(malformed.is_retryable(), "malformed 202 must be retryable");
 
-    let unexpected_status = deliver_with(ResponseTemplate::new(202).set_body_json(json!({
-        "event_id": Uuid::from_u128(3),
+    let unexpected_status = deliver_with(ResponseTemplate::new(200).set_body_json(json!({
+        "receipt_id": Uuid::from_u128(3),
         "status": "queued",
     })))
     .await?;
@@ -236,9 +247,9 @@ async fn malformed_or_semantically_invalid_202_acceptance_is_retryable() -> Resu
         "unexpected acceptance status must be retryable"
     );
 
-    let invalid_event_id = deliver_with(ResponseTemplate::new(202).set_body_json(json!({
-        "event_id": "not-a-uuid",
-        "status": "accepted",
+    let invalid_event_id = deliver_with(ResponseTemplate::new(200).set_body_json(json!({
+        "receipt_id": "not-a-uuid",
+        "status": "webhook.ok",
     })))
     .await?;
     let Err(invalid_event_id) = invalid_event_id else {

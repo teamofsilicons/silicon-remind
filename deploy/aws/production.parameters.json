@@ -1,0 +1,38 @@
+[
+  {
+    "ParameterKey": "PrivateSubnetA",
+    "ParameterValue": "subnet-00cb233b2b136e259"
+  },
+  {
+    "ParameterKey": "PrivateSubnetB",
+    "ParameterValue": "subnet-039e3864dbc2f129d"
+  },
+  {
+    "ParameterKey": "PublicSubnetB",
+    "ParameterValue": "subnet-0ba15539f08a1f48f"
+  },
+  {
+    "ParameterKey": "PublicSubnetA",
+    "ParameterValue": "subnet-07945746462c26b2d"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-04b23a487cfe0bd8e"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:us-east-1:234951665042:certificate/a3173f08-d8bb-478b-be92-8b0af3b78786"
+  },
+  {
+    "ParameterKey": "AppSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:234951665042:secret:silicon-remind/production-a15fxh"
+  },
+  {
+    "ParameterKey": "BackendImageUri",
+    "ParameterValue": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:3ff4ecddbf4877e0113a4cfd1921458138e4f62f638d9f0b1c45207e27b65a5d"
+  },
+  {
+    "ParameterKey": "BootstrapImageUri",
+    "ParameterValue": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:48b3f0558b46ee5e53eacdcea0304ccaa4e95ad3cb14953ca2b489a764276397"
+  }
+]

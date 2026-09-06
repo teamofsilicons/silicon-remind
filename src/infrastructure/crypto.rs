@@ -11,7 +11,7 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use zeroize::Zeroizing;
 
 /// AES-256-GCM ciphertext and the metadata needed to decrypt it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EncryptedSecret {
     /// Version of the configured key used for encryption.
     pub key_version: i16,

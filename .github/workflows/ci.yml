@@ -39,13 +39,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check all targets
-        run: cargo check --locked --all-targets --all-features
+        run: cargo check --locked --workspace --all-targets --all-features
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked --all-targets --all-features
+        run: cargo test --locked --workspace --all-targets --all-features
 
   openapi:
     name: OpenAPI contract

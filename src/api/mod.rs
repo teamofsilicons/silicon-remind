@@ -37,6 +37,8 @@ pub mod models;
 /// Cloneable dependencies shared by HTTP handlers and middleware.
 #[derive(Clone, Debug)]
 pub struct ApiState {
+    pub(crate) tests: Option<crate::infrastructure::testing::TestEnvironments>,
+    pub(crate) idempotency_retention: Duration,
     pub(crate) schedules: ScheduleService,
     pub(crate) repository: PostgresRepository,
     pub(crate) iam: IamClient,
@@ -44,6 +46,7 @@ pub struct ApiState {
     pub(crate) internal_api_token: SecretString,
     pub(crate) encryption: SecretCipherKeyring,
     pub(crate) hook_base_url: Url,
+    pub(crate) is_test: bool,
     pub(crate) environment: RuntimeEnvironment,
     pub(crate) metrics: Metrics,
     pub(crate) request_timeout: Duration,
@@ -63,20 +66,15 @@ impl ApiState {
             Arc::new(SystemClock),
             settings.retention.idempotency_retention,
         );
-        let iam = IamClient::new(
-            settings.iam.introspection_url.clone(),
-            &settings.iam.app_id,
-            &settings.iam.app_secret,
-            settings.iam.connect_timeout,
-            settings.iam.request_timeout,
-            settings.iam.max_response_bytes,
-        )?;
+        let iam = IamClient::new(&settings.iam)?;
         let encryption = SecretCipherKeyring::from_base64url(
             settings.encryption.current_version,
             &settings.encryption.keys,
         )?;
-        let iam_webhook = IamWebhookVerifier::from_base64url(&settings.iam.webhook_keys)?;
+        let iam_webhook = IamWebhookVerifier::from_keys(&settings.iam.webhook_keys)?;
         Ok(Self {
+            tests: None,
+            idempotency_retention: settings.retention.idempotency_retention,
             schedules,
             repository,
             iam,
@@ -84,6 +82,7 @@ impl ApiState {
             internal_api_token: settings.internal_api.bearer_token.clone(),
             encryption,
             hook_base_url: settings.hook.base_url.clone(),
+            is_test: false,
             environment: settings.environment,
             metrics: Metrics::new(),
             request_timeout: settings.server.request_timeout,
@@ -110,6 +109,15 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
             "/schedules/{schedule_id}/executions",
             get(handlers::schedules::list_executions),
         )
+        .route(
+            "/webhook",
+            get(handlers::destination::get)
+                .put(handlers::destination::set)
+                .delete(handlers::destination::disable),
+        )
+        .route("/silicons", get(handlers::destination::silicons))
+        .route("/auth/me", get(handlers::auth::me))
+        .merge(test_environment_routes())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::authenticate,
@@ -136,6 +144,22 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
         .route("/health/live", get(handlers::health::live))
         .route("/health/ready", get(handlers::health::ready))
         .route("/metrics", get(handlers::health::metrics))
+        .route("/webhook/", post(handlers::internal::accept_iam_event))
+        .route("/api/v1/auth/login", post(handlers::auth::login))
+        .route("/api/v1/auth/refresh", post(handlers::auth::refresh))
+        .route("/api/v1/auth/logout", post(handlers::auth::logout))
+        .route(
+            "/api/v1/testing-environment/iam",
+            axum::routing::put(handlers::testing::test_only),
+        )
+        .route(
+            "/api/v1/testing-environment",
+            get(handlers::testing::test_only),
+        )
+        .route(
+            "/api/v1/testing-environment/cleanings",
+            post(handlers::testing::test_only),
+        )
         .nest("/api/v1", public_api)
         .nest("/internal/v1", internal_api)
         .fallback(handlers::not_found)
@@ -144,8 +168,13 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
             state.clone(),
             middleware::observe,
         ))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            handlers::testing::select,
+        ))
         .layer(SetSensitiveRequestHeadersLayer::new([
             header::AUTHORIZATION,
+            HeaderName::from_static("x-remind-test-key"),
             HeaderName::from_static("x-hook-signature"),
             HeaderName::from_static("x-silicon-iam-signature"),
         ]))
@@ -170,7 +199,17 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
 /// Returns startup, listener, server, or shutdown-deadline errors.
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     let pool = postgres::connect(&settings.database).await?;
-    let state = ApiState::new(&settings, pool.clone())?;
+    let mut state = ApiState::new(&settings, pool.clone())?;
+    if let Some(database) = &settings.testing_database {
+        state.tests = Some(
+            crate::infrastructure::testing::TestEnvironments::connect(
+                database,
+                &settings.iam,
+                state.encryption.clone(),
+            )
+            .await?,
+        );
+    }
     let app = router(state, &settings);
     let listener = tokio::net::TcpListener::bind(settings.server.bind_addr).await?;
     tracing::info!(address = %settings.server.bind_addr, "Silicon Remind API listening");
@@ -194,4 +233,55 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     }
     pool.close().await;
     Ok(())
+}
+
+/// Dependencies selected from the authenticated test environment boundary.
+pub struct ScopedState(pub ApiState);
+
+impl axum::extract::FromRequestParts<ApiState> for ScopedState {
+    type Rejection = std::convert::Infallible;
+    fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &ApiState,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self(state.scoped(&parts.extensions))))
+    }
+}
+
+impl ApiState {
+    pub(crate) fn scoped(&self, extensions: &http::Extensions) -> Self {
+        let mut state = self.clone();
+        if let Some(context) = extensions.get::<handlers::testing::EnvironmentContext>() {
+            state.is_test = true;
+            state.repository = PostgresRepository::new(context.pool.clone());
+            state.schedules = ScheduleService::new(
+                state.repository.clone(),
+                Arc::new(SystemClock),
+                self.idempotency_retention,
+            );
+            state.iam = context.iam.clone();
+        }
+        state
+    }
+}
+
+fn test_environment_routes() -> Router<ApiState> {
+    Router::new()
+        .route(
+            "/test-environments",
+            get(handlers::testing::list).post(handlers::testing::create),
+        )
+        .route(
+            "/test-environments/{id}",
+            get(handlers::testing::get).delete(handlers::testing::delete),
+        )
+        .route("/test-environments/{id}/key", get(handlers::testing::key))
+        .route(
+            "/test-environments/{id}/key-rotations",
+            post(handlers::testing::rotate),
+        )
+        .route(
+            "/test-environments/{id}/restorations",
+            post(handlers::testing::restore),
+        )
 }

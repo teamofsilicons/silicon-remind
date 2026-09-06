@@ -72,6 +72,12 @@ pub struct Actor {
     pub membership_id: Uuid,
     /// IAM authorization revision used to build this request's projection.
     pub authorization_epoch: u64,
+    /// Immutable IAM organization identity for lifecycle webhook routing.
+    pub organization_iam_id: Option<Uuid>,
+    /// Public IAM identity supplied by the official client.
+    pub public_id: Option<String>,
+    /// Disclosed current organization role; absence grants no administration.
+    pub org_role: Option<String>,
     /// Exact reminder visibility granted by IAM for this request.
     pub read_scope: ReminderReadScope,
 }
@@ -91,6 +97,9 @@ impl Actor {
             org_id: org_id.into(),
             membership_id,
             authorization_epoch,
+            organization_iam_id: None,
+            public_id: None,
+            org_role: None,
             read_scope: ReminderReadScope::organization(),
         }
     }
@@ -110,6 +119,9 @@ impl Actor {
             org_id: org_id.into(),
             membership_id,
             authorization_epoch,
+            organization_iam_id: None,
+            public_id: None,
+            org_role: None,
             read_scope: ReminderReadScope::silicon_principals(permitted_silicon_principal_ids),
         }
     }

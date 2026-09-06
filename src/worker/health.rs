@@ -16,15 +16,24 @@ use crate::{infrastructure::postgres, metrics::Metrics};
 struct OperationalState {
     pool: PgPool,
     metrics: Metrics,
+    tests: Option<crate::infrastructure::testing::TestEnvironments>,
 }
 
 /// Builds the worker's unauthenticated, operational-only HTTP surface.
-pub(crate) fn router(pool: PgPool, metrics: Metrics) -> Router {
+pub(crate) fn router(
+    pool: PgPool,
+    metrics: Metrics,
+    tests: Option<crate::infrastructure::testing::TestEnvironments>,
+) -> Router {
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/metrics", get(metrics_response))
-        .with_state(OperationalState { pool, metrics })
+        .with_state(OperationalState {
+            pool,
+            metrics,
+            tests,
+        })
 }
 
 async fn live() -> Json<HealthResponse> {
@@ -32,6 +41,15 @@ async fn live() -> Json<HealthResponse> {
 }
 
 async fn ready(State(state): State<OperationalState>) -> Response {
+    if let Some(tests) = &state.tests
+        && tests.health_check().await.is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse::unavailable()),
+        )
+            .into_response();
+    }
     match postgres::health_check(&state.pool).await {
         Ok(()) => live().await.into_response(),
         Err(error) => {
@@ -120,7 +138,7 @@ mod tests {
         let address = listener.local_addr()?;
         let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
-            axum::serve(listener, router(pool, metrics))
+            axum::serve(listener, router(pool, metrics, None))
                 .with_graceful_shutdown(async {
                     let _ = shutdown_receiver.await;
                 })

@@ -20,13 +20,13 @@ fmt-fix: ## Format Rust sources in place.
 	$(CARGO) fmt --all
 
 check: ## Type-check every target and feature with the lockfile.
-	$(CARGO) check --locked --all-targets --all-features
+	$(CARGO) check --locked --workspace --all-targets --all-features
 
 clippy: ## Run strict Clippy checks.
-	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
+	$(CARGO) clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 test: ## Run the complete Rust test suite.
-	$(CARGO) test --locked --all-targets --all-features
+	$(CARGO) test --locked --workspace --all-targets --all-features
 
 build: ## Build all release binaries.
 	$(CARGO) build --locked --release --bins

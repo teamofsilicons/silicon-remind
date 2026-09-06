@@ -2,14 +2,16 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State, rejection},
+    extract::{Extension, Path, Query, rejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse as _, Response},
 };
 use uuid::Uuid;
 
+use crate::api::ScopedState;
+
 use crate::{
-    api::{ApiState, models},
+    api::models,
     application::schedules::{next_execution_cursor, next_schedule_cursor, request_hash},
     domain::Actor,
     error::AppError,
@@ -23,7 +25,7 @@ const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 ///
 /// Returns validation or persistence errors.
 pub async fn list(
-    State(state): State<ApiState>,
+    ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
     query: Result<Query<models::ListSchedulesQuery>, rejection::QueryRejection>,
 ) -> Result<Json<models::PageResponse<models::ScheduleResponse>>, AppError> {
@@ -55,7 +57,7 @@ pub async fn list(
 /// Returns authentication policy, validation, idempotency, or persistence
 /// errors.
 pub async fn create(
-    State(state): State<ApiState>,
+    ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
     headers: HeaderMap,
     body: Result<Json<models::CreateScheduleRequest>, rejection::JsonRejection>,
@@ -76,7 +78,7 @@ pub async fn create(
 ///
 /// Returns validation, ownership, state, idempotency, or persistence errors.
 pub async fn update_statuses(
-    State(state): State<ApiState>,
+    ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
     headers: HeaderMap,
     body: Result<Json<models::BulkScheduleStatusRequest>, rejection::JsonRejection>,
@@ -103,7 +105,7 @@ pub async fn update_statuses(
 ///
 /// Returns validation, not-found, or persistence errors.
 pub async fn get(
-    State(state): State<ApiState>,
+    ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<Json<models::ScheduleResponse>, AppError> {
@@ -118,7 +120,7 @@ pub async fn get(
 ///
 /// Returns validation, ownership, state, idempotency, or persistence errors.
 pub async fn patch(
-    State(state): State<ApiState>,
+    ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
     headers: HeaderMap,
@@ -141,7 +143,7 @@ pub async fn patch(
 ///
 /// Returns validation, ownership/not-found, or persistence errors.
 pub async fn delete(
-    State(state): State<ApiState>,
+    ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<StatusCode, AppError> {
@@ -156,7 +158,7 @@ pub async fn delete(
 ///
 /// Returns validation, not-found, stored-data, or persistence errors.
 pub async fn list_executions(
-    State(state): State<ApiState>,
+    ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
     query: Result<Query<models::PageQuery>, rejection::QueryRejection>,

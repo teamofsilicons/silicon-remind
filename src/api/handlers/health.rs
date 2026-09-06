@@ -31,6 +31,9 @@ pub async fn ready(State(state): State<ApiState>) -> Result<Json<HealthResponse>
         .map_err(|_| AppError::DependencyUnavailable {
             dependency: "postgresql",
         })?;
+    if let Some(tests) = &state.tests {
+        tests.health_check().await?;
+    }
     Ok(live().await)
 }
 
