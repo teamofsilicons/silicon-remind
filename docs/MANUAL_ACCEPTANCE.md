@@ -1,8 +1,8 @@
 # Manual development and acceptance record
 
 Status: **authenticated local acceptance completed; final container verification
-is recorded below**. Public deployment and published-release installation remain
-external follow-up checks.
+is recorded below**. Public deployment and published-release installation are now verified in
+[the release record](RELEASE_0.1.0.md).
 No automated scenario suite substitutes for the user-requested manual stage.
 
 ## Development checks completed
@@ -256,3 +256,12 @@ with read-only root filesystem, all capabilities dropped and no-new-privileges.
 
 Public deployment, IAM approval/dispatch to the public URL and installation of
 an actual newer published CLI/client release remain unverified external steps.
+
+
+## Public release follow-up
+
+[Release 0.1.0](RELEASE_0.1.0.md) supersedes the earlier outstanding deployment,
+webhook-approval and registry-installation notes. Public API/worker health,
+Carbon/test Silicon authentication, sandbox creation, active IAM receiver,
+processed signed-event receipt and a real crates.io CLI installation are verified.
+Automatic replacement with a newer release remains a subsequent-release check.

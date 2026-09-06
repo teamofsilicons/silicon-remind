@@ -54,16 +54,21 @@ Production secrets are in git-ignored mode-0600 `.env`; protected manual fixture
 are ignored under `target/manual-secrets`. The source scan found none of those
 configured secret values in tracked or newly added source files.
 
-## External release checks still required
+## Public deployment: 2026-09-06
 
-- Deploy the API/worker/migrator with production databases and TLS at
-  `backend.remind.teamofsilicons.com`. No public deployment was performed.
-- IAM app metadata confirms signing version 1, but its configured public webhook
-  is `pending_review` with no active URL. Local signed-fixture receipt tests do
-  not prove IAM dispatch to the public `/webhook/` endpoint.
-- Publish the client/CLI packages before verifying a real upgrade to a newer
-  registry release. Both explicit updater commands currently report unavailable
-  because the packages are unpublished; successful installation is unproven.
+The dedicated AWS production stack is deployed. Public TLS/readiness, healthy
+API and worker containers, production Carbon login, test Silicon login and
+isolated sandbox creation passed. See [release record](RELEASE_0.1.0.md).
+
+## Public release verified
+
+The public backend is deployed with healthy API and worker tasks. IAM reports
+its webhook active; a signed event is recorded as processed in the production
+receiver, and the app dead-letter list is empty. Both client and CLI are published
+at 0.1.0. Registry archive checksums and Rust source match this checkout, and a
+fresh crates.io installation passed version, public readiness, authentication
+and current-version update checks. See [release record](RELEASE_0.1.0.md) for
+exact evidence and the remaining limitation on newer-version updater testing.
 
 Hook delivery is at least once. An ingress receipt is not proof of signature
 verification or application processing; the manual test separately inspected
