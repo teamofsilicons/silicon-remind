@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SubsecRound as _, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -21,6 +21,12 @@ use super::{
     MutableScheduleStatus, NewHookDestination, NewInternalEvent, PostgresRepository,
     RepositoryError, ScheduleCursor, ScheduleStatusChange, health_check, migrate,
 };
+
+// PostgreSQL timestamps retain microseconds. Linux clocks can expose nanoseconds,
+// so fixtures compared after a database round trip must use database precision.
+fn fixture_now() -> DateTime<Utc> {
+    Utc::now().trunc_subsecs(6)
+}
 
 struct TestDatabase {
     _container: ContainerAsync<Postgres>,
@@ -92,7 +98,7 @@ async fn seed_visibility_fixture(pool: &PgPool) -> anyhow::Result<VisibilityFixt
     let denied_owner = Uuid::now_v7();
     let first_allowed_owner = Uuid::now_v7();
     let second_allowed_owner = Uuid::now_v7();
-    let now = Utc::now();
+    let now = fixture_now();
     let denied_schedule = seed_visibility_schedule(
         pool,
         denied_owner,
@@ -377,7 +383,7 @@ async fn bulk_schedule_status_uses_deterministic_error_precedence() -> anyhow::R
         seed_expired_bulk_status_schedule(&database.pool, fixture.owner_principal_id).await?;
     let service = ScheduleService::new(
         database.repository.clone(),
-        Arc::new(FixedClock(Utc::now())),
+        Arc::new(FixedClock(fixture_now())),
         std::time::Duration::from_hours(24),
     );
     let actor = Actor::silicon(
@@ -433,7 +439,7 @@ async fn bulk_schedule_status_uses_deterministic_error_precedence() -> anyhow::R
 #[tokio::test]
 async fn bulk_pause_serializes_after_scheduler_materialization() -> anyhow::Result<()> {
     let database = test_database().await?;
-    let now = Utc::now();
+    let now = fixture_now();
     let schedule_id = seed_due_schedule(&database.pool, "bulk-race:tos", now, "recurring").await?;
     let owner_principal_id = schedule_owner(&database.pool, schedule_id).await?;
     let mut scheduler_transaction = database.repository.begin().await?;
@@ -588,7 +594,7 @@ async fn iam_silicon_removal_is_atomic_and_replay_safe() -> anyhow::Result<()> {
 #[tokio::test]
 async fn idempotent_response_lookup_validates_hash_and_expiry() -> anyhow::Result<()> {
     let database = test_database().await?;
-    let now = Utc::now();
+    let now = fixture_now();
     let request_hash = [3_u8; 32];
     insert_idempotency_response(
         &database.pool,
@@ -668,7 +674,7 @@ async fn schedule_purge_logs_full_snapshot_and_trims_deterministic_oldest() -> a
 async fn completed_one_time_purge_logs_automatic_archive_snapshot() -> anyhow::Result<()> {
     let database = test_database().await?;
     let fixture = seed_expired_archive(&database.pool).await?;
-    let purged_at = Utc::now();
+    let purged_at = fixture_now();
     let result = database
         .repository
         .purge_expired_schedules(purged_at, 100, "completed-purge-test-worker")
@@ -936,11 +942,11 @@ async fn assert_ledger_conflict_preserves_source(database: &TestDatabase) -> any
 async fn one_time_materialization_archives_before_delivery_without_extending_retention()
 -> anyhow::Result<()> {
     let database = test_database().await?;
-    let seed_now = Utc::now();
+    let seed_now = fixture_now();
 
     let one_time_id =
         seed_due_schedule(&database.pool, "one-time:tos", seed_now, "one_time").await?;
-    let worker_now = Utc::now() + Duration::seconds(1);
+    let worker_now = fixture_now() + Duration::seconds(1);
     let execution =
         materialize_schedule(&database.repository, one_time_id, worker_now, None).await?;
     assert_eq!(execution.schedule_version, 2);
@@ -999,13 +1005,13 @@ async fn one_time_materialization_archives_before_delivery_without_extending_ret
 #[tokio::test]
 async fn current_and_archived_sections_are_partitioned_before_pagination() -> anyhow::Result<()> {
     let database = test_database().await?;
-    let seed_now = Utc::now();
+    let seed_now = fixture_now();
     let current_id =
         seed_due_schedule(&database.pool, "current-section:tos", seed_now, "recurring").await?;
     let manual_id =
         seed_due_schedule(&database.pool, "manual-archive:tos", seed_now, "recurring").await?;
     let manual_owner = schedule_owner(&database.pool, manual_id).await?;
-    let archived_at = Utc::now() + Duration::seconds(1);
+    let archived_at = fixture_now() + Duration::seconds(1);
     assert!(
         database
             .repository
@@ -1027,7 +1033,7 @@ async fn current_and_archived_sections_are_partitioned_before_pagination() -> an
     )
     .await?;
     let automatic_owner = schedule_owner(&database.pool, automatic_id).await?;
-    let worker_now = Utc::now() + Duration::seconds(2);
+    let worker_now = fixture_now() + Duration::seconds(2);
     let automatic_execution =
         materialize_schedule(&database.repository, automatic_id, worker_now, None).await?;
 
@@ -1123,7 +1129,7 @@ async fn assert_schedule_sections(
 async fn manual_archive_cancels_unaccepted_work_without_extending_retention() -> anyhow::Result<()>
 {
     let database = test_database().await?;
-    let now = Utc::now();
+    let now = fixture_now();
     let schedule_id =
         seed_due_schedule(&database.pool, "archive-cancel:tos", now, "recurring").await?;
     let execution_ids =
@@ -1206,7 +1212,7 @@ async fn expired_archive_is_hidden_and_cannot_resume_delivery() -> anyhow::Resul
         Err(RepositoryError::NotFound)
     ));
 
-    let now = Utc::now();
+    let now = fixture_now();
     assert!(
         database
             .repository
@@ -1353,7 +1359,7 @@ async fn manual_archive_state(
 }
 
 async fn seed_expired_archive(pool: &PgPool) -> anyhow::Result<ExpiredArchiveFixture> {
-    let now = Utc::now();
+    let now = fixture_now();
     let completed_at = now - Duration::days(46);
     let created_at = completed_at - Duration::days(1);
     let owner_principal_id = Uuid::now_v7();
@@ -1462,7 +1468,7 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         "assistant:tos"
     );
 
-    let now = Utc::now();
+    let now = fixture_now();
     let schedule = CreateSchedule {
         id: Uuid::now_v7(),
         org_id: "tos".to_owned(),
@@ -1782,7 +1788,7 @@ async fn apply_and_assert_bulk_resume(
     fixture: &BulkScheduleStatusFixture,
     request_order: &[Uuid],
 ) -> anyhow::Result<()> {
-    let shared_next_run_at = Utc::now() + Duration::hours(6);
+    let shared_next_run_at = fixture_now() + Duration::hours(6);
     let replacement = BulkScheduleStatusReplacement {
         org_id: "tos".to_owned(),
         owner_principal_id: fixture.owner_principal_id,
@@ -1830,7 +1836,7 @@ async fn apply_and_assert_bulk_resume(
 async fn seed_bulk_schedule_status_fixture(
     pool: &PgPool,
 ) -> anyhow::Result<BulkScheduleStatusFixture> {
-    let now = Utc::now();
+    let now = fixture_now();
     let created_at = now - Duration::days(2);
     let completed_at = now - Duration::hours(4);
     let archived_at = now - Duration::hours(1);
@@ -1973,7 +1979,7 @@ async fn seed_foreign_bulk_status_schedule(pool: &PgPool) -> anyhow::Result<Uuid
     )
     .bind(schedule_id)
     .bind(owner_principal_id)
-    .bind(Utc::now() + Duration::hours(1))
+    .bind(fixture_now() + Duration::hours(1))
     .execute(pool)
     .await?;
     Ok(schedule_id)
@@ -1984,7 +1990,7 @@ async fn seed_expired_bulk_status_schedule(
     owner_principal_id: Uuid,
 ) -> anyhow::Result<Uuid> {
     let schedule_id = Uuid::now_v7();
-    let now = Utc::now();
+    let now = fixture_now();
     sqlx::query(
         "INSERT INTO schedules (\
              id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
@@ -2013,7 +2019,7 @@ fn bulk_status_idempotency(
         actor_id: owner_principal_id.to_string(),
         key: key.to_owned(),
         request_hash,
-        expires_at: Utc::now() + Duration::hours(24),
+        expires_at: fixture_now() + Duration::hours(24),
     }
 }
 
@@ -2283,7 +2289,7 @@ async fn assert_schedule_state(
 }
 
 async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixture> {
-    let now = Utc::now();
+    let now = fixture_now();
     let target_schedule_id = Uuid::now_v7();
     let completed_schedule_id = Uuid::now_v7();
     let other_schedule_id = Uuid::now_v7();

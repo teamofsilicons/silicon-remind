@@ -34,5 +34,9 @@
   {
     "ParameterKey": "BootstrapImageUri",
     "ParameterValue": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:48b3f0558b46ee5e53eacdcea0304ccaa4e95ad3cb14953ca2b489a764276397"
+  },
+  {
+    "ParameterKey": "RuntimeDesiredCount",
+    "ParameterValue": "1"
   }
 ]

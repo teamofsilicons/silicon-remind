@@ -1,0 +1,16 @@
+{
+  "TestingDatabaseSecretArn": "arn:aws:secretsmanager:us-east-1:234951665042:secret:rds!db-c8455cd3-06f4-4e50-9d18-9f1762ce7476-f41TbQ",
+  "TaskSecurityGroupId": "sg-06bb845c336708df3",
+  "ApiTargetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:234951665042:targetgroup/silicon-remind-prod-ip-api/9bfc00abb9104dcf",
+  "RuntimeSecretArn": "arn:aws:secretsmanager:us-east-1:234951665042:secret:silicon-remind/runtime-production-dbqkfb",
+  "TestingDatabaseEndpoint": "silicon-remind-testing-production.c61ckewgy7lq.us-east-1.rds.amazonaws.com",
+  "PublicHostName": "backend.remind.teamofsilicons.com",
+  "WebhookUrl": "https://backend.remind.teamofsilicons.com/webhook/",
+  "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:234951665042:loadbalancer/app/silicon-remind-production/ab05a002b6858abf",
+  "DatabaseSecretArn": "arn:aws:secretsmanager:us-east-1:234951665042:secret:rds!db-69c3008b-d662-4c55-b944-7a0d01586d55-mftE6W",
+  "BootstrapTaskDefinitionArn": "arn:aws:ecs:us-east-1:234951665042:task-definition/silicon-remind-bootstrap:1",
+  "ClusterName": "silicon-remind-production",
+  "LoadBalancerDnsName": "silicon-remind-production-186294638.us-east-1.elb.amazonaws.com",
+  "DatabaseEndpoint": "silicon-remind-production.c61ckewgy7lq.us-east-1.rds.amazonaws.com",
+  "CertificateArn": "arn:aws:acm:us-east-1:234951665042:certificate/a3173f08-d8bb-478b-be92-8b0af3b78786"
+}
