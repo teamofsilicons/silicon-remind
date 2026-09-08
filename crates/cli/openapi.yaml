@@ -111,8 +111,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Schedule'
-        '409':
-          $ref: '#/components/responses/WebhookNotConfigured'
         default:
           $ref: '#/components/responses/Error'
   /schedules/{schedule_id}:
@@ -336,7 +334,7 @@ paths:
         default: *id001
     put:
       operationId: configureWebhook
-      summary: Configure the owning Silicon Hook endpoint
+      summary: Configure the owning configured webhook endpoint
       parameters:
       - *id003
       - $ref: '#/components/parameters/TestKey'
@@ -364,6 +362,58 @@ paths:
       responses:
         '204':
           description: Success
+        default: *id001
+  /webhooks:
+    get:
+      operationId: listWebhooks
+      summary: List the owning Silicon's webhook subscriptions
+      parameters:
+      - *id003
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '200':
+          description: Active subscriptions, possibly empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptions'
+        default: *id001
+    post:
+      operationId: subscribeWebhook
+      summary: Add a webhook subscription
+      parameters:
+      - *id003
+      - $ref: '#/components/parameters/TestKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DestinationInput'
+      responses:
+        '201':
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DestinationReceipt'
+        default: *id001
+  /webhooks/{subscription_id}:
+    delete:
+      operationId: unsubscribeWebhook
+      summary: Disable one webhook subscription
+      parameters:
+      - *id003
+      - $ref: '#/components/parameters/TestKey'
+      - name: subscription_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '204':
+          description: Subscription disabled
         default: *id001
   /silicons:
     get:
@@ -732,7 +782,7 @@ components:
         pattern: ^[a-zA-Z0-9]{32}$
   responses:
     WebhookNotConfigured:
-      description: The authenticated Silicon has no active Hook destination.
+      description: The requested legacy subscription does not exist or is inactive.
       content:
         application/json:
           schema:
@@ -740,7 +790,7 @@ components:
           example:
             error:
               code: webhook_not_configured
-              message: Set the webhook url first.
+              message: No active webhook subscription is configured.
               request_id: 0199d8d5-2f62-7eb7-81c5-1e456778f8de
     Error:
       description: Error
@@ -1022,13 +1072,18 @@ components:
         endpoint_url:
           type: string
           format: uri
-        signing_secret: *id002
+        signing_secret:
+          type: string
+          maxLength: 4096
+          description: Optional HMAC signing secret; omit for unsigned delivery.
       required:
       - endpoint_url
-      - signing_secret
     DestinationReceipt:
       type: object
       properties:
+        id:
+          type: string
+          format: uuid
         silicon_id: *id009
         version: &id010
           type: integer
@@ -1036,12 +1091,16 @@ components:
           type: string
           format: date-time
       required:
+      - id
       - silicon_id
       - version
       - updated_at
     DestinationInfo:
       type: object
       properties:
+        id:
+          type: string
+          format: uuid
         silicon_id: *id009
         version: *id010
         updated_at: *id011
@@ -1049,10 +1108,20 @@ components:
           type: string
           format: uri
       required:
+      - id
       - silicon_id
       - version
       - updated_at
       - endpoint_url
+    WebhookSubscriptions:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DestinationInfo'
+      required:
+      - items
     Silicon:
       type: object
       properties:

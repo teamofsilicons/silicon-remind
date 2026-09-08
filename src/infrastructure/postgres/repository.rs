@@ -125,13 +125,10 @@ impl PostgresRepository {
         .map_err(RepositoryError::from)
     }
 
-    /// Resolves the public Silicon identity only when its Hook destination is
-    /// currently enabled.
+    /// Resolves the public Silicon identity when it is active.
     ///
-    /// A principal that has never been provisioned is reported as a missing
-    /// webhook. A durable IAM or organization tombstone remains a distinct
-    /// unavailable-identity error so revocation cannot be mistaken for a
-    /// recoverable configuration omission.
+    /// Webhook subscriptions are optional, so an active Silicon remains
+    /// schedulable even when it has no outbound receivers.
     ///
     /// # Errors
     ///
@@ -143,16 +140,9 @@ impl PostgresRepository {
         principal_id: Uuid,
     ) -> Result<SiliconIdentityRow, RepositoryError> {
         validate_org_id(org_id)?;
-        let row = sqlx::query_as::<_, (String, Uuid, Option<String>, String, String, bool)>(
+        let row = sqlx::query_as::<_, (String, Uuid, Option<String>, String, String)>(
             "SELECT identity.org_id, identity.principal_id, identity.silicon_id, \
-                    identity.state, organization.state, \
-                    EXISTS (\
-                        SELECT 1 FROM hook_destinations destination \
-                        WHERE destination.org_id = identity.org_id \
-                          AND destination.owner_principal_id = identity.principal_id \
-                          AND destination.silicon_id = identity.silicon_id \
-                          AND destination.disabled_at IS NULL\
-                    ) AS has_destination \
+                    identity.state, organization.state \
              FROM silicon_identities identity \
              JOIN organization_lifecycle organization \
                ON organization.org_id = identity.org_id \
@@ -163,19 +153,13 @@ impl PostgresRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        let Some((org_id, principal_id, silicon_id, identity_state, org_state, has_destination)) =
-            row
-        else {
-            return Err(RepositoryError::WebhookNotConfigured);
+        let Some((org_id, principal_id, silicon_id, identity_state, org_state)) = row else {
+            return Err(RepositoryError::SiliconUnavailable);
         };
         if identity_state != "active" || org_state != "active" {
             return Err(RepositoryError::SiliconUnavailable);
         }
         let silicon_id = silicon_id.ok_or(RepositoryError::SiliconUnavailable)?;
-        if !has_destination {
-            return Err(RepositoryError::WebhookNotConfigured);
-        }
-
         Ok(SiliconIdentityRow {
             org_id,
             principal_id,
@@ -1005,7 +989,7 @@ impl PostgresRepository {
         })
     }
 
-    /// Acquires bounded Hook-delivery leases with `FOR UPDATE SKIP LOCKED`.
+    /// Acquires bounded webhook-delivery leases with `FOR UPDATE SKIP LOCKED`.
     /// Expired leases are safely reclaimable; deleted schedules are excluded.
     ///
     /// # Errors
@@ -1133,7 +1117,7 @@ impl PostgresRepository {
         .map_err(RepositoryError::from)
     }
 
-    /// Marks a leased execution delivered to ingress after a validated Hook `200`.
+    /// Marks a leased execution delivered to ingress after a validated webhook `200`.
     /// The historical `hook_event_id` column stores the receipt, which does not prove
     /// signature verification or downstream consumer acknowledgment.
     ///
@@ -1312,13 +1296,14 @@ impl PostgresRepository {
 }
 
 impl PostgresRepository {
-    /// Creates or atomically replaces encrypted Hook destination material.
+    /// Creates one encrypted webhook subscription.
     /// No plaintext endpoint or secret crosses this persistence boundary.
     ///
     /// # Errors
     ///
     /// Returns an input error for empty ciphertext or a non-positive key
-    /// version, and a database error when replacement fails.
+    /// version, and a database error when creation fails. Each call creates a
+    /// new subscription; a Silicon may have multiple active destinations.
     pub async fn upsert_hook_destination(
         &self,
         destination: &NewHookDestination,
@@ -1333,13 +1318,6 @@ impl PostgresRepository {
                  endpoint_url_nonce, signing_secret_ciphertext, \
                  signing_secret_nonce, encryption_key_version\
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-             ON CONFLICT (org_id, owner_principal_id) DO UPDATE SET \
-                 endpoint_url_ciphertext = EXCLUDED.endpoint_url_ciphertext, \
-                 endpoint_url_nonce = EXCLUDED.endpoint_url_nonce, \
-                 signing_secret_ciphertext = EXCLUDED.signing_secret_ciphertext, \
-                 signing_secret_nonce = EXCLUDED.signing_secret_nonce, \
-                 encryption_key_version = EXCLUDED.encryption_key_version, \
-                 disabled_at = NULL, version = hook_destinations.version + 1 \
              RETURNING {DESTINATION_RETURNING_COLUMNS}"
         );
         let row = sqlx::query_as::<_, HookDestinationRow>(AssertSqlSafe(sql))
@@ -1359,11 +1337,7 @@ impl PostgresRepository {
             &mut transaction,
             Some(&destination.org_id),
             audit,
-            if row.version == 1 {
-                "hook_destination.created"
-            } else {
-                "hook_destination.replaced"
-            },
+            "hook_destination.created",
             "hook_destination",
             Some(row.id.to_string()),
             json!({
@@ -1377,7 +1351,11 @@ impl PostgresRepository {
         Ok(row)
     }
 
-    /// Reads active encrypted destination material for one tenant Silicon.
+    /// Reads the first active encrypted destination for one tenant Silicon.
+    ///
+    /// This compatibility helper is retained for callers that only need one
+    /// receiver. New delivery code should use [`Self::list_hook_destinations`]
+    /// so every subscription receives the event.
     ///
     /// # Errors
     ///
@@ -1397,7 +1375,8 @@ impl PostgresRepository {
                ON organization.org_id = d.org_id \
              WHERE d.org_id = $1 AND d.silicon_id = $2 \
                AND d.disabled_at IS NULL AND identity.state = 'active' \
-               AND organization.state = 'active'"
+               AND organization.state = 'active' \
+             ORDER BY d.created_at, d.id LIMIT 1"
         );
         sqlx::query_as::<_, HookDestinationRow>(AssertSqlSafe(sql))
             .bind(org_id)
@@ -1405,6 +1384,53 @@ impl PostgresRepository {
             .fetch_optional(&self.pool)
             .await
             .map_err(RepositoryError::from)
+    }
+
+    /// Reads every active encrypted destination for one tenant Silicon in a
+    /// stable order. An empty result is valid: webhook delivery is optional,
+    /// so reminders may still be scheduled when no receiver is subscribed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the lookup fails.
+    pub async fn get_hook_destinations(
+        &self,
+        org_id: &str,
+        silicon_id: &str,
+    ) -> Result<Vec<HookDestinationRow>, RepositoryError> {
+        let sql = format!(
+            "SELECT {DESTINATION_COLUMNS} \
+             FROM hook_destinations d \
+             JOIN silicon_identities identity \
+               ON identity.org_id = d.org_id \
+              AND identity.principal_id = d.owner_principal_id \
+             JOIN organization_lifecycle organization \
+               ON organization.org_id = d.org_id \
+             WHERE d.org_id = $1 AND d.silicon_id = $2 \
+               AND d.disabled_at IS NULL AND identity.state = 'active' \
+               AND organization.state = 'active' \
+             ORDER BY d.created_at, d.id"
+        );
+        sqlx::query_as::<_, HookDestinationRow>(AssertSqlSafe(sql))
+            .bind(org_id)
+            .bind(silicon_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(RepositoryError::from)
+    }
+
+    /// Alias used by the subscription management API for listing active
+    /// receivers owned by one Silicon.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the lookup fails.
+    pub async fn list_hook_destinations(
+        &self,
+        org_id: &str,
+        silicon_id: &str,
+    ) -> Result<Vec<HookDestinationRow>, RepositoryError> {
+        self.get_hook_destinations(org_id, silicon_id).await
     }
 
     /// Disables a destination without retaining plaintext or deleting audit
@@ -1421,26 +1447,26 @@ impl PostgresRepository {
         audit: &AuditContext,
     ) -> Result<bool, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let existing = sqlx::query_as::<_, (Uuid, Option<DateTime<Utc>>)>(
-            "SELECT id, disabled_at FROM hook_destinations \
-             WHERE org_id = $1 AND silicon_id = $2 FOR UPDATE",
+        let existing = sqlx::query_as::<_, (Uuid,)>(
+            "SELECT id FROM hook_destinations \
+             WHERE org_id = $1 AND silicon_id = $2 AND disabled_at IS NULL \
+             FOR UPDATE",
         )
         .bind(org_id)
         .bind(silicon_id)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RepositoryError::NotFound)?;
-
-        if existing.1.is_some() {
+        .fetch_all(&mut *transaction)
+        .await?;
+        if existing.is_empty() {
             transaction.commit().await?;
             return Ok(false);
         }
         sqlx::query(
             "UPDATE hook_destinations SET disabled_at = $1, version = version + 1 \
-             WHERE id = $2",
+             WHERE org_id = $2 AND silicon_id = $3 AND disabled_at IS NULL",
         )
         .bind(disabled_at)
-        .bind(existing.0)
+        .bind(org_id)
+        .bind(silicon_id)
         .execute(&mut *transaction)
         .await?;
         append_audit(
@@ -1449,12 +1475,63 @@ impl PostgresRepository {
             audit,
             "hook_destination.disabled",
             "hook_destination",
-            Some(existing.0.to_string()),
-            json!({ "silicon_id": silicon_id }),
+            None,
+            json!({ "silicon_id": silicon_id, "count": existing.len() }),
         )
         .await?;
         transaction.commit().await?;
         Ok(true)
+    }
+
+    /// Disables one subscription, identified by its registry UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns not found for an unknown subscription or a database error.
+    pub async fn disable_hook_destination_by_id(
+        &self,
+        org_id: &str,
+        silicon_id: &str,
+        destination_id: Uuid,
+        disabled_at: DateTime<Utc>,
+        audit: &AuditContext,
+    ) -> Result<bool, RepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let existing = sqlx::query_as::<_, (Uuid,)>(
+            "SELECT id FROM hook_destinations \
+             WHERE id = $1 AND org_id = $2 AND silicon_id = $3 \
+             FOR UPDATE",
+        )
+        .bind(destination_id)
+        .bind(org_id)
+        .bind(silicon_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound)?;
+        let changed = sqlx::query(
+            "UPDATE hook_destinations SET disabled_at = $1, version = version + 1 \
+             WHERE id = $2 AND disabled_at IS NULL",
+        )
+        .bind(disabled_at)
+        .bind(existing.0)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            > 0;
+        if changed {
+            append_audit(
+                &mut transaction,
+                Some(org_id),
+                audit,
+                "hook_destination.disabled",
+                "hook_destination",
+                Some(destination_id.to_string()),
+                json!({ "silicon_id": silicon_id }),
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(changed)
     }
 
     /// Lists a bounded active batch still encrypted with a historical key.
@@ -1868,7 +1945,7 @@ impl PostgresRepository {
         })
     }
 
-    /// Permanently deletes disabled Hook destination ciphertext after its
+    /// Permanently deletes disabled webhook destination ciphertext after its
     /// 45-day recovery window, in a bounded multi-worker-safe batch.
     ///
     /// # Errors
@@ -2821,37 +2898,22 @@ async fn disable_iam_destinations(
             principal_id,
         } => {
             sqlx::query(
-                "WITH candidates AS (\
-                     SELECT id FROM hook_destinations \
-                     WHERE org_id = $2 AND owner_principal_id = $3 \
-                       AND disabled_at IS NULL \
-                     ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $4\
-                 ) \
-                 UPDATE hook_destinations destination SET \
-                     disabled_at = $1, version = destination.version + 1 \
-                 FROM candidates WHERE destination.id = candidates.id",
+                "UPDATE hook_destinations SET disabled_at = $1, version = version + 1 \
+                 WHERE org_id = $2 AND owner_principal_id = $3 AND disabled_at IS NULL",
             )
             .bind(disabled_at)
             .bind(org_id)
             .bind(principal_id)
-            .bind(IAM_INLINE_CLEANUP_LIMIT)
             .execute(&mut **transaction)
             .await?
         }
         IamLifecycleTarget::Organization { org_id } => {
             sqlx::query(
-                "WITH candidates AS (\
-                     SELECT id FROM hook_destinations \
-                     WHERE org_id = $2 AND disabled_at IS NULL \
-                     ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $3\
-                 ) \
-                 UPDATE hook_destinations destination SET \
-                     disabled_at = $1, version = destination.version + 1 \
-                 FROM candidates WHERE destination.id = candidates.id",
+                "UPDATE hook_destinations SET disabled_at = $1, version = version + 1 \
+                 WHERE org_id = $2 AND disabled_at IS NULL",
             )
             .bind(disabled_at)
             .bind(org_id)
-            .bind(IAM_INLINE_CLEANUP_LIMIT)
             .execute(&mut **transaction)
             .await?
         }
@@ -3576,7 +3638,7 @@ async fn lock_schedulable_silicon_identity(
     let Some((organization_state, identity_state, bound_silicon_id)) =
         lock_silicon_lifecycle_projection(transaction, org_id, principal_id).await?
     else {
-        return Err(RepositoryError::WebhookNotConfigured);
+        return Err(RepositoryError::NotFound);
     };
     if identity_state != "active"
         || organization_state != "active"
@@ -3585,20 +3647,6 @@ async fn lock_schedulable_silicon_identity(
         return Err(RepositoryError::SiliconUnavailable);
     }
 
-    let destination = sqlx::query_scalar::<_, bool>(
-        "SELECT true FROM hook_destinations \
-         WHERE org_id = $1 AND owner_principal_id = $2 AND silicon_id = $3 \
-           AND disabled_at IS NULL \
-         FOR SHARE",
-    )
-    .bind(org_id)
-    .bind(principal_id)
-    .bind(silicon_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-    if destination.is_none() {
-        return Err(RepositoryError::WebhookNotConfigured);
-    }
     Ok(())
 }
 

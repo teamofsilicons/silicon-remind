@@ -1,6 +1,6 @@
 [package]
 name = "silicon-remind-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.98"
 description = "Silicon Remind command line interface"
@@ -14,7 +14,7 @@ name = "remind"
 path = "src/main.rs"
 
 [dependencies]
-silicon-remind-client = { version = "0.1.0", path = "../client" }
+silicon-remind-client = { version = "0.1.1", path = "../client" }
 anyhow = "1.0.100"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.48", features = ["derive", "env", "wrap_help"] }

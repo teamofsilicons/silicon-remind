@@ -11,8 +11,8 @@ use crate::{
     config::Settings,
     infrastructure::{
         crypto::SecretCipherKeyring,
-        hook::HookClient,
         postgres::{self, PostgresRepository},
+        webhook::WebhookClient,
     },
     metrics::Metrics,
 };
@@ -36,7 +36,7 @@ struct WorkerRuntime {
     metrics: Metrics,
 }
 
-/// Runs durable scheduling, Hook delivery, and retention until shutdown.
+/// Runs durable scheduling, webhook delivery, and retention until shutdown.
 ///
 /// # Errors
 ///
@@ -49,10 +49,10 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         settings.encryption.current_version,
         &settings.encryption.keys,
     )?;
-    let hook_client = HookClient::new(
-        settings.hook.connect_timeout,
-        settings.hook.request_timeout,
-        settings.hook.max_response_bytes,
+    let webhook_client = WebhookClient::new(
+        settings.webhook.connect_timeout,
+        settings.webhook.request_timeout,
+        settings.webhook.max_response_bytes,
     )?;
     let worker_id = format!("remind-worker-{}", Uuid::now_v7());
     let batch_size = u32::try_from(settings.worker.batch_size.get())?;
@@ -62,10 +62,9 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     let metrics = Metrics::new();
     let delivery = delivery::DeliveryProcessor::new(
         repository.clone(),
-        hook_client,
+        webhook_client,
         encryption.clone(),
         delivery::DeliveryProcessorConfig {
-            hook_base_url: settings.hook.base_url.clone(),
             worker_id: worker_id.clone(),
             lease_duration: settings.worker.lease_duration,
             max_concurrency: delivery_concurrency,
@@ -270,11 +269,11 @@ async fn run_work_cycle(
     }
 
     match delivery.run_once().await {
-        Ok(count) if count > 0 => tracing::debug!(count, "processed Hook delivery batch"),
+        Ok(count) if count > 0 => tracing::debug!(count, "processed webhook delivery batch"),
         Ok(_) => {}
         Err(error) => {
             metrics.worker_errors.inc();
-            tracing::error!(error = %error, "Hook delivery batch had failures");
+            tracing::error!(error = %error, "webhook delivery batch had failures");
         }
     }
 }

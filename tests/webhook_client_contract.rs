@@ -1,19 +1,16 @@
-//! Black-box interoperability checks for the signed Silicon Hook adapter.
+//! Black-box interoperability checks for generic outbound webhooks.
 
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac as _};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use sha2::Sha256;
-use silicon_remind::infrastructure::hook::{
-    HookClient, HookDeliveryError, HookDestination, HookReceipt, ReminderEvent,
+use silicon_remind::infrastructure::webhook::{
+    ReminderEvent, WebhookClient, WebhookDeliveryError, WebhookDestination, WebhookReceipt,
 };
 use url::Url;
 use uuid::Uuid;
@@ -22,9 +19,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-const ENDPOINT_PATH: &str = "/silicon/assistant:tos/A1B2C3";
-const SIGNING_KEY: [u8; 32] = [0x5A; 32];
-
+const ENDPOINT_PATH: &str = "/custom/reminders/assistant";
 struct Fixture {
     now: DateTime<Utc>,
     event: ReminderEvent,
@@ -49,17 +44,21 @@ impl Fixture {
     }
 }
 
-fn client() -> Result<HookClient> {
-    HookClient::new(Duration::from_secs(1), Duration::from_secs(2), 64 * 1_024)
+fn client() -> Result<WebhookClient> {
+    WebhookClient::new(Duration::from_secs(1), Duration::from_secs(2), 64 * 1_024)
 }
 
-fn destination(server: &MockServer) -> Result<HookDestination> {
-    Ok(HookDestination {
+fn destination(server: &MockServer) -> Result<WebhookDestination> {
+    Ok(WebhookDestination {
         endpoint_url: Url::parse(&format!("{}{ENDPOINT_PATH}", server.uri()))?,
-        signing_secret: SecretString::from(format!(
-            "whsec_{}",
-            URL_SAFE_NO_PAD.encode(SIGNING_KEY)
-        )),
+        signing_secret: SecretString::from("shared-secret"),
+    })
+}
+
+fn unsigned_destination(server: &MockServer) -> Result<WebhookDestination> {
+    Ok(WebhookDestination {
+        endpoint_url: Url::parse(&format!("{}{ENDPOINT_PATH}", server.uri()))?,
+        signing_secret: SecretString::from(""),
     })
 }
 
@@ -73,10 +72,8 @@ fn header<'a>(request: &'a Request, name: &str) -> Result<&'a str> {
 }
 
 fn expected_signature(id: Uuid, timestamp: &str, body: &[u8]) -> Result<String> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(
-        format!("whsec_{}", URL_SAFE_NO_PAD.encode(SIGNING_KEY)).as_bytes(),
-    )
-    .map_err(|_| anyhow::anyhow!("test signing secret must be accepted by HMAC"))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"shared-secret")
+        .map_err(|_| anyhow::anyhow!("test signing secret must be accepted by HMAC"))?;
     mac.update(id.to_string().as_bytes());
     mac.update(b".");
     mac.update(timestamp.as_bytes());
@@ -90,7 +87,7 @@ fn expected_signature(id: Uuid, timestamp: &str, body: &[u8]) -> Result<String> 
 
 async fn deliver_with(
     template: ResponseTemplate,
-) -> Result<Result<HookReceipt, HookDeliveryError>> {
+) -> Result<Result<WebhookReceipt, WebhookDeliveryError>> {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(ENDPOINT_PATH))
@@ -107,13 +104,9 @@ async fn deliver_with(
 #[tokio::test]
 async fn accepted_delivery_has_exact_envelope_idempotency_and_hmac_contract() -> Result<()> {
     let server = MockServer::start().await;
-    let hook_event_id = Uuid::from_u128(3);
     Mock::given(method("POST"))
         .and(path(ENDPOINT_PATH))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "receipt_id": hook_event_id,
-            "status": "webhook.ok",
-        })))
+        .respond_with(ResponseTemplate::new(202))
         .mount(&server)
         .await;
 
@@ -122,8 +115,8 @@ async fn accepted_delivery_has_exact_envelope_idempotency_and_hmac_contract() ->
         .deliver(&destination(&server)?, &fixture.event, fixture.now)
         .await?;
     ensure!(
-        receipt.event_id == hook_event_id,
-        "Hook receipt UUID changed"
+        receipt.event_id == fixture.event.execution_id,
+        "webhook receipt marker must be the execution UUID"
     );
 
     let requests = server
@@ -132,7 +125,7 @@ async fn accepted_delivery_has_exact_envelope_idempotency_and_hmac_contract() ->
         .context("wiremock request recording must be enabled")?;
     ensure!(
         requests.len() == 1,
-        "expected one Hook request, got {}",
+        "expected one webhook request, got {}",
         requests.len()
     );
     let request = requests
@@ -140,30 +133,30 @@ async fn accepted_delivery_has_exact_envelope_idempotency_and_hmac_contract() ->
         .context("recorded request disappeared after length check")?;
     ensure!(
         request.method.as_str() == "POST",
-        "Hook method must be POST"
+        "webhook method must be POST"
     );
     ensure!(
         request.url.path() == ENDPOINT_PATH,
-        "Hook endpoint path changed"
+        "webhook endpoint path changed"
     );
     ensure!(
         header(request, "content-type")? == "application/json",
-        "Hook body must be JSON"
+        "webhook body must be JSON"
     );
     ensure!(
         header(request, "idempotency-key")? == fixture.event.execution_id.to_string(),
-        "execution UUID must be the Hook idempotency key"
+        "execution UUID must be the webhook idempotency key"
     );
 
     let timestamp = fixture.now.timestamp().to_string();
     ensure!(
         header(request, "webhook-timestamp")? == timestamp,
-        "Hook timestamp changed"
+        "webhook timestamp changed"
     );
     ensure!(
         header(request, "webhook-signature")?
             == expected_signature(fixture.event.execution_id, &timestamp, &request.body)?,
-        "Hook HMAC must cover `<execution_id>.<timestamp>.<raw_body>`"
+        "webhook HMAC must cover `<execution_id>.<timestamp>.<raw_body>`"
     );
 
     let body: Value = serde_json::from_slice(&request.body)?;
@@ -184,7 +177,7 @@ async fn accepted_delivery_has_exact_envelope_idempotency_and_hmac_contract() ->
     });
     ensure!(
         body == expected_body,
-        "Hook event envelope changed: {body:#}"
+        "webhook event envelope changed: {body:#}"
     );
     Ok(())
 }
@@ -224,40 +217,39 @@ async fn definitive_4xx_responses_are_terminal() -> Result<()> {
 }
 
 #[tokio::test]
-async fn malformed_or_semantically_invalid_acceptance_is_retryable() -> Result<()> {
-    let malformed = deliver_with(
+async fn any_success_status_and_body_are_accepted() -> Result<()> {
+    for template in [
         ResponseTemplate::new(200).set_body_raw(b"not-json".to_vec(), "application/json"),
-    )
-    .await?;
-    let Err(malformed) = malformed else {
-        bail!("malformed 202 response must not mark delivery complete");
-    };
-    ensure!(malformed.is_retryable(), "malformed 202 must be retryable");
+        ResponseTemplate::new(202).set_body_json(json!({"queued": true})),
+        ResponseTemplate::new(204),
+    ] {
+        let result = deliver_with(template).await?;
+        let receipt = result?;
+        ensure!(receipt.event_id == Uuid::from_u128(1));
+    }
+    Ok(())
+}
 
-    let unexpected_status = deliver_with(ResponseTemplate::new(200).set_body_json(json!({
-        "receipt_id": Uuid::from_u128(3),
-        "status": "queued",
-    })))
-    .await?;
-    let Err(unexpected_status) = unexpected_status else {
-        bail!("non-accepted 202 response must not mark delivery complete");
-    };
-    ensure!(
-        unexpected_status.is_retryable(),
-        "unexpected acceptance status must be retryable"
-    );
-
-    let invalid_event_id = deliver_with(ResponseTemplate::new(200).set_body_json(json!({
-        "receipt_id": "not-a-uuid",
-        "status": "webhook.ok",
-    })))
-    .await?;
-    let Err(invalid_event_id) = invalid_event_id else {
-        bail!("invalid Hook event UUID must not mark delivery complete");
-    };
-    ensure!(
-        invalid_event_id.is_retryable(),
-        "invalid Hook event UUID must be retryable"
-    );
+#[tokio::test]
+async fn unsigned_destinations_omit_signature_headers() -> Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(ENDPOINT_PATH))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new()?;
+    client()?
+        .deliver(&unsigned_destination(&server)?, &fixture.event, fixture.now)
+        .await?;
+    let request = server
+        .received_requests()
+        .await
+        .context("wiremock request recording must be enabled")?
+        .into_iter()
+        .next()
+        .context("unsigned webhook request was not recorded")?;
+    ensure!(!request.headers.contains_key("webhook-signature"));
+    ensure!(!request.headers.contains_key("webhook-timestamp"));
     Ok(())
 }

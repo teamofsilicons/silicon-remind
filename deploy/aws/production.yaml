@@ -696,8 +696,6 @@ Resources:
           Value: tos>remind
         - Name: REMIND_ENCRYPTION_CURRENT_VERSION
           Value: '1'
-        - Name: REMIND_HOOK_BASE_URL
-          Value: https://backend.hook.teamofsilicons.com
         - Name: REMIND_DATABASE_MAX_CONNECTIONS
           Value: '8'
         - Name: REMIND_LOG_FILTER
@@ -837,8 +835,6 @@ Resources:
           Value: tos>remind
         - Name: REMIND_ENCRYPTION_CURRENT_VERSION
           Value: '1'
-        - Name: REMIND_HOOK_BASE_URL
-          Value: https://backend.hook.teamofsilicons.com
         - Name: REMIND_DATABASE_MAX_CONNECTIONS
           Value: '8'
         - Name: REMIND_LOG_FILTER

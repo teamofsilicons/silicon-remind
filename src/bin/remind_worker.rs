@@ -1,4 +1,4 @@
-//! Silicon Remind durable scheduling and Hook delivery process.
+//! Silicon Remind durable scheduling and webhook delivery process.
 
 use silicon_remind::{config::Settings, telemetry, worker};
 

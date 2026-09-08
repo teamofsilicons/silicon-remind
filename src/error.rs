@@ -28,8 +28,8 @@ pub enum AppError {
         /// Stable, machine-readable conflict code.
         code: Cow<'static, str>,
     },
-    /// The authenticated Silicon has no active Hook delivery destination.
-    #[error("the Silicon must configure its webhook before creating reminders")]
+    /// A legacy single-subscription endpoint has no active receiver.
+    #[error("no active webhook subscription is configured")]
     WebhookNotConfigured,
     /// Caller exceeded a request or abuse-control limit.
     #[error("rate limit exceeded")]
@@ -154,7 +154,7 @@ impl AppError {
                 "Configure the test-only IAM Application secret first: remind --test <test_id> configure-iam. Production credentials are never used."
             }
             Self::Conflict { .. } => "The request conflicts with the current resource state.",
-            Self::WebhookNotConfigured => "Set the webhook url first.",
+            Self::WebhookNotConfigured => "No active webhook subscription is configured.",
             Self::RateLimited { .. } => "Too many requests. Retry later.",
             Self::Timeout => "The request exceeded its processing deadline.",
             Self::PayloadTooLarge => "The request body exceeds the allowed size.",
@@ -296,7 +296,10 @@ mod tests {
         let body = response.into_body().collect().await?.to_bytes();
         let value: Value = serde_json::from_slice(&body)?;
         assert_eq!(value["error"]["code"], "webhook_not_configured");
-        assert_eq!(value["error"]["message"], "Set the webhook url first.");
+        assert_eq!(
+            value["error"]["message"],
+            "No active webhook subscription is configured."
+        );
         Ok(())
     }
 

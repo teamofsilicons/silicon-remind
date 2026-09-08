@@ -10,7 +10,7 @@ reminders.
 - [Rust client guide](client/README.md)
 - [CLI guide and command reference](cli/README.md)
 - [IAM application integration](iam.md)
-- [Hook delivery, signatures and receipt semantics](hook-delivery.md)
+- [webhook delivery, signatures and receipt semantics](webhook-delivery.md)
 - [Internal service API](internal-api.md)
 - [Testing environments](testing-environments.md)
 - [Production deployment and releases](deployment.md)

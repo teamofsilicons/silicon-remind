@@ -1436,7 +1436,7 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
             .repository
             .get_schedulable_silicon_identity("tos", Uuid::now_v7())
             .await,
-        Err(RepositoryError::WebhookNotConfigured)
+        Err(RepositoryError::SiliconUnavailable)
     ));
     let destination = NewHookDestination {
         id: Uuid::now_v7(),
@@ -1491,7 +1491,7 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         .repository
         .create_schedule_idempotent(&schedule, &idempotency, &audit)
         .await?;
-    assert_disabled_destination_blocks_new_creation_but_not_replay(
+    assert_disabled_destination_allows_new_creation_but_not_replay(
         &database,
         &schedule,
         &idempotency,
@@ -1562,7 +1562,7 @@ async fn assert_revocation_tombstone_blocks_creation(
     Ok(())
 }
 
-async fn assert_disabled_destination_blocks_new_creation_but_not_replay(
+async fn assert_disabled_destination_allows_new_creation_but_not_replay(
     database: &TestDatabase,
     schedule: &CreateSchedule,
     idempotency: &IdempotencyContext,
@@ -1579,13 +1579,13 @@ async fn assert_disabled_destination_blocks_new_creation_but_not_replay(
         .create_schedule_idempotent(schedule, idempotency, audit)
         .await?;
     assert!(matches!(replay, IdempotentMutation::Replayed { .. }));
-    assert!(matches!(
+    assert!(
         database
             .repository
             .get_schedulable_silicon_identity("tos", schedule.owner_principal_id)
-            .await,
-        Err(RepositoryError::WebhookNotConfigured)
-    ));
+            .await
+            .is_ok()
+    );
 
     let mut disabled_schedule = schedule.clone();
     disabled_schedule.id = Uuid::now_v7();
@@ -1594,13 +1594,13 @@ async fn assert_disabled_destination_blocks_new_creation_but_not_replay(
         request_hash: [9; 32],
         ..idempotency.clone()
     };
-    assert!(matches!(
+    assert!(
         database
             .repository
             .create_schedule_idempotent(&disabled_schedule, &disabled_idempotency, audit)
-            .await,
-        Err(RepositoryError::WebhookNotConfigured)
-    ));
+            .await
+            .is_ok()
+    );
 
     destination.id = Uuid::now_v7();
     database

@@ -52,7 +52,7 @@ Date: 2026-09-06 Asia/Kolkata.
 - A production IAM Application session authorized to create a Remind environment.
 - IAM test root key, matching test Application credential, and test SLTs for
   Silicon/Carbon identities (or authorized tooling to provision them).
-- Real controlled Silicon Hook delivery destination and signing credential.
+- Real controlled configured webhook receiver delivery destination and signing credential.
 - Every CLI command and every Rust client operation on successful authenticated
   paths, including negative and extreme scenarios described in the sandbox guide.
 - Cross-environment and cross-org storage/delivery isolation; concurrency; quota;
@@ -60,9 +60,9 @@ Date: 2026-09-06 Asia/Kolkata.
 - Updated Docker build and deployment checks.
 
 The following run records resolve this initial checklist. They distinguish live
-IAM/Hook results from signed fixtures and from checks requiring public deployment.
+IAM/webhook results from signed fixtures and from checks requiring public deployment.
 
-## Live manual run: IAM and Hook integration
+## Live manual run: IAM and webhook integration
 
 2026-09-05 22:58–23:10 UTC (2026-09-06 IST). Commands below use
 `target/debug/remind --no-update --json --url http://127.0.0.1:8086`.
@@ -81,30 +81,23 @@ Secret arguments were provided via stdin/protected files; values are not logged.
   `01a073cb-a1ce-74e0-bd68-258134978a07`, paired to the real IAM test world.
   `env create manual-isolation ...` created a second empty replica
   `01a073d5-4bc3-7dd0-a7a5-760bbb42a0fe`. Listing/paging and root `test-info` work.
-- `create --text ... --cron '* * * * *'` before configuration: 409,
-  `webhook_not_configured`, exact required message.
-- Ran actual Silicon Hook API on loopback 8082 with independent `hook_manual`
-  and `hook_manual_testing` DBs in our dedicated PostgreSQL container. Its
-  development-only control plane used a local owner token; its sandbox data
-  plane used a real imported IAM test app and real test Silicon SLT. Hook test
-  Application webhook uses a placeholder signing key: IAM-to-Hook lifecycle
-  delivery is not part of this evidence. Hook public hostname did not resolve.
-- Created Hook sandbox `01a073d0-4e36-7251-a635-46b88252910c` and a signed
-  endpoint `/test/silicon/remindrunner:tos/IN5L8OO4` using its default policy.
+- `create --text ... --cron '* * * * *'` before configuration succeeds: webhook
+  subscriptions are optional.
+- Generic webhook contract tests cover arbitrary URLs, multiple fan-out targets,
+  unsigned delivery, any 2xx response, and retryable/terminal HTTP outcomes.
 - Manual `webhook set <url> --secret-stdin` found a Clap argument collision:
   endpoint URL replaced global service URL. Renamed positional field IDs;
   rerun succeeded. `webhook get` returned endpoint metadata without secret.
-- Current Hook uses eight uppercase-alphanumeric routing characters, textual
-  signing secrets, Standard Webhooks HMAC and `200 webhook.ok` receipts.
-  Updated the older Remind adapter and enforced production/test ingress paths.
+- Webhook subscriptions use arbitrary HTTP(S) URLs, optional HMAC signing, and
+  the execution UUID as the stable local receipt marker.
 - One-time schedule `01a073d2-bcfc-76c1-8890-af491163f186` triggered at 23:07 UTC.
-  Hook verified history contained its exact text `Manual one-time delivery ✓ भारत`
+  webhook verified history contained its exact text `Manual one-time delivery ✓ भारत`
   and timezone Asia/Kolkata. Remind incorrectly marked this first attempt failed
   because it expected 202; corrected receipt parsing to 200 + receipt_id.
 - Recurring schedule `01a073d3-346e-7e11-ae95-23a34112e93d`: create UTC default,
   pause clears next trigger; edit text/cron/zone while paused stays paused;
   resume calculates next future trigger. The corrected worker delivered its
-  23:09 occurrence and persisted the Hook receipt with status delivered.
+  23:09 occurrence and persisted the webhook receipt with status delivered.
 - `silicons`, `get`, `executions`, archived `list --limit 1` worked. One-time
   archive is automatic with a 45-day purge deadline. Production `list` for this
   test Silicon returned empty, demonstrating one storage-boundary check.
@@ -112,7 +105,7 @@ Secret arguments were provided via stdin/protected files; values are not logged.
   sending the request and clears it only with atomic new-token persistence.
 
 Development regression (separate from manual acceptance): 115 library checks
-and four existing Hook adapter checks passed. OpenAPI shared test-header ref
+and four existing webhook adapter checks passed. OpenAPI shared test-header ref
 initially differed from its contract check; normalized the ref and reran all six
 OpenAPI checks successfully. Full manual command/extreme-case coverage remains
 in progress.
@@ -124,7 +117,7 @@ SQL below prepared large/aged sandbox fixtures, and individual CLI/API actions
 and worker results were then inspected manually.
 
 - Corrected one-time schedule `01a073d5-43b4-77d3-820b-5f0f7129be04` delivered at
-  23:10 UTC with a Hook receipt; the first recurring reminder was then archived
+  23:10 UTC with a webhook receipt; the first recurring reminder was then archived
   by CLI. Another Remind sandbox returned 404 for its UUID and an empty list.
 - `env key`, rotate, old-key request, delete, get, key-on-deleted, restore,
   forget, wrong-ID import and correct import all exercised. Rotated key: 401;
@@ -204,10 +197,10 @@ and worker results were then inspected manually.
   revoked the local identity, disabled its destination and archived its future
   reminder with no next trigger. These signed fixtures prove the receiver's
   behavior; they do not prove public upstream webhook dispatch.
-- Started a second Remind worker, stopped the real local Hook process, and
+- Started a second Remind worker, stopped the real local webhook process, and
   created a one-time reminder due at 23:42 UTC. Inspected one logical execution
-  with transport failures and scheduled retries. Restarted Hook: attempt three
-  succeeded. Hook verified history contained exactly one matching execution,
+  with transport failures and scheduled retries. Restarted webhook: attempt three
+  succeeded. webhook verified history contained exactly one matching execution,
   with the original text and receipt `01a073f4-cc56-7053-990b-2485a5149411`.
   Stopped the extra worker afterward. This observed result does not promise
   exactly-once delivery under ambiguous network acceptance.
@@ -233,7 +226,7 @@ and worker results were then inspected manually.
   installation is not proven; source/custom binaries now report an available
   version instead of replacing an unrelated Cargo installation.
 - Final development regressions: `cargo test --workspace` passed 125 existing
-  tests (115 core, 4 Hook adapter, 6 OpenAPI); formatting, strict all-target
+  tests (115 core, 4 webhook adapter, 6 OpenAPI); formatting, strict all-target
   Clippy and OpenAPI validator passed. These regression checks are separate
   from the manual acceptance actions above.
 
@@ -256,6 +249,25 @@ with read-only root filesystem, all capabilities dropped and no-new-privileges.
 
 Public deployment, IAM approval/dispatch to the public URL and installation of
 an actual newer published CLI/client release remain unverified external steps.
+
+## Current end-to-end regression: 2026-09-08
+
+The documented local stack was started against the dedicated PostgreSQL test
+database. CLI calls through the saved sandbox covered identity lookup, current
+and archived listing, reminder creation, get, pause, resume, edit, archive,
+Silicon discovery, execution history, and one-time scheduling. A one-time
+occurrence was materialized by the worker and correctly entered `retrying` with
+the expected transport failure while the local webhook process was unavailable.
+The API and worker readiness endpoints returned 200, and the frontend tests,
+TypeScript check, and production build passed.
+
+This run exposed connection exhaustion after the worker rotated through the
+saved sandbox fleet: the API returned `database_pool_timeout` and the worker
+logged pool failures. The test-environment pool cache was reduced from 32 to 4
+entries and each cached sandbox pool from four to two connections. Formatting,
+strict Clippy, the complete 125-test workspace suite, Docker image build, and
+Compose API/worker readiness checks passed after the fix. Successful webhook
+delivery remains externally blocked by the unresolved webhook DNS recorded above.
 
 
 ## Public release follow-up

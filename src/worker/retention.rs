@@ -20,7 +20,7 @@ pub struct RetentionResult {
     pub deleted_reminders_trimmed: u64,
     /// Expired idempotency replay records removed.
     pub idempotency_records: u64,
-    /// Disabled encrypted Hook destinations removed.
+    /// Disabled encrypted webhook destinations removed.
     pub hook_destinations: u64,
     /// Active destinations migrated to the current encryption key.
     pub destinations_rewrapped: u64,

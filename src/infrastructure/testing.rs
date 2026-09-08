@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static CONTROL_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./testing/migrations");
+const MAX_CACHED_TEST_POOLS: usize = 4;
 
 /// Metadata visible to an environment's owning organization. Credentials are separate.
 #[derive(Clone, Debug, Serialize, FromRow)]
@@ -552,15 +553,18 @@ impl TestEnvironments {
         if let Some(pool) = pools.get(&id) {
             return Ok(pool.clone());
         }
-        // Bounded cache; dropping the last pool handle closes idle connections.
-        if pools.len() >= 32
+        // Keep the cache small because every cached pool can open several
+        // PostgreSQL connections. A large environment fleet must not be able
+        // to consume the shared database's entire connection budget merely by
+        // waiting for the worker to visit each sandbox once.
+        if pools.len() >= MAX_CACHED_TEST_POOLS
             && let Some(oldest) = pools.keys().min().copied()
         {
             pools.remove(&oldest);
         }
         let options: PgConnectOptions = self.database.url.expose_secret().parse()?;
         let path = schema(id);
-        let pool = PgPoolOptions::new().max_connections(4).min_connections(0)
+        let pool = PgPoolOptions::new().max_connections(2).min_connections(0)
             .acquire_timeout(self.database.acquire_timeout).idle_timeout(Duration::from_secs(30))
             .after_connect(move |connection, _| {
                 let path = path.clone();

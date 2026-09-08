@@ -1,7 +1,7 @@
 # remind CLI
 
 `remind` is built entirely on `silicon-remind-client`. It stores preferences,
-application sessions, refresh tokens, and test keys under `~/.remind/`. On Unix,
+application sessions, refresh tokens, and test keys under `{home}/.remind/` (default `{home}` is `~`). On Unix,
 the directory is mode 0700 and state files are mode 0600. A process lock serializes
 state mutations and refreshes; saves use an atomic rename. State is separated by
 server origin and test-environment UUID so switching servers or sandboxes never
@@ -20,15 +20,16 @@ The default origin is `https://backend.remind.teamofsilicons.com`. For local wor
 ```sh
 remind config set-url http://127.0.0.1:8086
 remind --no-update health --ready
-remind auth login --org tos
+remind login <slt> --org tos
 ```
 
 Login securely prompts for the short-lived token supplied by IAM. It does not
 start an OTP ceremony or redirect a browser. For an agent/noninteractive shell:
 
 ```sh
-remind auth login --org tos --slt-stdin < /secure/path/slt.txt
+remind login <slt> --org tos --slt-stdin < /secure/path/slt.txt
 remind auth whoami
+remind config home /secure/remind-state
 ```
 
 The SLT must be for `tos>remind` and bound to the desired organization. A successful
@@ -40,7 +41,7 @@ and then removes local credentials.
 ## Ordinary reminder workflow
 
 ```sh
-remind webhook set 'https://hook-service/api/v1/your-issued-endpoint'
+remind webhook subscribe 'https://example.com/reminders'
 remind create --text 'Review the build' --cron '*/15 * * * *'
 remind list
 remind get <reminder-id>
@@ -52,9 +53,14 @@ remind archive <reminder-id>
 remind list --archived
 ```
 
-Use the actual URL and signing credential issued by Silicon Hook. `webhook set`
-prompts securely for the signing secret; use `--secret-stdin` to supply a protected
-file through stdin. `webhook get` never reveals the secret.
+Use any absolute HTTP(S) URL. `webhook subscribe` prompts securely for an optional
+signing secret; use `--secret-stdin` to supply a protected file through stdin, or
+`--unsigned` when the receiver does not require signatures. `webhook get` never
+reveals the secret.
+
+Subscriptions are optional and can be managed independently with `webhook
+subscribe`, `webhook list`, and `webhook unsubscribe`. A reminder may be created
+before any receiver is configured.
 
 For a one-time reminder, add `--kind one-time`. It fires at the first future cron
 match and enters the archive automatically. For a local wall-clock schedule, use
@@ -69,6 +75,7 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 | Command | Purpose / useful options |
 | --- | --- |
 | `auth login` | Secure SLT prompt; `--org`, `--slt-stdin` |
+| `login <slt>` | Direct IAM SLT login; `--org` may select the organization |
 | `auth whoami` | Live IAM identity and permissions |
 | `auth refresh` | Rotate current refresh token |
 | `auth logout` | Revoke and forget this session |
@@ -81,9 +88,13 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 | `archive <id>` | Move an owned reminder to the archive |
 | `executions <id>` | `--cursor`, `--limit`; inspect deliveries/failures |
 | `silicons` | `--after <uuid>`, `--limit`; registered org Silicons |
-| `webhook set <url>` | Secure secret prompt or `--secret-stdin` |
+| `webhook subscribe <url>` | Secure secret prompt, `--secret-stdin`, or `--unsigned` |
 | `webhook get` | Read endpoint metadata |
 | `webhook disable` | Disable the current Silicon's endpoint |
+| `webhook subscribe <url>` | Add another webhook subscription |
+| `webhook list` | List all active subscriptions |
+| `webhook unsubscribe <id>` | Disable one subscription |
+| `config home <directory>` | Set the local state parent directory; it must already exist |
 | `env create <name>` | `--description`, `--iam-key-file`, `--iam-app-secret-file` |
 | `env list` | `--include-deleted`, `--after <uuid>`, `--limit` |
 | `env get <id>` | Environment metadata and deadlines |

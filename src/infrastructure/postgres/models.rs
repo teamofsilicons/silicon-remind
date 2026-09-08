@@ -240,10 +240,10 @@ pub struct ListSchedules {
     pub limit: u32,
 }
 
-/// Stored occurrence and Hook-delivery state.
+/// Stored occurrence and webhook-delivery state.
 #[derive(Clone, Debug, FromRow)]
 pub struct ExecutionRow {
-    /// Stable occurrence and Hook idempotency UUID.
+    /// Stable occurrence and webhook idempotency UUID.
     pub id: Uuid,
     /// Parent schedule UUID.
     pub schedule_id: Uuid,
@@ -269,9 +269,9 @@ pub struct ExecutionRow {
     pub next_attempt_at: Option<DateTime<Utc>>,
     /// Most recent attempt start.
     pub attempted_at: Option<DateTime<Utc>>,
-    /// Hook acceptance time.
+    /// webhook acceptance time.
     pub delivered_at: Option<DateTime<Utc>>,
-    /// Stable Hook event UUID returned after acceptance.
+    /// Stable webhook event UUID returned after acceptance.
     pub hook_event_id: Option<Uuid>,
     /// Bounded, sanitized delivery failure detail.
     pub failure_reason: Option<String>,
@@ -304,7 +304,7 @@ pub struct DueMaterialization {
     pub inserted: bool,
 }
 
-/// Encrypted per-Silicon Hook routing and signing material.
+/// Encrypted per-configured webhook receiver routing and signing material.
 #[derive(Clone, Debug, FromRow)]
 pub struct HookDestinationRow {
     /// Registry row UUID.
@@ -313,7 +313,7 @@ pub struct HookDestinationRow {
     pub org_id: String,
     /// Stable IAM UUID of the destination Silicon principal.
     pub owner_principal_id: Uuid,
-    /// Public global identifier used by Hook routing.
+    /// Public global identifier used by webhook routing.
     pub silicon_id: String,
     /// AES-GCM ciphertext containing the endpoint URL.
     pub endpoint_url_ciphertext: Vec<u8>,
@@ -346,7 +346,7 @@ pub struct NewHookDestination {
     pub org_id: String,
     /// Stable IAM UUID of the destination Silicon principal.
     pub owner_principal_id: Uuid,
-    /// Public global identifier used by Hook routing.
+    /// Public global identifier used by webhook routing.
     pub silicon_id: String,
     /// Encrypted URL bytes.
     pub endpoint_url_ciphertext: Vec<u8>,
@@ -360,7 +360,7 @@ pub struct NewHookDestination {
     pub encryption_key_version: i16,
 }
 
-/// Optimistically applied re-encryption of one active Hook destination.
+/// Optimistically applied re-encryption of one active webhook destination.
 #[derive(Clone, Debug)]
 pub struct HookDestinationRewrap {
     /// Registry row UUID.
@@ -379,7 +379,7 @@ pub struct HookDestinationRewrap {
     pub encryption_key_version: i16,
 }
 
-/// Active IAM principal-to-public-Silicon binding used for ownership and Hook
+/// Active IAM principal-to-public-Silicon binding used for ownership and webhook
 /// routing. Revoked bindings are intentionally not returned by public lookup.
 #[derive(Clone, Debug, FromRow)]
 pub struct SiliconIdentityRow {
@@ -473,7 +473,7 @@ pub struct RevokedResourceCleanup {
     pub schedules_deleted: u64,
     /// Unaccepted executions moved to terminal failure.
     pub executions_failed: u64,
-    /// Hook destinations placed into disabled retention.
+    /// webhook destinations placed into disabled retention.
     pub destinations_disabled: u64,
 }
 

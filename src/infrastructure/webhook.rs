@@ -1,4 +1,4 @@
-//! Signed Silicon Hook delivery adapter.
+//! Generic signed webhook delivery adapter.
 
 use std::time::Duration;
 
@@ -8,37 +8,35 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac as _};
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use secrecy::{ExposeSecret as _, SecretString};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::Sha256;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-use crate::domain::is_valid_global_silicon_id;
-
-/// Resolved Hook endpoint and its write-only signing credential.
+/// Resolved webhook endpoint and its write-only optional signing credential.
 #[derive(Clone)]
-pub struct HookDestination {
-    /// Exact endpoint URL issued by Silicon Hook.
+pub struct WebhookDestination {
+    /// Exact endpoint URL configured by the Silicon owner.
     pub endpoint_url: Url,
-    /// Per-endpoint HMAC signing secret.
+    /// Optional per-endpoint HMAC signing secret.
     pub signing_secret: SecretString,
 }
 
-impl std::fmt::Debug for HookDestination {
+impl std::fmt::Debug for WebhookDestination {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("HookDestination")
+            .debug_struct("WebhookDestination")
             .field("endpoint_url", &self.endpoint_url)
             .field("signing_secret", &"[REDACTED]")
             .finish()
     }
 }
 
-/// Immutable occurrence snapshot delivered to Silicon Hook.
+/// Immutable occurrence snapshot delivered to the configured webhook.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReminderEvent {
-    /// Stable occurrence and Hook idempotency identifier.
+    /// Stable occurrence and webhook idempotency identifier.
     pub execution_id: Uuid,
     /// Owning schedule identifier.
     pub schedule_id: Uuid,
@@ -52,31 +50,31 @@ pub struct ReminderEvent {
     pub timezone: String,
 }
 
-/// Durable ingress receipt from Silicon Hook (not downstream acknowledgment).
+/// Local delivery receipt marker. Generic webhooks do not have to return IDs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HookReceipt {
-    /// Hook's receipt identifier; ingress does not reveal signature verification.
+pub struct WebhookReceipt {
+    /// Remind's stable occurrence ID used as the local receipt marker.
     pub event_id: Uuid,
 }
 
 /// Failure category used by the durable retry policy.
 #[derive(Debug, Error)]
-pub enum HookDeliveryError {
+pub enum WebhookDeliveryError {
     /// A transient or ambiguous outcome that is safe to retry idempotently.
-    #[error("Hook delivery can be retried: {reason}")]
+    #[error("Webhook delivery can be retried: {reason}")]
     Retryable {
         /// Sanitized, bounded operational reason.
         reason: String,
     },
     /// A definitive request rejection that should not be retried.
-    #[error("Hook delivery was rejected: {reason}")]
+    #[error("Webhook delivery was rejected: {reason}")]
     Terminal {
         /// Sanitized, bounded operational reason.
         reason: String,
     },
 }
 
-impl HookDeliveryError {
+impl WebhookDeliveryError {
     /// Whether retrying the same execution identifier can make progress.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
@@ -92,15 +90,15 @@ impl HookDeliveryError {
     }
 }
 
-/// Bounded, redirect-free HTTP client for Silicon Hook.
+/// Bounded, redirect-free HTTP client for arbitrary webhook destinations.
 #[derive(Clone, Debug)]
-pub struct HookClient {
+pub struct WebhookClient {
     client: reqwest::Client,
     max_response_bytes: usize,
 }
 
-impl HookClient {
-    /// Builds a hardened Hook client.
+impl WebhookClient {
+    /// Builds a bounded, redirect-free webhook client.
     ///
     /// # Errors
     ///
@@ -123,31 +121,31 @@ impl HookClient {
         })
     }
 
-    /// Sends one signed event and waits for Hook's durable ingress receipt.
+    /// Sends one event and treats any successful HTTP response as acceptance.
     ///
     /// # Errors
     ///
     /// Returns a classified delivery error for transport, protocol, or HTTP
     /// failures. Ambiguous outcomes are retried with the same execution UUID.
-    /// Hook can retain duplicates; recipients deduplicate by execution UUID.
+    /// Recipients should deduplicate by the stable execution UUID.
     pub async fn deliver(
         &self,
-        destination: &HookDestination,
+        destination: &WebhookDestination,
         event: &ReminderEvent,
         now: DateTime<Utc>,
-    ) -> Result<HookReceipt, HookDeliveryError> {
+    ) -> Result<WebhookReceipt, WebhookDeliveryError> {
         let envelope = EventEnvelope::new(event);
-        let body = serde_json::to_vec(&envelope).map_err(|error| HookDeliveryError::Terminal {
-            reason: bounded_reason(format!("event serialization failed: {error}")),
-        })?;
+        let body =
+            serde_json::to_vec(&envelope).map_err(|error| WebhookDeliveryError::Terminal {
+                reason: bounded_reason(format!("event serialization failed: {error}")),
+            })?;
         let timestamp = now.timestamp().to_string();
-        let signature = signature(
-            &destination.signing_secret,
+        let headers = request_headers(
             event.execution_id,
             &timestamp,
             &body,
+            &destination.signing_secret,
         )?;
-        let headers = request_headers(event.execution_id, &timestamp, &signature)?;
 
         let response = self
             .client
@@ -156,36 +154,23 @@ impl HookClient {
             .body(body)
             .send()
             .await
-            .map_err(|error| HookDeliveryError::Retryable {
+            .map_err(|error| WebhookDeliveryError::Retryable {
                 reason: bounded_reason(format!("transport failure: {error}")),
             })?;
         let status = response.status();
-        let response_body = read_bounded(response, self.max_response_bytes).await?;
+        let _response_body = read_bounded(response, self.max_response_bytes).await?;
 
-        if status == StatusCode::OK {
-            let acceptance: Acceptance =
-                serde_json::from_slice(&response_body).map_err(|error| {
-                    HookDeliveryError::Retryable {
-                        reason: bounded_reason(format!(
-                            "Hook returned malformed acceptance: {error}"
-                        )),
-                    }
-                })?;
-            if acceptance.status != "webhook.ok" {
-                return Err(HookDeliveryError::Retryable {
-                    reason: bounded_reason("Hook returned an unexpected acceptance status"),
-                });
-            }
-            return Ok(HookReceipt {
-                event_id: acceptance.receipt_id,
+        if status.is_success() {
+            return Ok(WebhookReceipt {
+                event_id: event.execution_id,
             });
         }
 
-        let reason = bounded_reason(format!("Hook returned HTTP {}", status.as_u16()));
+        let reason = bounded_reason(format!("Webhook returned HTTP {}", status.as_u16()));
         if is_retryable_status(status) {
-            Err(HookDeliveryError::Retryable { reason })
+            Err(WebhookDeliveryError::Retryable { reason })
         } else {
-            Err(HookDeliveryError::Terminal { reason })
+            Err(WebhookDeliveryError::Terminal { reason })
         }
     }
 }
@@ -231,12 +216,6 @@ struct EventPayload<'a> {
     timezone: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
-struct Acceptance {
-    receipt_id: Uuid,
-    status: String,
-}
-
 type HmacSha256 = Hmac<Sha256>;
 
 fn signature(
@@ -244,16 +223,16 @@ fn signature(
     execution_id: Uuid,
     timestamp: &str,
     body: &[u8],
-) -> Result<String, HookDeliveryError> {
+) -> Result<String, WebhookDeliveryError> {
     if !signing_secret_is_valid(signing_secret) {
-        return Err(HookDeliveryError::Terminal {
-            reason: bounded_reason("Hook signing credential is invalid"),
+        return Err(WebhookDeliveryError::Terminal {
+            reason: bounded_reason("webhook signing credential is invalid"),
         });
     }
     let mut mac =
         HmacSha256::new_from_slice(signing_secret.expose_secret().as_bytes()).map_err(|_| {
-            HookDeliveryError::Terminal {
-                reason: bounded_reason("Hook signing credential is invalid"),
+            WebhookDeliveryError::Terminal {
+                reason: bounded_reason("webhook signing credential is invalid"),
             }
         })?;
     mac.update(execution_id.to_string().as_bytes());
@@ -272,55 +251,21 @@ pub(crate) fn signing_secret_is_valid(secret: &SecretString) -> bool {
     !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
 }
 
-pub(crate) fn destination_url_is_allowed(
-    destination: &Url,
-    base: &Url,
-    expected_silicon_id: &str,
-    testing: bool,
-) -> bool {
-    if destination.scheme() != base.scheme()
-        || destination.host_str() != base.host_str()
-        || destination.port_or_known_default() != base.port_or_known_default()
-        || !destination.username().is_empty()
-        || destination.password().is_some()
-        || destination.query().is_some()
-        || destination.fragment().is_some()
-    {
-        return false;
-    }
-
-    let Some(mut segments) = destination.path_segments().map(Iterator::collect::<Vec<_>>) else {
-        return false;
-    };
-    if segments.last() == Some(&"") {
-        segments.pop();
-    }
-    let route = match (testing, segments.as_slice()) {
-        (
-            false,
-            ["silicon", silicon_id, endpoint_key]
-            | ["api", "v1", "silicon", silicon_id, endpoint_key],
-        )
-        | (true, ["test", "silicon", silicon_id, endpoint_key]) => {
-            Some((*silicon_id, *endpoint_key))
-        }
-        _ => None,
-    };
-    route.is_some_and(|(silicon_id, endpoint_key)| {
-        silicon_id == expected_silicon_id
-            && is_valid_global_silicon_id(silicon_id)
-            && endpoint_key.len() == 8
-            && endpoint_key
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
-    })
+pub(crate) fn destination_url_is_allowed(destination: &Url, production: bool) -> bool {
+    matches!(destination.scheme(), "https" | "http")
+        && (!production || destination.scheme() == "https")
+        && destination.host_str().is_some()
+        && destination.username().is_empty()
+        && destination.password().is_none()
+        && destination.fragment().is_none()
 }
 
 fn request_headers(
     execution_id: Uuid,
     timestamp: &str,
-    signature: &str,
-) -> Result<HeaderMap, HookDeliveryError> {
+    body: &[u8],
+    signing_secret: &SecretString,
+) -> Result<HeaderMap, WebhookDeliveryError> {
     let mut headers = HeaderMap::with_capacity(4);
     headers.insert(
         header::CONTENT_TYPE,
@@ -328,8 +273,11 @@ fn request_headers(
     );
     insert_header(&mut headers, "idempotency-key", &execution_id.to_string())?;
     insert_header(&mut headers, "webhook-id", &execution_id.to_string())?;
-    insert_header(&mut headers, "webhook-timestamp", timestamp)?;
-    insert_header(&mut headers, "webhook-signature", signature)?;
+    if !signing_secret.expose_secret().is_empty() {
+        let signature = signature(signing_secret, execution_id, timestamp, body)?;
+        insert_header(&mut headers, "webhook-timestamp", timestamp)?;
+        insert_header(&mut headers, "webhook-signature", &signature)?;
+    }
     Ok(headers)
 }
 
@@ -337,9 +285,9 @@ fn insert_header(
     headers: &mut HeaderMap,
     name: &'static str,
     value: &str,
-) -> Result<(), HookDeliveryError> {
-    let value = HeaderValue::from_str(value).map_err(|_| HookDeliveryError::Terminal {
-        reason: bounded_reason("Hook request metadata is invalid"),
+) -> Result<(), WebhookDeliveryError> {
+    let value = HeaderValue::from_str(value).map_err(|_| WebhookDeliveryError::Terminal {
+        reason: bounded_reason("webhook request metadata is invalid"),
     })?;
     headers.insert(name, value);
     Ok(())
@@ -348,13 +296,13 @@ fn insert_header(
 async fn read_bounded(
     mut response: reqwest::Response,
     maximum: usize,
-) -> Result<Vec<u8>, HookDeliveryError> {
+) -> Result<Vec<u8>, WebhookDeliveryError> {
     if response
         .content_length()
         .is_some_and(|length| length > maximum as u64)
     {
-        return Err(HookDeliveryError::Retryable {
-            reason: bounded_reason("Hook response exceeded the configured size limit"),
+        return Err(WebhookDeliveryError::Retryable {
+            reason: bounded_reason("webhook response exceeded the configured size limit"),
         });
     }
 
@@ -363,13 +311,13 @@ async fn read_bounded(
         response
             .chunk()
             .await
-            .map_err(|error| HookDeliveryError::Retryable {
-                reason: bounded_reason(format!("failed reading Hook response: {error}")),
+            .map_err(|error| WebhookDeliveryError::Retryable {
+                reason: bounded_reason(format!("failed reading webhook response: {error}")),
             })?
     {
         if body.len().saturating_add(chunk.len()) > maximum {
-            return Err(HookDeliveryError::Retryable {
-                reason: bounded_reason("Hook response exceeded the configured size limit"),
+            return Err(WebhookDeliveryError::Retryable {
+                reason: bounded_reason("webhook response exceeded the configured size limit"),
             });
         }
         body.extend_from_slice(&chunk);
@@ -447,39 +395,28 @@ mod tests {
     }
 
     #[test]
-    fn destination_accepts_only_normative_routes_for_the_expected_silicon() -> anyhow::Result<()> {
-        let base = Url::parse("https://hook.teamofsilicons.com/api/v1")?;
+    fn destination_accepts_arbitrary_webhook_urls() -> anyhow::Result<()> {
         for path in [
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z",
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z/",
-            "https://hook.teamofsilicons.com/api/v1/silicon/cos:tos/40AE2F9Z",
+            "https://hooks.example.test/custom/path?tenant=one",
+            "http://localhost:8787/anything",
         ] {
-            assert!(destination_url_is_allowed(
-                &Url::parse(path)?,
-                &base,
-                "cos:tos",
-                false
-            ));
+            assert!(destination_url_is_allowed(&Url::parse(path)?, false));
         }
-        for path in [
-            "https://evil.example/silicon/cos:tos/40AE2F9Z",
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40ae2f9z",
-            "https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z/extra",
-            "https://hook.teamofsilicons.com/silicon/not-global/40AE2F9Z",
-        ] {
-            assert!(!destination_url_is_allowed(
-                &Url::parse(path)?,
-                &base,
-                "cos:tos",
-                false
-            ));
-        }
-        assert!(!destination_url_is_allowed(
-            &Url::parse("https://hook.teamofsilicons.com/silicon/cos:tos/40AE2F9Z")?,
-            &base,
-            "other:tos",
-            false
+        assert!(destination_url_is_allowed(
+            &Url::parse("https://hooks.example.test/custom")?,
+            true
         ));
+        assert!(!destination_url_is_allowed(
+            &Url::parse("http://hooks.example.test/custom")?,
+            true
+        ));
+        for path in [
+            "ftp://hooks.example.test/custom",
+            "https://user:pass@hooks.example.test/custom",
+            "https://hooks.example.test/custom#fragment",
+        ] {
+            assert!(!destination_url_is_allowed(&Url::parse(path)?, false));
+        }
         Ok(())
     }
 

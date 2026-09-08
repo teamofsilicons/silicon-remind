@@ -91,11 +91,11 @@ pub struct ExecutionResponse {
     pub scheduled_for: DateTime<Utc>,
     /// Most recent attempt time.
     pub attempted_at: Option<DateTime<Utc>>,
-    /// Hook ingress receipt time; not downstream acknowledgment.
+    /// webhook ingress receipt time; not downstream acknowledgment.
     pub delivered_at: Option<DateTime<Utc>>,
     /// Delivery lifecycle status.
     pub status: ExecutionStatus,
-    /// Historical name for the Hook ingress receipt UUID.
+    /// Historical name for the webhook ingress receipt UUID.
     pub hook_event_id: Option<Uuid>,
     /// Sanitized terminal/transient failure reason.
     pub failure_reason: Option<String>,
@@ -174,15 +174,17 @@ pub struct Identity {
     pub authorization_epoch: u64,
     pub can_manage_reminders: bool,
 }
-/// Signed Silicon Hook delivery destination, configured by its owner.
+/// Outbound webhook destination, configured by its owner.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Destination {
     pub endpoint_url: String,
-    pub signing_secret: Secret,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_secret: Option<Secret>,
 }
 /// Public destination receipt; signing credentials are never returned.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DestinationReceipt {
+    pub id: Uuid,
     pub silicon_id: String,
     pub version: i64,
     pub updated_at: DateTime<Utc>,
@@ -190,10 +192,16 @@ pub struct DestinationReceipt {
 /// Readable destination with its write-only credential omitted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DestinationInfo {
+    pub id: Uuid,
     pub silicon_id: String,
     pub endpoint_url: String,
     pub version: i64,
     pub updated_at: DateTime<Utc>,
+}
+/// Active webhook subscriptions for the authenticated Silicon.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebhookSubscriptions {
+    pub items: Vec<DestinationInfo>,
 }
 /// One Silicon registered with Remind.
 #[derive(Clone, Debug, Serialize, Deserialize)]

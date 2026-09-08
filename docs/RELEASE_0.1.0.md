@@ -17,8 +17,8 @@ fixture precision correction. Runtime code is unchanged by that test-only fix.
 - Production Carbon `saket` logged in through real IAM with owner/read permissions.
 - Created public sandbox `01a0741b-559b-7bd1-a700-f6747113fd8f`, bound to the existing
   IAM test world. Test Silicon `remindrunner:tos` logged in successfully; sandbox
-  metadata is accessible; create without a destination returned required 409
-  `Set the webhook url first.` No production reminders were created by these checks.
+  metadata is accessible. Webhook subscriptions are optional, so reminders can
+  be created before a receiver is configured.
 - Unsigned public `/webhook/` request is rejected 401. Internal routes and metrics
   are not forwarded by the public load balancer and return 404.
 - Original remote CI found four timestamp equality fixtures assuming nanosecond

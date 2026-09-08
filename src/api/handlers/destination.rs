@@ -19,11 +19,12 @@ use serde::Deserialize;
 use url::Url;
 use uuid::Uuid;
 
-/// Delivery endpoint and its write-only Silicon Hook credential.
+/// Delivery endpoint and its write-only configured webhook receiver credential.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DestinationRequest {
     endpoint_url: Url,
+    #[serde(default)]
     signing_secret: SecretString,
 }
 
@@ -31,7 +32,7 @@ pub struct DestinationRequest {
 ///
 /// # Errors
 ///
-/// Returns forbidden for Carbons, validation for invalid Hook endpoints, or encrypted-storage failures.
+/// Returns forbidden for Carbons, validation for invalid webhook endpoints, or encrypted-storage failures.
 pub async fn set(
     ScopedState(state): ScopedState,
     Extension(actor): Extension<Actor>,
@@ -47,6 +48,22 @@ pub async fn set(
         signing_secret: input.signing_secret,
     };
     super::internal::save_destination(&state, request, &audit(&actor)).await
+}
+
+/// Adds one webhook subscription for the caller's Silicon.
+///
+/// Unlike the legacy `PUT /webhook` endpoint, each call creates an independent
+/// subscription. A Silicon may have zero, one, or many active receivers.
+///
+/// # Errors
+///
+/// Returns validation, authorization, encryption, or persistence errors.
+pub async fn subscribe(
+    ScopedState(state): ScopedState,
+    Extension(actor): Extension<Actor>,
+    body: Result<Json<DestinationRequest>, rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<models::HookDestinationResponse>), AppError> {
+    set(ScopedState(state), Extension(actor), body).await
 }
 
 /// Reads the configured endpoint without revealing its signing credential.
@@ -77,8 +94,71 @@ pub async fn get(
         )
         .map_err(|e| AppError::internal("destination_decryption", e))?;
     Ok(Json(
-        serde_json::json!({"silicon_id":silicon_id,"endpoint_url":endpoint.expose_secret(),"version":row.version,"updated_at":row.updated_at}),
+        serde_json::json!({"id":row.id,"silicon_id":silicon_id,"endpoint_url":endpoint.expose_secret(),"version":row.version,"updated_at":row.updated_at}),
     ))
+}
+
+/// Lists every active webhook subscription for the caller's Silicon.
+///
+/// # Errors
+///
+/// Returns authorization, decryption, or persistence errors.
+pub async fn list(
+    ScopedState(state): ScopedState,
+    Extension(actor): Extension<Actor>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let silicon_id = silicon(&actor)?;
+    let rows = state
+        .repository
+        .list_hook_destinations(&actor.org_id, silicon_id)
+        .await?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let aad = destination_field_associated_data(&actor.org_id, silicon_id, "endpoint_url");
+        let endpoint = state
+            .encryption
+            .decrypt(
+                &EncryptedSecret {
+                    key_version: row.encryption_key_version,
+                    nonce: row.endpoint_url_nonce,
+                    ciphertext: row.endpoint_url_ciphertext,
+                },
+                &aad,
+            )
+            .map_err(|e| AppError::internal("destination_decryption", e))?;
+        items.push(models::WebhookSubscriptionResponse {
+            id: row.id,
+            silicon_id: row.silicon_id,
+            endpoint_url: endpoint.expose_secret().to_owned(),
+            version: row.version,
+            updated_at: row.updated_at,
+        });
+    }
+    Ok(Json(serde_json::json!({"items": items})))
+}
+
+/// Disables one webhook subscription without disclosing its credential.
+///
+/// # Errors
+///
+/// Returns validation, authorization, not-found, or persistence errors.
+pub async fn unsubscribe(
+    ScopedState(state): ScopedState,
+    Extension(actor): Extension<Actor>,
+    path: Result<axum::extract::Path<Uuid>, rejection::PathRejection>,
+) -> Result<StatusCode, AppError> {
+    let axum::extract::Path(subscription_id) = path.map_err(|_| AppError::Validation)?;
+    state
+        .repository
+        .disable_hook_destination_by_id(
+            &actor.org_id,
+            silicon(&actor)?,
+            subscription_id,
+            chrono::Utc::now(),
+            &audit(&actor),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Disables the caller's destination until explicitly configured again.

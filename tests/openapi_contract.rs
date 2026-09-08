@@ -159,6 +159,13 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
         ("get", "/webhook", "getWebhook"),
         ("put", "/webhook", "configureWebhook"),
         ("delete", "/webhook", "disableWebhook"),
+        ("get", "/webhooks", "listWebhooks"),
+        ("post", "/webhooks", "subscribeWebhook"),
+        (
+            "delete",
+            "/webhooks/{subscription_id}",
+            "unsubscribeWebhook",
+        ),
         ("get", "/silicons", "listSilicons"),
         ("get", "/test-environments", "listTestEnvironments"),
         ("post", "/test-environments", "createTestEnvironment"),
@@ -698,19 +705,6 @@ fn core_execution_error_and_pagination_schemas_are_stable() -> Result<()> {
                 .pointer("/components/schemas/Error/properties/error/properties/request_id/type",)
                 == Some(&Value::String("string".to_owned())),
         "public Error envelope changed"
-    );
-    ensure!(
-        document.pointer("/paths/~1schedules/post/responses/409/$ref")
-            == Some(&Value::String(
-                "#/components/responses/WebhookNotConfigured".to_owned()
-            ))
-            && document.pointer(
-                "/components/responses/WebhookNotConfigured/content/application~1json/example/error/code",
-            ) == Some(&Value::String("webhook_not_configured".to_owned()))
-            && document.pointer(
-                "/components/responses/WebhookNotConfigured/content/application~1json/example/error/message",
-            ) == Some(&Value::String("Set the webhook url first.".to_owned())),
-        "missing-webhook response contract changed"
     );
     ensure!(
         document.pointer("/components/parameters/Limit/schema/minimum") == Some(&json!(1))

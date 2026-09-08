@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -20,13 +20,13 @@ use crate::{
     error::AppError,
     infrastructure::{
         crypto::{EncryptedSecret, destination_field_associated_data},
-        hook::{destination_url_is_allowed, signing_secret_is_valid},
         postgres::{ActorType, AuditContext, NewHookDestination, NewInternalEvent},
+        webhook::{destination_url_is_allowed, signing_secret_is_valid},
     },
     request_context,
 };
 
-/// Registers or rotates one Silicon's encrypted Hook destination.
+/// Registers or rotates one Silicon's encrypted webhook destination.
 ///
 /// # Errors
 ///
@@ -92,6 +92,7 @@ pub(crate) async fn save_destination(
     Ok((
         status,
         Json(models::HookDestinationResponse {
+            id: row.id,
             org_id: row.org_id,
             silicon_id: row.silicon_id,
             version: row.version,
@@ -268,17 +269,11 @@ fn validate_hook_destination(
     state: &ApiState,
     request: &models::HookDestinationRequest,
 ) -> Result<(), AppError> {
-    let secure_transport = state.environment != RuntimeEnvironment::Production
-        || request.endpoint_url.scheme() == "https";
-
-    if !destination_url_is_allowed(
-        &request.endpoint_url,
-        &state.hook_base_url,
-        &request.silicon_id,
-        state.is_test,
-    ) || !secure_transport
-        || !signing_secret_is_valid(&request.signing_secret)
-    {
+    let production = state.environment == RuntimeEnvironment::Production && !state.is_test;
+    let signing_secret = request.signing_secret.expose_secret();
+    let valid_secret =
+        signing_secret.is_empty() || signing_secret_is_valid(&request.signing_secret);
+    if !destination_url_is_allowed(&request.endpoint_url, production) || !valid_secret {
         return Err(AppError::Validation);
     }
     Ok(())

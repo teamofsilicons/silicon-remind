@@ -6,7 +6,7 @@ use uuid::Uuid;
     name = "remind",
     version,
     about = "Create and manage Silicon reminders through Silicon IAM.",
-    long_about = "Silicon Remind schedules one-time or recurring reminders using five-field Linux cron. Silicons manage their own reminders; Carbons and Silicons can read their organization's reminders.\n\nStart with: remind auth login --org <org>\nThen configure delivery: remind webhook set <url>\nCreate a reminder: remind create --text 'Check the build' --cron '*/5 * * * *'\nUse any command in a saved sandbox: remind --test <test_id> <command>.",
+    long_about = "Silicon Remind schedules one-time or recurring reminders using five-field Linux cron. Silicons manage their own reminders; Carbons and Silicons can read their organization's reminders.\n\nStart with: remind login <slt>\nOptionally subscribe a receiver: remind webhook subscribe <url>\nCreate a reminder: remind create --text 'Check the build' --cron '*/5 * * * *'\nUse any command in a saved sandbox: remind --test <test_id> <command>.",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -34,6 +34,11 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Log in directly with an IAM short-lived token.
+    Login {
+        #[arg(value_name = "SLT")]
+        slt: String,
+    },
     /// Log in using an IAM short-lived token; inspect or revoke the current session.
     Auth {
         #[command(subcommand)]
@@ -41,7 +46,7 @@ pub enum Command {
     },
     /// Create a reminder owned by the signed-in Silicon.
     #[command(
-        after_help = "Examples:\n  remind create --text 'Daily standup' --cron '0 9 * * MON-FRI' --timezone Asia/Kolkata\n  remind create --text 'One reminder' --cron '30 16 * * *' --kind one-time\n\nConfigure a webhook first with remind webhook set <url>."
+        after_help = "Examples:\n  remind create --text 'Daily standup' --cron '0 9 * * MON-FRI' --timezone Asia/Kolkata\n  remind create --text 'One reminder' --cron '30 16 * * *' --kind one-time\n\nAdd optional receivers with remind webhook subscribe <url>."
     )]
     Create {
         #[arg(long)]
@@ -90,7 +95,7 @@ pub enum Command {
     },
     /// Archive one owned reminder. It remains readable for 45 days.
     Archive { id: Uuid },
-    /// Inspect delivery attempts, failures and Hook ingress receipt IDs.
+    /// Inspect delivery attempts, failures and webhook ingress receipt IDs.
     Executions {
         id: Uuid,
         #[command(flatten)]
@@ -103,7 +108,7 @@ pub enum Command {
         #[arg(long,default_value_t=50,value_parser=clap::value_parser!(u32).range(1..=100))]
         limit: u32,
     },
-    /// Configure, inspect or disable the signed-in Silicon's delivery endpoint.
+    /// Add, inspect or remove the signed-in Silicon's webhook subscriptions.
     Webhook {
         #[command(subcommand)]
         command: Webhook,
@@ -157,15 +162,32 @@ pub enum Auth {
 }
 #[derive(Subcommand)]
 pub enum Webhook {
-    /// Register the URL and signing secret issued by Silicon Hook.
+    /// Register any HTTP(S) URL and optional HMAC signing secret.
     Set {
         #[arg(value_name = "URL")]
         endpoint_url: String,
         #[arg(long)]
         secret_stdin: bool,
+        /// Send without an HMAC signing secret.
+        #[arg(long, conflicts_with = "secret_stdin")]
+        unsigned: bool,
+    },
+    /// Add another independent webhook subscription.
+    Subscribe {
+        #[arg(value_name = "URL")]
+        endpoint_url: String,
+        #[arg(long)]
+        secret_stdin: bool,
+        /// Send without an HMAC signing secret.
+        #[arg(long, conflicts_with = "secret_stdin")]
+        unsigned: bool,
     },
     /// Show the configured endpoint; the signing secret is never returned.
     Get,
+    /// List every active webhook subscription.
+    List,
+    /// Disable one subscription by its UUID.
+    Unsubscribe { id: Uuid },
     /// Disable delivery configuration until it is set again.
     Disable,
 }
@@ -215,6 +237,11 @@ pub enum Config {
     SetUrl {
         #[arg(value_name = "URL")]
         service_url: String,
+    },
+    /// Set the parent directory used for the local Remind state directory.
+    Home {
+        #[arg(value_name = "DIRECTORY")]
+        location: std::path::PathBuf,
     },
     AutoUpdate {
         #[arg(value_enum)]

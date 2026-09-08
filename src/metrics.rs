@@ -27,11 +27,11 @@ pub struct Metrics {
     pub http_requests: Family<HttpLabels, Counter>,
     /// Durable occurrences created by the scheduler.
     pub executions_materialized: Counter,
-    /// Hook events durably accepted.
+    /// webhook events durably accepted.
     pub deliveries_succeeded: Counter,
-    /// Hook attempts scheduled for retry.
+    /// webhook attempts scheduled for retry.
     pub deliveries_retried: Counter,
-    /// Hook executions reaching terminal failure.
+    /// webhook executions reaching terminal failure.
     pub deliveries_failed: Counter,
     /// Worker iterations that failed before completing their stage.
     pub worker_errors: Counter,
@@ -61,17 +61,17 @@ impl Metrics {
         );
         registry.register(
             "remind_deliveries_succeeded",
-            "Total reminders durably accepted by Silicon Hook.",
+            "Total reminders durably accepted by configured webhook receiver.",
             deliveries_succeeded.clone(),
         );
         registry.register(
             "remind_deliveries_retried",
-            "Total Hook delivery attempts scheduled for retry.",
+            "Total webhook delivery attempts scheduled for retry.",
             deliveries_retried.clone(),
         );
         registry.register(
             "remind_deliveries_failed",
-            "Total Hook executions reaching terminal failure.",
+            "Total webhook executions reaching terminal failure.",
             deliveries_failed.clone(),
         );
         registry.register(

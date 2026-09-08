@@ -1,4 +1,4 @@
-//! Authenticated encryption for persisted Hook signing credentials.
+//! Authenticated encryption for persisted webhook signing credentials.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -165,7 +165,7 @@ impl SecretCipher {
                     aad: associated_data,
                 },
             )
-            .map_err(|_| anyhow::anyhow!("Hook credential encryption failed"))?;
+            .map_err(|_| anyhow::anyhow!("webhook credential encryption failed"))?;
 
         Ok(EncryptedSecret {
             key_version: self.key_version,
@@ -187,7 +187,7 @@ impl SecretCipher {
     ) -> anyhow::Result<SecretString> {
         if encrypted.key_version != self.key_version {
             anyhow::bail!(
-                "unsupported Hook credential key version {}",
+                "unsupported webhook credential key version {}",
                 encrypted.key_version
             );
         }
@@ -195,7 +195,7 @@ impl SecretCipher {
             .nonce
             .as_slice()
             .try_into()
-            .map_err(|_| anyhow::anyhow!("stored Hook credential nonce is malformed"))?;
+            .map_err(|_| anyhow::anyhow!("stored webhook credential nonce is malformed"))?;
         let nonce = Nonce::from(nonce_bytes);
         let plaintext = self
             .cipher()
@@ -206,10 +206,10 @@ impl SecretCipher {
                     aad: associated_data,
                 },
             )
-            .map_err(|_| anyhow::anyhow!("Hook credential authentication failed"))?;
+            .map_err(|_| anyhow::anyhow!("webhook credential authentication failed"))?;
         let plaintext = Zeroizing::new(
             String::from_utf8(plaintext)
-                .map_err(|_| anyhow::anyhow!("Hook credential plaintext is not UTF-8"))?,
+                .map_err(|_| anyhow::anyhow!("webhook credential plaintext is not UTF-8"))?,
         );
         Ok(SecretString::from(plaintext.as_str()))
     }

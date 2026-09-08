@@ -1,7 +1,7 @@
 # Silicon Remind build and acceptance status
 
 Implemented and manually exercised locally on 2026-09-06 IST against hosted IAM
-sandbox identities and the real local Silicon Hook backend. Scope follows
+sandbox identities and the real local configured webhook receiver backend. Scope follows
 [UNDERSTANDING.md](../UNDERSTANDING.md). The frontend and `remind report` remain
 explicit later work in that document.
 
@@ -12,7 +12,7 @@ explicit later work in that document.
 - Reminder create/list/get/edit, one-time and recurring five-field cron, IANA
   timezones with UTC default, stored next UTC occurrence, individual and atomic
   batch pause/resume, owner archive and org-wide read permissions.
-- Owner-configured Hook destinations, current signed delivery contract, durable
+- Owner-configured webhook destinations, current signed delivery contract, durable
   execution history, retry after receiver outages and concurrent worker claims.
 - One-time automatic archive, 45-day readability, eventual physical purge and
   full deletion snapshots capped to the latest 100000 text records.
@@ -31,12 +31,12 @@ explicit later work in that document.
   Library updates affect the consuming lockfile and require a rebuild.
 - Segregated [API](api/README.md), [client](client/README.md),
   [CLI](cli/README.md), [IAM](iam.md), [sandbox](testing-environments.md),
-  [Hook](hook-delivery.md) and [internal API](internal-api.md) guides, plus OpenAPI.
+  [webhook](webhook-delivery.md) and [internal API](internal-api.md) guides, plus OpenAPI.
 
 ## Evidence
 
 [MANUAL_ACCEPTANCE.md](MANUAL_ACCEPTANCE.md) records actual CLI/API actions,
-SQL-prepared large/aged fixtures and inspected worker/Hook outcomes. Coverage
+SQL-prepared large/aged fixtures and inspected worker/webhook outcomes. Coverage
 includes real Carbon and Silicon sessions, permissions across identities and
 organizations, cross-sandbox reads, all CLI command groups, rotation/recovery,
 quota and byte limits, idempotency conflicts, atomic batch rollback, retention
@@ -70,6 +70,6 @@ fresh crates.io installation passed version, public readiness, authentication
 and current-version update checks. See [release record](RELEASE_0.1.0.md) for
 exact evidence and the remaining limitation on newer-version updater testing.
 
-Hook delivery is at least once. An ingress receipt is not proof of signature
+webhook delivery is at least once. An ingress receipt is not proof of signature
 verification or application processing; the manual test separately inspected
-Hook verified history. Consumers must deduplicate the stable execution ID.
+webhook verified history. Consumers must deduplicate the stable execution ID.

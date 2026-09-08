@@ -1,4 +1,4 @@
-//! Concurrent lease-based Silicon Hook delivery and retry policy.
+//! Concurrent lease-based configured webhook receiver delivery and retry policy.
 
 use std::{sync::Arc, time::Duration};
 
@@ -13,11 +13,11 @@ use crate::{
     config::RetrySettings,
     infrastructure::{
         crypto::{EncryptedSecret, SecretCipherKeyring, destination_field_associated_data},
-        hook::{
-            HookClient, HookDeliveryError, HookDestination, ReminderEvent,
+        postgres::{ExecutionRow, HookDestinationRow, PostgresRepository},
+        webhook::{
+            ReminderEvent, WebhookClient, WebhookDeliveryError, WebhookDestination,
             destination_url_is_allowed,
         },
-        postgres::{ExecutionRow, HookDestinationRow, PostgresRepository},
     },
     metrics::Metrics,
 };
@@ -26,9 +26,8 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct DeliveryProcessor {
     repository: PostgresRepository,
-    hook_client: HookClient,
+    webhook_client: WebhookClient,
     encryption: SecretCipherKeyring,
-    hook_base_url: Url,
     worker_id: String,
     lease_duration: Duration,
     max_concurrency: u32,
@@ -40,7 +39,6 @@ pub struct DeliveryProcessor {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeliveryProcessorConfig {
-    pub(crate) hook_base_url: Url,
     pub(crate) worker_id: String,
     pub(crate) lease_duration: Duration,
     pub(crate) max_concurrency: u32,
@@ -52,7 +50,7 @@ impl DeliveryProcessor {
     #[must_use]
     pub(crate) fn new(
         repository: PostgresRepository,
-        hook_client: HookClient,
+        webhook_client: WebhookClient,
         encryption: SecretCipherKeyring,
         config: DeliveryProcessorConfig,
         clock: Arc<dyn Clock>,
@@ -60,9 +58,8 @@ impl DeliveryProcessor {
     ) -> Self {
         Self {
             repository,
-            hook_client,
+            webhook_client,
             encryption,
-            hook_base_url: config.hook_base_url,
             worker_id: config.worker_id,
             lease_duration: config.lease_duration,
             max_concurrency: config.max_concurrency,
@@ -133,8 +130,8 @@ impl DeliveryProcessor {
     }
 
     async fn deliver_one(&self, execution: ExecutionRow) -> anyhow::Result<()> {
-        let destination = match self.resolve_destination(&execution).await {
-            Ok(destination) => destination,
+        let destinations = match self.resolve_destinations(&execution).await {
+            Ok(destinations) => destinations,
             Err(error) => {
                 return self.finish_failure(&execution, error).await;
             }
@@ -159,44 +156,56 @@ impl DeliveryProcessor {
             scheduled_for: execution.scheduled_for,
             timezone: execution.timezone.clone(),
         };
-        match self
-            .hook_client
-            .deliver(&destination, &event, attempted_at)
-            .await
-        {
-            Ok(receipt) => {
-                self.repository
-                    .mark_delivery_succeeded(
-                        execution.id,
-                        &self.worker_id,
-                        receipt.event_id,
-                        self.clock.now(),
-                    )
-                    .await?;
-                self.metrics.deliveries_succeeded.inc();
-                Ok(())
+        // Every receiver gets the same execution UUID as its idempotency key.
+        // If one receiver fails after another succeeds, retrying the whole
+        // batch is safe for receivers that honor that key.
+        let mut first_error = None;
+        for destination in destinations {
+            if let Err(error) = self
+                .webhook_client
+                .deliver(&destination, &event, attempted_at)
+                .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
-            Err(error) => self.finish_failure(&execution, error).await,
         }
+        if let Some(error) = first_error {
+            return self.finish_failure(&execution, error).await;
+        }
+
+        // No subscribers is valid. Mark the occurrence processed without an
+        // outbound request so scheduling remains independent of subscriptions.
+        self.repository
+            .mark_delivery_succeeded(
+                execution.id,
+                &self.worker_id,
+                execution.id,
+                self.clock.now(),
+            )
+            .await?;
+        self.metrics.deliveries_succeeded.inc();
+        Ok(())
     }
 
-    async fn resolve_destination(
+    async fn resolve_destinations(
         &self,
         execution: &ExecutionRow,
-    ) -> Result<HookDestination, HookDeliveryError> {
-        let row = self
+    ) -> Result<Vec<WebhookDestination>, WebhookDeliveryError> {
+        let rows = self
             .repository
-            .get_hook_destination(&execution.org_id, &execution.silicon_id)
+            .get_hook_destinations(&execution.org_id, &execution.silicon_id)
             .await
-            .map_err(|_| retryable("Hook destination lookup failed"))?
-            .ok_or_else(|| retryable("Hook destination is not provisioned"))?;
-        self.decrypt_destination(&row)
+            .map_err(|_| retryable("Webhook destination lookup failed"))?;
+        rows.iter()
+            .map(|row| self.decrypt_destination(row))
+            .collect()
     }
 
     fn decrypt_destination(
         &self,
         row: &HookDestinationRow,
-    ) -> Result<HookDestination, HookDeliveryError> {
+    ) -> Result<WebhookDestination, WebhookDeliveryError> {
         let key_version = row.encryption_key_version;
         let url = EncryptedSecret {
             key_version,
@@ -215,24 +224,17 @@ impl DeliveryProcessor {
         let endpoint_url = self
             .encryption
             .decrypt(&url, &url_aad)
-            .map_err(|_| retryable("Hook destination URL could not be decrypted"))?;
+            .map_err(|_| retryable("Webhook destination URL could not be decrypted"))?;
         let signing_secret = self
             .encryption
             .decrypt(&secret, &secret_aad)
-            .map_err(|_| retryable("Hook signing credential could not be decrypted"))?;
+            .map_err(|_| retryable("Webhook signing credential could not be decrypted"))?;
         let endpoint_url = Url::parse(endpoint_url.expose_secret())
-            .map_err(|_| terminal("Hook destination URL is malformed"))?;
-        if !destination_url_is_allowed(
-            &endpoint_url,
-            &self.hook_base_url,
-            &row.silicon_id,
-            self.testing,
-        ) {
-            return Err(terminal(
-                "Hook destination is outside the configured origin",
-            ));
+            .map_err(|_| terminal("Webhook destination URL is malformed"))?;
+        if !destination_url_is_allowed(&endpoint_url, !self.testing) {
+            return Err(terminal("Webhook destination URL is not allowed"));
         }
-        Ok(HookDestination {
+        Ok(WebhookDestination {
             endpoint_url,
             signing_secret,
         })
@@ -241,7 +243,7 @@ impl DeliveryProcessor {
     async fn finish_failure(
         &self,
         execution: &ExecutionRow,
-        error: HookDeliveryError,
+        error: WebhookDeliveryError,
     ) -> anyhow::Result<()> {
         let failed_at = self.clock.now();
         let attempt = u16::try_from(execution.attempt_count).unwrap_or(u16::MAX);
@@ -296,14 +298,14 @@ pub fn retry_delay(policy: &RetrySettings, execution_id: Uuid, attempt: u16) -> 
     Duration::from_millis(u64::try_from(total_ms).unwrap_or(u64::MAX))
 }
 
-fn retryable(reason: &'static str) -> HookDeliveryError {
-    HookDeliveryError::Retryable {
+fn retryable(reason: &'static str) -> WebhookDeliveryError {
+    WebhookDeliveryError::Retryable {
         reason: reason.to_owned(),
     }
 }
 
-fn terminal(reason: &'static str) -> HookDeliveryError {
-    HookDeliveryError::Terminal {
+fn terminal(reason: &'static str) -> WebhookDeliveryError {
+    WebhookDeliveryError::Terminal {
         reason: reason.to_owned(),
     }
 }

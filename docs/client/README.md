@@ -47,8 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Configure a Silicon Hook destination through `configure_webhook` before creating
-a reminder. A Carbon may log in and read reminders but cannot create one.
+Webhook subscriptions are optional; use `configure_webhook` or
+`subscribe_webhook` when a receiver should receive deliveries. A Carbon may log
+in and read reminders but cannot create one.
 
 ## State and secrets
 
@@ -89,6 +90,9 @@ once; retry decisions belong to the caller.
 | `configure_webhook(destination)` | Owner endpoint and signing secret → receipt |
 | `webhook()` | Configured URL and version, without secret |
 | `disable_webhook()` | Disable owner destination |
+| `subscribe_webhook(destination)` | Add an independent subscription |
+| `webhooks()` | List active subscriptions |
+| `unsubscribe_webhook(id)` | Disable one subscription |
 | `silicons(after, limit)` | `Page<Silicon>` for the selected org |
 | `create_environment(input)` | `EnvironmentCreated` with root key |
 | `environments(include_deleted, after, limit)` | `Page<TestEnvironment>` |

@@ -236,11 +236,11 @@ pub struct ExecutionResponse {
     pub scheduled_for: DateTime<Utc>,
     /// Most recent attempt time.
     pub attempted_at: Option<DateTime<Utc>>,
-    /// Hook durable-acceptance time.
+    /// webhook durable-acceptance time.
     pub delivered_at: Option<DateTime<Utc>>,
     /// Delivery lifecycle status.
     pub status: ExecutionStatus,
-    /// Hook event UUID after acceptance.
+    /// webhook event UUID after acceptance.
     pub hook_event_id: Option<Uuid>,
     /// Sanitized terminal/transient failure reason.
     pub failure_reason: Option<String>,
@@ -279,7 +279,7 @@ pub struct PageResponse<T> {
     pub next_cursor: Option<String>,
 }
 
-/// Service-authenticated Hook destination registration body.
+/// Service-authenticated outbound webhook registration body.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookDestinationRequest {
@@ -289,15 +289,18 @@ pub struct HookDestinationRequest {
     pub principal_id: Uuid,
     /// Public global destination Silicon identifier.
     pub silicon_id: String,
-    /// Exact ingress URL issued by Silicon Hook.
+    /// Any absolute HTTP(S) endpoint URL owned by the caller.
     pub endpoint_url: Url,
-    /// One-time Hook signing credential.
+    /// Optional HMAC signing credential for receivers that require one.
+    #[serde(default)]
     pub signing_secret: secrecy::SecretString,
 }
 
 /// Non-secret destination registration response.
 #[derive(Clone, Debug, Serialize)]
 pub struct HookDestinationResponse {
+    /// Subscription registry UUID.
+    pub id: Uuid,
     /// Organization scope.
     pub org_id: String,
     /// Destination Silicon.
@@ -305,6 +308,21 @@ pub struct HookDestinationResponse {
     /// Registry version after upsert.
     pub version: i64,
     /// Last replacement time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Public metadata for one active webhook subscription.
+#[derive(Clone, Debug, Serialize)]
+pub struct WebhookSubscriptionResponse {
+    /// Subscription registry UUID.
+    pub id: Uuid,
+    /// Owning Silicon identifier.
+    pub silicon_id: String,
+    /// Configured endpoint URL.
+    pub endpoint_url: String,
+    /// Monotonic subscription version.
+    pub version: i64,
+    /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
 }
 

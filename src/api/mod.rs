@@ -16,7 +16,6 @@ use tower_http::{
     catch_panic::CatchPanicLayer, sensitive_headers::SetSensitiveRequestHeadersLayer,
     trace::TraceLayer,
 };
-use url::Url;
 
 use crate::{
     application::{ports::SystemClock, schedules::ScheduleService},
@@ -45,7 +44,6 @@ pub struct ApiState {
     pub(crate) iam_webhook: IamWebhookVerifier,
     pub(crate) internal_api_token: SecretString,
     pub(crate) encryption: SecretCipherKeyring,
-    pub(crate) hook_base_url: Url,
     pub(crate) is_test: bool,
     pub(crate) environment: RuntimeEnvironment,
     pub(crate) metrics: Metrics,
@@ -81,7 +79,6 @@ impl ApiState {
             iam_webhook,
             internal_api_token: settings.internal_api.bearer_token.clone(),
             encryption,
-            hook_base_url: settings.hook.base_url.clone(),
             is_test: false,
             environment: settings.environment,
             metrics: Metrics::new(),
@@ -91,6 +88,7 @@ impl ApiState {
 }
 
 /// Builds the complete public, internal, and operational router.
+#[allow(clippy::too_many_lines)]
 pub fn router(state: ApiState, settings: &Settings) -> Router {
     let public_api = Router::new()
         .route(
@@ -114,6 +112,14 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
             get(handlers::destination::get)
                 .put(handlers::destination::set)
                 .delete(handlers::destination::disable),
+        )
+        .route(
+            "/webhooks",
+            get(handlers::destination::list).post(handlers::destination::subscribe),
+        )
+        .route(
+            "/webhooks/{subscription_id}",
+            delete(handlers::destination::unsubscribe),
         )
         .route("/silicons", get(handlers::destination::silicons))
         .route("/auth/me", get(handlers::auth::me))

@@ -128,22 +128,16 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         None => Mutation::new(),
     };
     match &cli.command {
+        Command::Login { slt } => {
+            login_with_token(cli, store, &client, &session_slot, Secret::new(slt.clone())).await?;
+        }
         Command::Auth { command } => match command {
             Auth::Login { slt_stdin } => {
                 let token = read_secret("IAM short-lived token: ", *slt_stdin)?;
-                let session = client.login(&token, &mutation).await?;
-                let org=cli.org.clone().or_else(||session.org_id.clone()).context("an organization is required; use an organization-bound IAM SLT and --org <org>")?;
-                // Verify that the new session actually authorizes this organization
-                // before replacing a working local session.
-                let identity = client
-                    .with_session(session.access_token.clone(), org.clone())?
-                    .me()
-                    .await?;
-                save_session(store, &session_slot, session, org)?;
-                output(cli, &identity)?;
+                login_with_token(cli, store, &client, &session_slot, token).await?;
                 suggest(
                     cli,
-                    "Logged in. Next: remind webhook set <url>, then remind create --text <text> --cron '<expression>'.",
+                    "Logged in. Optional next step: remind webhook subscribe <url>.",
                 );
             }
             Auth::Whoami => output(cli, &client.me().await?)?,
@@ -279,8 +273,13 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
             Webhook::Set {
                 endpoint_url,
                 secret_stdin,
+                unsigned,
             } => {
-                let secret = read_secret("Silicon Hook signing secret: ", *secret_stdin)?;
+                let secret = if *unsigned {
+                    None
+                } else {
+                    Some(read_secret("Webhook signing secret: ", *secret_stdin)?)
+                };
                 output(
                     cli,
                     &client
@@ -292,10 +291,38 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 )?;
                 suggest(
                     cli,
-                    "Webhook configured. Next: remind create --text <text> --cron '<expression>'.",
+                    "Webhook subscription added. Reminders can be created without a subscription.",
                 );
             }
+            Webhook::Subscribe {
+                endpoint_url,
+                secret_stdin,
+                unsigned,
+            } => {
+                let secret = if *unsigned {
+                    None
+                } else {
+                    Some(read_secret("Webhook signing secret: ", *secret_stdin)?)
+                };
+                output(
+                    cli,
+                    &client
+                        .subscribe_webhook(&models::Destination {
+                            endpoint_url: endpoint_url.clone(),
+                            signing_secret: secret,
+                        })
+                        .await?,
+                )?;
+            }
             Webhook::Get => output(cli, &client.webhook().await?)?,
+            Webhook::List => output(cli, &client.webhooks().await?)?,
+            Webhook::Unsubscribe { id } => {
+                client.unsubscribe_webhook(*id).await?;
+                output(
+                    cli,
+                    &serde_json::json!({"status":"webhook_unsubscribed","id":id}),
+                )?;
+            }
             Webhook::Disable => {
                 client.disable_webhook().await?;
                 output(cli, &serde_json::json!({"status":"webhook_disabled"}))?;
@@ -426,19 +453,23 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
             )?;
             suggest(
                 cli,
-                "Sandbox emptied. Configure the Silicon webhook again before creating reminders.",
+                "Sandbox emptied. Webhook subscriptions are optional; add one when outbound delivery is wanted.",
             );
         }
         Command::Config { command } => match command {
             Config::Show => output(
                 cli,
-                &serde_json::json!({"url":store.state.url,"auto_update":store.state.auto_update,"session_count":store.state.sessions.len(),"saved_test_environment_count":store.state.test_keys.len()}),
+                &serde_json::json!({"url":store.state.url,"home":store.home_dir().display().to_string(),"auto_update":store.state.auto_update,"session_count":store.state.sessions.len(),"saved_test_environment_count":store.state.test_keys.len()}),
             )?,
             Config::SetUrl { service_url } => {
                 Client::new(service_url)?;
                 store.state.url = service_url.trim_end_matches('/').into();
                 store.save()?;
                 output(cli, &serde_json::json!({"url":store.state.url}))?;
+            }
+            Config::Home { location } => {
+                Store::configure_home(location)?;
+                output(cli, &serde_json::json!({"home": location}))?;
             }
             Config::AutoUpdate { value } => {
                 store.state.auto_update = matches!(value, Toggle::On);
@@ -452,6 +483,34 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         Command::Update { .. } => {}
         Command::Health { ready } => output(cli, &client.health(*ready).await?)?,
     }
+    Ok(())
+}
+
+async fn login_with_token(
+    cli: &Cli,
+    store: &mut Store,
+    client: &Client,
+    session_slot: &str,
+    token: Secret,
+) -> anyhow::Result<()> {
+    let mutation = match &cli.idempotency_key {
+        Some(key) => Mutation::with_key(key)?,
+        None => Mutation::new(),
+    };
+    let session = client.login(&token, &mutation).await?;
+    let org = cli.org.clone().or_else(|| session.org_id.clone()).context(
+        "an organization is required; use an organization-bound IAM SLT and --org <org>",
+    )?;
+    let identity = client
+        .with_session(session.access_token.clone(), org.clone())?
+        .me()
+        .await?;
+    save_session(store, session_slot, session, org)?;
+    output(cli, &identity)?;
+    suggest(
+        cli,
+        "Logged in. Optional next step: remind webhook subscribe <url>.",
+    );
     Ok(())
 }
 

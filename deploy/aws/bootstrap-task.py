@@ -17,7 +17,11 @@ def database_url(user, password, host, database):
 def command(args, env, sql=None):
     result = subprocess.run(args, input=sql, text=True, env=env, capture_output=True)
     if result.returncode:
-        raise RuntimeError(args[0] + ' failed with exit ' + str(result.returncode))
+        detail = (result.stderr or result.stdout or '').strip()
+        if len(detail) > 4000:
+            detail = detail[-4000:]
+        raise RuntimeError(args[0] + ' failed with exit ' + str(result.returncode)
+                           + (': ' + detail if detail else ''))
 
 def db_env(master, host, database):
     return dict(os.environ, PGHOST=host, PGPORT='5432', PGDATABASE=database,

@@ -108,7 +108,7 @@ configuration.
 ```sh
 remind --test <id> test-info
 remind --test <id> auth login --org test-org --slt-stdin < /secure/test-slt
-remind --test <id> webhook set <test-Hook-endpoint> --secret-stdin < /secure/hook-secret
+remind --test <id> webhook subscribe <test-webhook-endpoint> --secret-stdin < /secure/hook-secret
 remind --test <id> create --text 'Manual trigger' --cron '* * * * *'
 remind --test <id> list
 remind --test <id> executions <reminder-id>

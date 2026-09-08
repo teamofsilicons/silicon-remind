@@ -18,8 +18,8 @@ pub enum RepositoryError {
     /// The IAM principal has no active, provisioned Silicon binding.
     #[error("the Silicon identity is unavailable for schedule mutation")]
     SiliconUnavailable,
-    /// The Silicon has no currently enabled Hook destination.
-    #[error("the Silicon has no active Hook destination")]
+    /// The Silicon has no currently enabled webhook destination.
+    #[error("the Silicon has no active webhook destination")]
     WebhookNotConfigured,
     /// The tenant-scoped resource was absent or invisible to the caller.
     #[error("the requested resource was not found")]

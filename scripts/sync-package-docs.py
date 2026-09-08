@@ -7,6 +7,6 @@ for package in ['client', 'cli']:
     destination = root / 'crates' / package
     for group in ['api', 'client', 'cli']:
         shutil.copytree(root / 'docs' / group, destination / 'docs' / group, dirs_exist_ok=True)
-    for name in ['iam.md', 'testing-environments.md', 'hook-delivery.md']:
+    for name in ['iam.md', 'testing-environments.md', 'webhook-delivery.md']:
         shutil.copyfile(root / 'docs' / name, destination / 'docs' / name)
     shutil.copyfile(root / 'openapi.yaml', destination / 'openapi.yaml')

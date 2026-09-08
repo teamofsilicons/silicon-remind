@@ -58,21 +58,23 @@ with a different idempotency key after a successful rotation.
 
 | Method and path | Behavior |
 | --- | --- |
-| `PUT /webhook` | Set the signed Silicon Hook endpoint for the authenticated Silicon |
+| `PUT /webhook` | Set the webhook endpoint for the authenticated Silicon |
 | `GET /webhook` | Read its endpoint URL and version, without the signing secret |
 | `DELETE /webhook` | Disable the endpoint; returns `204` |
+| `POST /webhooks` | Add another independent webhook subscription |
+| `GET /webhooks` | List active subscriptions, possibly empty |
+| `DELETE /webhooks/{subscription_id}` | Disable one subscription; returns `204` |
 | `GET /silicons?after=<uuid>&limit=50` | List registered Silicons in this org with reminder counts |
 
-Configuration input is `{"endpoint_url":"…","signing_secret":"…"}`. Use the URL
-and textual `signing_secret` issued by Silicon Hook. The backend validates the endpoint
-against its configured Hook service origin and the Silicon's canonical public ID.
-See [the exact sender and receipt contract](../hook-delivery.md).
+Configuration input is `{"endpoint_url":"…","signing_secret":"…"}`; omit `signing_secret` for unsigned delivery. Use any URL
+and an optional textual `signing_secret` chosen for the receiver. The backend validates the endpoint
+as an absolute HTTP(S) URL and verifies the Silicon's canonical public ID.
+See [the exact sender and receipt contract](../webhook-delivery.md).
 Ownership and public routing identity are derived from IAM, never supplied by a
 public caller. Endpoint URL and signing secret are encrypted at rest.
 
-Creation without a configured destination returns `409 webhook_not_configured`
-and exactly `Set the webhook url first.` Delivery configuration must be recreated
-after cleaning a test environment.
+Webhook subscriptions are optional. Reminders can be created with no configured
+receiver and will begin fan-out delivery when subscriptions are added.
 
 ## Reminders
 
@@ -138,8 +140,8 @@ operation and input; changing input returns `409 idempotency_conflict`.
 
 ## Delivery, archive and retention
 
-The worker stores an immutable occurrence before sending it to Silicon Hook.
-Execution ID is stable across retries; it is also Hook's idempotency identifier.
+The worker stores an immutable occurrence before sending it to the configured webhook endpoint.
+Execution ID is stable across retries; it is also webhook's idempotency identifier.
 The snapshot contains the reminder text at trigger time, schedule identity,
 Silicon ID, timezone, and intended trigger instant. Transient/ambiguous failures
 retry with bounded backoff; terminal errors are retained in execution history.

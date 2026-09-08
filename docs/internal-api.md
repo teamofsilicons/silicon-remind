@@ -14,7 +14,7 @@ transport must be HTTPS. Requests use JSON and stable error envelopes.
   initial configuration or 200 on replacement, with org/Silicon/version/time.
   Credentials are encrypted at rest and never echoed. The Silicon ID must
   belong to the org and endpoint; URL/signature format is described in
-  [Hook delivery](hook-delivery.md). An IAM revocation tombstone cannot be
+  [webhook delivery](webhook-delivery.md). An IAM revocation tombstone cannot be
   cleared by provisioning.
 - `DELETE /internal/v1/hook-destinations/{org_id}/{silicon_id}` disables that
   destination, returning 204. It does not disclose or rotate its old secret.

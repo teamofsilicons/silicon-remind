@@ -17,7 +17,7 @@ The production origin is `https://backend.remind.teamofsilicons.com`.
 The client does not persist sessions. The companion `silicon-remind-cli` manages
 permission-restricted local state and automatic refresh.
 
-The package includes complete API, client, CLI, IAM, Hook and testing guides in
+The package includes complete API, client, CLI, IAM, webhook and testing guides in
 `docs/`. Start with the [client guide](https://docs.rs/crate/silicon-remind-client/0.1.0/source/docs/client/README.md)
 or the [API reference](https://docs.rs/silicon-remind-client).
 

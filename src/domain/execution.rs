@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub enum ExecutionStatus {
     /// The occurrence is durable and has not completed a delivery attempt.
     Pending,
-    /// Hook durably accepted the event.
+    /// webhook durably accepted the event.
     Delivered,
     /// A retryable attempt failed and another attempt is scheduled.
     Retrying,
@@ -57,7 +57,7 @@ impl ExecutionStatus {
 /// One stable, idempotent occurrence in schedule execution history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Execution {
-    /// Stable UUID reused as the Hook idempotency key.
+    /// Stable UUID reused as the webhook idempotency key.
     pub id: Uuid,
     /// Schedule that materialized this occurrence.
     pub schedule_id: Uuid,
@@ -65,11 +65,11 @@ pub struct Execution {
     pub scheduled_for: DateTime<Utc>,
     /// Most recent delivery-attempt instant.
     pub attempted_at: Option<DateTime<Utc>>,
-    /// Instant at which Hook durably accepted the event.
+    /// Instant at which webhook durably accepted the event.
     pub delivered_at: Option<DateTime<Utc>>,
     /// Current public delivery state.
     pub status: ExecutionStatus,
-    /// Stable event identifier returned by Hook after acceptance.
+    /// Stable event identifier returned by webhook after acceptance.
     pub hook_event_id: Option<Uuid>,
     /// Bounded, sanitized diagnostic for the most recent or terminal failure.
     pub failure_reason: Option<String>,
@@ -108,7 +108,7 @@ impl Execution {
         Ok(())
     }
 
-    /// Records durable Hook acceptance and its provider event identifier.
+    /// Records durable webhook acceptance and its provider event identifier.
     ///
     /// # Errors
     ///

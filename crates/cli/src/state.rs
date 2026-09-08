@@ -42,9 +42,12 @@ pub struct Store {
     _lock: File,
 }
 impl Store {
+    pub fn home_dir(&self) -> &std::path::Path {
+        self.dir.parent().unwrap_or(self.dir.as_path())
+    }
     pub fn open() -> anyhow::Result<Self> {
-        let home = std::env::var_os("HOME").context("HOME is not set")?;
-        let dir = PathBuf::from(home).join(".remind");
+        let home = configured_home()?;
+        let dir = home.join(".remind");
         std::fs::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
@@ -73,6 +76,19 @@ impl Store {
             _lock: lock,
         })
     }
+    pub fn configure_home(location: &std::path::Path) -> anyhow::Result<()> {
+        if !location.is_dir() {
+            anyhow::bail!("home location is not a directory: {}", location.display());
+        }
+        let default_home = std::env::var_os("HOME").context("HOME is not set")?;
+        let pointer_dir = PathBuf::from(default_home).join(".remind");
+        std::fs::create_dir_all(&pointer_dir)?;
+        std::fs::write(
+            pointer_dir.join("home"),
+            location.to_string_lossy().as_bytes(),
+        )?;
+        Ok(())
+    }
     pub fn save(&self) -> anyhow::Result<()> {
         let path = self.dir.join(format!("state-{}.tmp", uuid::Uuid::now_v7()));
         let mut options = OpenOptions::new();
@@ -94,6 +110,26 @@ impl Store {
             let _ = std::fs::remove_file(path);
         }
         result
+    }
+}
+
+fn configured_home() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    let default_home = PathBuf::from(home);
+    let pointer = default_home.join(".remind/home");
+    match std::fs::read_to_string(pointer) {
+        Ok(value) => {
+            let path = PathBuf::from(value.trim());
+            if !path.is_dir() {
+                anyhow::bail!(
+                    "configured home location is not a directory: {}",
+                    path.display()
+                );
+            }
+            Ok(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(default_home),
+        Err(error) => Err(error.into()),
     }
 }
 pub fn slot(url: &str, test: Option<uuid::Uuid>) -> String {

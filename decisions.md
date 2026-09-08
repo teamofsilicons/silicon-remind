@@ -1,7 +1,7 @@
 > Current integration update (2026-09-06): the updated UNDERSTANDING.md and
-> docs/ guides supersede older IAM custom-projection and Hook six-hex/whsec/202
+> docs/ guides supersede older IAM custom-projection and webhook six-hex/whsec/202
 > assumptions below. IAM uses silicon-iam-client 1.2.1 and live Application
-> snapshots; all org members have reminder reads. Hook uses eight-character
+> snapshots; all org members have reminder reads. webhook uses eight-character
 > routes, textual secrets, Standard Webhooks signatures and 200 ingress receipts.
 > Delivery is at least once; consumers deduplicate execution IDs. Older decisions
 > are retained as history, not current integration requirements.
@@ -18,7 +18,7 @@ decision is marked as superseded; its original record is not silently rewritten.
 **Status:** Accepted
 
 PostgreSQL is the system of record for schedules, executions, idempotency
-records, Hook destinations, internal-event receipts, and audit records. Database
+records, webhook destinations, internal-event receipts, and audit records. Database
 constraints and transactions enforce invariants whenever PostgreSQL can express
 them. No in-memory queue or scheduler state is required for correctness.
 
@@ -115,7 +115,7 @@ logical occurrences.
 
 For recurring schedules, materialization advances `next_run_at` transactionally.
 For one-time schedules it clears `next_run_at`; the schedule becomes `completed`
-after Hook accepts the execution or after delivery reaches terminal failure.
+after webhook accepts the execution or after delivery reaches terminal failure.
 Execution history therefore records delivery outcome even though the one-time
 schedule cannot fire again.
 
@@ -132,24 +132,24 @@ resumes and preserve their original `scheduled_for` instant.
 This policy is an implementation choice because the public contract leaves
 misfires undefined.
 
-## D-010 — Hook delivery is HTTP, signed, idempotent, and replaceable
+## D-010 — webhook delivery is HTTP, signed, idempotent, and replaceable
 
 **Status:** Accepted
 
-Remind follows Silicon Hook's HTTP ingress contract rather than sending a
-WebSocket frame directly. Hook is responsible for downstream WebSocket delivery.
+Remind follows configured webhook receiver's HTTP ingress contract rather than sending a
+WebSocket frame directly. webhook is responsible for downstream WebSocket delivery.
 Each request uses the execution UUID as `Idempotency-Key`; retries reuse that
 UUID. The event type is `remind.schedule.triggered`, and an execution is marked
-delivered only after Hook returns `202 Accepted` with a valid event UUID.
+delivered only after webhook returns `202 Accepted` with a valid event UUID.
 
-Because the current contracts do not define Hook destination discovery or the
+Because the current contracts do not define webhook destination discovery or the
 signature canonicalization, these details live behind application ports. The
 initial HTTP adapter uses HMAC-SHA256 over `<unix_timestamp>.<raw_body>` and a
 `v1=<lowercase hex>` signature. Per-Silicon endpoint URLs and signing secrets are
 registered through a service-authenticated internal endpoint and encrypted at
 rest. Production startup requires the internal service credential and a
 versioned 256-bit encryption key. This internal integration contract can be
-changed without changing the public schedules API when Hook publishes a
+changed without changing the public schedules API when webhook publishes a
 normative provisioning flow.
 
 Outbound redirects are disabled, destination URLs must be HTTPS in production,
@@ -215,7 +215,7 @@ already materialized keep an immutable snapshot of the text, timezone, owner,
 and scheduled instant used for delivery; later edits affect only future
 occurrences. Pausing prevents new materialization but does not cancel a durable
 execution. Deleting prevents pending/retrying executions that have not been
-accepted by Hook from being claimed again.
+accepted by webhook from being claimed again.
 
 ## D-016 — Public errors and request boundaries are stable
 
@@ -235,7 +235,7 @@ tracing, and graceful shutdown.
 
 Configuration is loaded from namespaced environment variables into typed,
 validated structures. Development defaults are limited to non-secret behavior.
-Production refuses plaintext Hook destination URLs, missing IAM application
+Production refuses plaintext webhook destination URLs, missing IAM application
 credentials, missing internal credentials, or missing encryption material.
 API and worker use least-privilege database credentials when deployments provide
 them; migrations run through a separate binary and connection.
@@ -246,7 +246,7 @@ them; migrations run through a separate binary and connection.
 
 Unprotected liveness and readiness endpoints are outside the versioned product
 API. Readiness verifies PostgreSQL with a short deadline. Prometheus-format
-metrics cover HTTP outcomes, materialized executions, Hook delivery outcomes,
+metrics cover HTTP outcomes, materialized executions, webhook delivery outcomes,
 retry counts, and worker loop failures without actor IDs or reminder text.
 Mutations, lifecycle transitions, and internal destination changes create
 append-only redacted audit rows in the same transaction as their state change.
@@ -293,11 +293,11 @@ The adapter retains a small, tested compatibility reader for the formerly
 published nested actor/membership shapes, but all variants collapse to the
 stable IAM principal UUID. No public handle is accepted as proof of identity.
 
-Public schedules and Hook routing still require IAM's immutable global Silicon
-ID. A trusted Hook-destination provisioning call therefore supplies the
+Public schedules and webhook routing still require IAM's immutable global Silicon
+ID. A trusted webhook-destination provisioning call therefore supplies the
 organization, principal UUID, and exact `{local_silicon_id}:{org_id}` handle in
 one request. Remind persists that binding separately, uses the principal UUID
-for ownership, and uses the public ID only in API responses and Hook URLs. The
+for ownership, and uses the public ID only in API responses and webhook URLs. The
 binding and organization lifecycle rows are locked during creation and become
 irreversible tombstones after revocation, closing create-versus-removal races
 and preventing reuse of a removed identity.
@@ -354,7 +354,7 @@ positive key version, rejects duplicate security headers and timestamps more
 than five minutes away, and verifies constant-time HMAC-SHA-256 over
 `{timestamp}.{exact raw body}` before JSON parsing. The HMAC key is the complete
 literal `whs_` credential, matching IAM's sender; this intentionally differs
-from Hook's `whsec_` contract, whose suffix is decoded before signing. Header
+from webhook's `whsec_` contract, whose suffix is decoded before signing. Header
 and body event UUIDs must agree, and exact event replays are deduplicated by a
 durable receipt while changed reuse conflicts.
 
@@ -367,11 +367,11 @@ execution, and destination cleanup. Every public read, materialization, claim,
 and destination lookup also joins active lifecycle state, so safety is immediate
 even when the worker must drain more rows in later bounded batches.
 
-## D-026 — Hook destination secrets have an explicit cryptographic lifecycle
+## D-026 — webhook destination secrets have an explicit cryptographic lifecycle
 
 **Status:** Accepted; extends D-010 and D-012
 
-Trusted provisioning validates the exact Hook origin, Silicon path identity,
+Trusted provisioning validates the exact webhook origin, Silicon path identity,
 canonical routing key, and one-time `whsec_` credential before encrypting both
 URL and secret independently with AES-256-GCM, fresh nonces, versioned keys, and
 field/tenant/identity associated data. Active rows encrypted under an older key
@@ -398,9 +398,9 @@ separate operational listener, loopback port `9090` by default, using the same
 metrics registry as its processing loops and graceful shutdown. Scheduler,
 delivery, revocation cleanup, and retention batches are positive and capped at
 10,000. Delivery has its own concurrency cap, never claims more work than it can
-start, and cannot exceed the scheduler batch. The lease must exceed the Hook
+start, and cannot exceed the scheduler batch. The lease must exceed the webhook
 request deadline, two database acquire-plus-statement budgets, one poll
-interval, and five seconds. Delivery remains at-least-once; Hook idempotency by
+interval, and five seconds. Delivery remains at-least-once; webhook idempotency by
 execution UUID is the correctness boundary if a pathological delay outlives a
 lease.
 
@@ -416,18 +416,18 @@ avoids carrying superseded intermediate layouts before the first release. Once
 the baseline has been deployed, these migration files become immutable and all
 schema evolution uses new forward-only migrations.
 
-## D-029 — Hook delivery accepts only documented endpoint identities
+## D-029 — webhook delivery accepts only documented endpoint identities
 
 **Status:** Accepted; clarifies D-010
 
-Provisioned URLs must share the configured Hook origin, contain no userinfo,
+Provisioned URLs must share the configured webhook origin, contain no userinfo,
 query, or fragment, and identify the exact global Silicon plus an uppercase
-six-hex routing key. Remind accepts Hook's canonical root path and its documented
+six-hex routing key. Remind accepts webhook's canonical root path and its documented
 `/api/v1` compatibility alias, with optional trailing slash, but no other path.
 For delivery it decodes the unpadded base64url characters after `whsec_` to the
 required 32-byte HMAC key and signs the exact serialized body. The execution UUID
 is the stable idempotency key, `occurred_at` equals the scheduled occurrence,
-redirects are disabled, and success requires Hook's `202` receipt containing a
+redirects are disabled, and success requires webhook's `202` receipt containing a
 valid event UUID.
 
 ## D-030 — Remind does not infer authority from legacy IAM integration variants
@@ -466,23 +466,18 @@ persisted deadlines and imply a configurability that `UNDERSTANDING.md` does
 not permit. Idempotency retention and bounded sweep cadence remain configurable
 because they are operational policies rather than user-visible archive rules.
 
-## D-032 — Reminder creation requires a transactionally active Hook destination
+## D-032 — Reminder creation does not require a webhook subscription
 
 **Status:** Accepted
 
-An active IAM token alone is insufficient to create a reminder. After checking
-for an exact committed idempotency replay, Remind resolves the Silicon's
-immutable principal binding and requires its Hook destination to exist and be
-enabled. The creation transaction locks the organization, identity, and
-destination in that order before inserting the reminder, serializing creation
-against destination disablement and preserving a single authoritative check.
-
-A never-provisioned or currently disabled destination returns HTTP `409` with
-the stable code `webhook_not_configured` and the product-required message
-`Set the webhook url first.` An IAM or organization tombstone remains the
-separate `silicon_unavailable` conflict because configuration cannot repair
-revoked authority. A committed idempotent replay returns its original response
-even if the destination is disabled later.
+An active IAM token and active Silicon identity are sufficient to create a
+reminder. Webhook subscriptions are optional and may be added or removed
+independently. Materialized executions with no active subscribers are marked
+delivered without making an outbound request; when subscribers exist, the
+worker fans the event out to every active URL using the same stable execution
+identifier. An IAM or organization tombstone remains a separate
+`silicon_unavailable` conflict because configuration cannot repair revoked
+authority. A committed idempotent replay returns its original response.
 
 ## D-033 — IAM's event vocabulary is open but its lifecycle projections are strict
 
@@ -601,7 +596,7 @@ request never extends an existing purge deadline.
 One-time materialization atomically inserts the immutable execution snapshot,
 sets the parent to `completed`, assigns the archive timestamp and 45-day purge
 deadline, and clears `next_run_at`. This transition happens when the trigger is
-processed rather than after Hook delivery. Its materialized execution remains
+processed rather than after webhook delivery. Its materialized execution remains
 eligible for delivery and retry because automatic archival must not discard the
 notification that caused it. Manual archival continues to cancel unaccepted
 work. Delivery-terminal transitions no longer mutate the parent schedule or
@@ -624,7 +619,7 @@ The 45-day archive deadline is a logical access and delivery boundary, not the
 time at which a best-effort maintenance pass happens to delete a row. Schedule
 and execution reads compare `purge_after` with PostgreSQL's current time, and
 delivery claim, pre-send lease validation, and terminal writes reject expired
-parents. An overdue row is therefore invisible and ineligible for Hook delivery
+parents. An overdue row is therefore invisible and ineligible for webhook delivery
 even when a retention sweep is delayed after an outage. The bounded sweep still
 performs physical deletion and ledger capture independently.
 

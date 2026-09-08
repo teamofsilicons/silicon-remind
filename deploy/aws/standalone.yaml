@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Silicon Remind standalone ARM64 EC2 deployment. The instance is directly
+  internet-facing (no load balancer), uses Caddy for HTTPS, and runs the API
+  and worker containers from ECR.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-04b23a487cfe0bd8e
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-07945746462c26b2d
+  DatabaseSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-0fbecb17f3e0c2521
+    Description: Existing RDS security group. Port 5432 is allowed only from this instance.
+  RuntimeSecretArn:
+    Type: String
+    Default: arn:aws:secretsmanager:us-east-1:234951665042:secret:silicon-remind/runtime-production-dbqkfb
+    NoEcho: true
+  BackendImageUri:
+    Type: String
+    Description: Full immutable ARM64 ECR URI, preferably pinned by digest.
+  CaddyImageUri:
+    Type: String
+    Default: caddy:2.10.2-alpine
+    Description: ARM64-capable Caddy image. Pin by digest for a production release.
+  HostName:
+    Type: String
+    Default: backend.remind.teamofsilicons.com
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.small, t4g.medium]
+  RootVolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 200
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon Remind standalone web server (Caddy only public)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP for Caddy ACME and redirect
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS for Caddy
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: silicon-remind-standalone
+        - Key: Service
+          Value: silicon-remind
+        - Key: Environment
+          Value: production
+
+  DatabaseIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref InstanceSecurityGroup
+      Description: Standalone Silicon Remind instance to existing RDS
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: silicon-remind-standalone-instance
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: silicon-remind-ecr-and-runtime-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/silicon-remind-production
+              - Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref RuntimeSecretArn
+      Tags:
+        - Key: Service
+          Value: silicon-remind
+        - Key: Environment
+          Value: production
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: DatabaseIngress
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          SubnetId: !Ref PublicSubnetId
+          GroupSet: [!Ref InstanceSecurityGroup]
+          AssociatePublicIpAddress: true
+      EbsOptimized: true
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeSize
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        InstanceMetadataTags: disabled
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            set -Eeuo pipefail
+            exec > >(tee -a /var/log/remind-bootstrap.log | logger -t remind-bootstrap -s 2>/dev/console) 2>&1
+            trap 'echo "bootstrap failed at line ${!LINENO}" >&2' ERR
+
+            dnf install -y docker awscli-2 python3
+            systemctl enable --now docker
+            install -d -m 0700 /etc/remind
+
+            aws secretsmanager get-secret-value \
+              --secret-id '${RuntimeSecretArn}' \
+              --query SecretString --output text > /etc/remind/runtime.json
+            chmod 0600 /etc/remind/runtime.json
+            python3 - <<'PY'
+            import json, os, pathlib
+            source = json.loads(pathlib.Path('/etc/remind/runtime.json').read_text())
+            required = ('REMIND_IAM_APP_SECRET', 'REMIND_IAM_WEBHOOK_KEYRING',
+                        'REMIND_ENCRYPTION_KEYRING', 'REMIND_INTERNAL_API_TOKEN',
+                        'REMIND_DATABASE_URL', 'REMIND_TEST_DATABASE_URL')
+            for key in required:
+                value = source.get(key)
+                if not isinstance(value, str) or not value or any(ord(c) in (0, 10, 13) for c in value):
+                    raise SystemExit('runtime secret is missing '+key)
+            # Only application configuration is copied; arbitrary secret keys are not
+            # passed to containers.
+            allow = set(required) | {
+                'REMIND_IAM_BASE_URL', 'REMIND_IAM_APP_ID', 'REMIND_ENCRYPTION_CURRENT_VERSION',
+                'REMIND_DATABASE_MAX_CONNECTIONS', 'REMIND_LOG_FILTER', 'REMIND_REQUEST_TIMEOUT_SECONDS',
+                'REMIND_WEBHOOK_CONNECT_TIMEOUT_MS', 'REMIND_WEBHOOK_REQUEST_TIMEOUT_MS',
+                'REMIND_WEBHOOK_MAX_RESPONSE_BYTES', 'REMIND_WORKER_MAX_DELIVERY_CONCURRENCY',
+            }
+            values = {k: source[k] for k in allow if k in source}
+            values.update({
+                'REMIND_ENVIRONMENT': 'production',
+                'REMIND_BIND_ADDR': '0.0.0.0:8080',
+                'REMIND_WORKER_OPERATIONAL_BIND_ADDR': '0.0.0.0:9090',
+                'REMIND_PUBLIC_BASE_URL': 'https://${HostName}',
+                'REMIND_IAM_BASE_URL': values.get('REMIND_IAM_BASE_URL', 'https://backend.iam.teamofsilicons.com'),
+                'REMIND_IAM_APP_ID': values.get('REMIND_IAM_APP_ID', 'tos>remind'),
+                'REMIND_ENCRYPTION_CURRENT_VERSION': values.get('REMIND_ENCRYPTION_CURRENT_VERSION', '1'),
+            })
+            with open('/etc/remind/runtime.env', 'w', opener=lambda p,m: os.open(p, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)) as output:
+                for key, value in sorted(values.items()):
+                    output.write(key+'='+value+'\n')
+            os.remove('/etc/remind/runtime.json')
+            PY
+
+            aws ecr get-login-password --region '${AWS::Region}' | docker login --username AWS --password-stdin '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+            docker pull '${BackendImageUri}'
+            docker pull '${CaddyImageUri}'
+
+            cat > /etc/remind/Caddyfile <<'CADDY'
+            {
+              email ops@teamofsilicons.com
+            }
+            ${HostName} {
+              encode gzip
+              @public path /health/* /api/* /webhook /webhook/
+              handle @public {
+                reverse_proxy remind-api:8080
+              }
+              handle {
+                respond 404
+              }
+            }
+            CADDY
+            chmod 0600 /etc/remind/Caddyfile
+
+            cat > /usr/local/sbin/remind-start <<'SCRIPT'
+            #!/bin/bash
+            set -Eeuo pipefail
+            docker rm -f remind-caddy remind-api remind-worker >/dev/null 2>&1 || true
+            docker run -d --name remind-api --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
+              --network remind --env-file /etc/remind/runtime.env \
+              --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+              --cap-drop ALL --security-opt no-new-privileges:true \
+              --health-cmd 'busybox wget -q -O /dev/null http://127.0.0.1:8080/health/ready' \
+              --health-interval 30s --health-timeout 5s --health-retries 3 \
+              --entrypoint /usr/local/bin/remind-api '${BackendImageUri}'
+            docker run -d --name remind-worker --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
+              --network remind --env-file /etc/remind/runtime.env \
+              --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+              --cap-drop ALL --security-opt no-new-privileges:true \
+              --health-cmd 'busybox wget -q -O /dev/null http://127.0.0.1:9090/health/ready' \
+              --health-interval 30s --health-timeout 5s --health-retries 3 \
+              --entrypoint /usr/local/bin/remind-worker '${BackendImageUri}'
+            docker volume create remind-caddy-data >/dev/null 2>&1 || true
+            docker volume create remind-caddy-config >/dev/null 2>&1 || true
+            docker run -d --name remind-caddy --restart unless-stopped \
+              --network remind -p 80:80 -p 443:443 \
+              -v /etc/remind/Caddyfile:/etc/caddy/Caddyfile:ro \
+              -v remind-caddy-data:/data \
+              -v remind-caddy-config:/config \
+              --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+              --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges:true \
+              '${CaddyImageUri}' caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+            SCRIPT
+            chmod 0750 /usr/local/sbin/remind-start
+            docker network create --driver bridge remind >/dev/null 2>&1 || true
+            cat > /etc/systemd/system/remind.service <<'UNIT'
+            [Unit]
+            Description=Silicon Remind containers
+            Requires=docker.service
+            After=docker.service network-online.target
+            Wants=network-online.target
+            [Service]
+            Type=oneshot
+            RemainAfterExit=yes
+            ExecStart=/usr/local/sbin/remind-start
+            ExecStop=-/usr/bin/docker rm -f remind-caddy remind-api remind-worker
+            TimeoutStartSec=300
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            systemctl daemon-reload
+            systemctl enable --now remind.service
+            echo 'Silicon Remind standalone bootstrap completed.'
+      Tags:
+        - Key: Name
+          Value: silicon-remind-standalone
+        - Key: Service
+          Value: silicon-remind
+        - Key: Environment
+          Value: production
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  PublicIp:
+    Value: !GetAtt Instance.PublicIp
+  PublicUrl:
+    Value: !Sub https://${HostName}
+  HealthUrl:
+    Value: !Sub https://${HostName}/health/ready
+  InstanceSecurityGroupId:
+    Value: !Ref InstanceSecurityGroup

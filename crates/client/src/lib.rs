@@ -282,7 +282,26 @@ impl Client {
         &self,
         input: &models::Destination,
     ) -> Result<models::DestinationReceipt> {
-        self.json(self.request(Method::PUT, "/api/v1/webhook")?.json(input))
+        self.json(self.request(Method::POST, "/api/v1/webhooks")?.json(input))
+            .await
+    }
+    /// Add an independent webhook subscription. Multiple subscriptions may be
+    /// active for one Silicon; an empty set is valid.
+    pub async fn subscribe_webhook(
+        &self,
+        input: &models::Destination,
+    ) -> Result<models::DestinationReceipt> {
+        self.json(self.request(Method::POST, "/api/v1/webhooks")?.json(input))
+            .await
+    }
+    /// List every active webhook subscription for the authenticated Silicon.
+    pub async fn webhooks(&self) -> Result<models::WebhookSubscriptions> {
+        self.json(self.request(Method::GET, "/api/v1/webhooks")?)
+            .await
+    }
+    /// Disable one webhook subscription by registry UUID.
+    pub async fn unsubscribe_webhook(&self, id: Uuid) -> Result<()> {
+        self.empty(self.request(Method::DELETE, &format!("/api/v1/webhooks/{id}"))?)
             .await
     }
     pub async fn webhook(&self) -> Result<models::DestinationInfo> {

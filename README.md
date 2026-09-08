@@ -3,7 +3,7 @@
 Silicon Remind is the durable scheduling backend for one-time and recurring
 Silicon reminders. It authenticates callers through Silicon IAM, stores schedule
 and execution state in PostgreSQL, and submits signed events with stable execution IDs to
-Silicon Hook when occurrences become due.
+configured webhook receiver when occurrences become due.
 
 Both reminder kinds use five-field Linux cron syntax. Clients select
 `one_time` or `recurring` explicitly and may omit the IANA timezone, in which
@@ -26,7 +26,7 @@ The service is a Rust modular monolith with three independently runnable
 processes:
 
 - `remind-api` serves the public and internal HTTP APIs.
-- `remind-worker` materializes due occurrences, delivers Hook events, retries
+- `remind-worker` materializes due occurrences, delivers webhook events, retries
   transient failures, and applies retention.
 - `remind-migrate` applies embedded forward-only PostgreSQL migrations once.
 
@@ -85,7 +85,7 @@ existing volume, create the latter database explicitly before running migrations
 
 The API is available at `http://127.0.0.1:8080`, the worker's operational server
 at `http://127.0.0.1:9090`, and PostgreSQL only on `127.0.0.1:5432`. The Compose
-file overrides database hostnames for its network. IAM and Hook URLs in `.env`
+file overrides database hostnames for its network. IAM and webhook URLs in `.env`
 must also be reachable from the containers. On Docker Desktop, a host-run
 dependency can normally be addressed through `host.docker.internal` rather than
 `127.0.0.1`.
@@ -139,8 +139,8 @@ Build the public client and CLI with `cargo build --workspace`. The executable i
 IAM SLT for `tos>remind`, then use:
 
 ```sh
-remind auth login --org tos --slt-stdin < /private/remind-slt
-remind webhook set <Hook-issued-endpoint> --secret-stdin < /private/hook-secret
+remind login <slt>
+remind webhook subscribe https://example.com/reminders --secret-stdin < /private/webhook-secret
 remind create --text 'Check the build' --cron '*/5 * * * *'
 ```
 
@@ -153,12 +153,12 @@ The registered IAM receiver is `POST /webhook/`. Configure its exact signing
 version and secret in the backend keyring. Registering the URL does not deploy
 it or complete IAM review. Test requests require a Remind root key and the
 linked IAM sandbox's own identity/Application credential. Test reminders only
-accept Hook test ingress; production reminders only accept production ingress.
+accept webhook test ingress; production reminders only accept production ingress.
 
 Detailed references live in [docs/](docs/README.md): [API](docs/api/README.md),
 [Rust client](docs/client/README.md), [CLI](docs/cli/README.md),
 [IAM](docs/iam.md), [testing environments](docs/testing-environments.md), and
-[Hook delivery](docs/hook-delivery.md). The
+[webhook delivery](docs/webhook-delivery.md). The
 [manual acceptance record](docs/MANUAL_ACCEPTANCE.md) identifies verified work
 and outstanding evidence. Internal provisioning is documented separately in
 [docs/internal-api.md](docs/internal-api.md) and is not exposed by the client.
@@ -168,7 +168,7 @@ and outstanding evidence. Internal provisioning is documented separately in
 [.env.example](.env.example) is the exhaustive `REMIND_*` configuration
 reference and matches [src/config.rs](src/config.rs). Values are grouped by
 server, runtime and migrator database pools, IAM, internal authentication,
-encryption, Hook, workers, retries, and retention.
+encryption, webhook, workers, retries, and retention.
 
 Important invariants include:
 
@@ -178,7 +178,7 @@ Important invariants include:
 - IAM delivers application events to `POST /webhook/` (the internal alias remains). This route
   does not accept the internal bearer token as authentication: it verifies
   `X-Silicon-IAM-*` headers over the exact raw body, enforces the five-minute
-  replay window, and deduplicates the signed event ID durably. Hook-destination
+  replay window, and deduplicates the signed event ID durably. webhook-destination
   provisioning routes remain protected by the internal bearer credential.
 - Encryption keys are unpadded base64url encodings of exactly 32 random bytes.
   Increment the current version for new writes. Worker sweeps automatically
@@ -186,16 +186,17 @@ Important invariants include:
   references them. Disabled destination ciphertext is purged after 45 days.
 - Production HTTP dependency URLs must use HTTPS. PostgreSQL URLs must include
   `sslmode=verify-full`.
-- The Hook base URL restricts persisted delivery destinations; arbitrary
-  destination hosts are not accepted.
-- Hook delivery concurrency is bounded independently from scheduler batch size
+- Each Silicon may have zero or more persisted webhook subscriptions; arbitrary
+  absolute HTTP(S) destination hosts and paths are accepted subject to transport
+  validation.
+- webhook delivery concurrency is bounded independently from scheduler batch size
   and cannot exceed that batch size. A worker claims no more deliveries than it
   can start concurrently, so leased work does not wait behind an in-process
   queue.
-- The worker lease must exceed the Hook request timeout, two configured database
+- The worker lease must exceed the webhook request timeout, two configured database
   operation budgets, one poll interval, and a five-second safety margin. Retry
   maximum delay must not be shorter than the base delay.
-- Schedule history and disabled Hook destinations have a fixed 45-day retention
+- Schedule history and disabled webhook destinations have a fixed 45-day retention
   policy. Before a retained schedule is permanently removed, the worker writes
   an internal, one-line JSON deleted-reminder record containing its reminder,
   trigger, and creator snapshots. The ledger keeps the newest 100,000 records
@@ -226,7 +227,7 @@ API and worker roles independently, and preserve graceful `SIGTERM` windows.
 src/api/              HTTP routing, middleware, and wire models
 src/application/      Use cases and infrastructure-independent ports
 src/domain/           Scheduling, execution, actor, and cursor policy
-src/infrastructure/   PostgreSQL, IAM, Hook, and encryption adapters
+src/infrastructure/   PostgreSQL, IAM, webhook, and encryption adapters
 src/worker/           Scheduler, delivery, and retention loops
 src/bin/              API, worker, and migration composition roots
 migrations/           Ordered PostgreSQL schema migrations

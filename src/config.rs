@@ -36,8 +36,8 @@ pub struct Settings {
     pub internal_api: InternalApiSettings,
     /// Versioned data-encryption keys.
     pub encryption: EncryptionSettings,
-    /// Silicon Hook delivery client.
-    pub hook: HookSettings,
+    /// Generic outbound webhook delivery client.
+    pub webhook: WebhookSettings,
     /// Durable worker polling and lease policy.
     pub worker: WorkerSettings,
     /// Delivery retry policy.
@@ -158,7 +158,7 @@ pub struct InternalApiSettings {
     pub bearer_token: SecretString,
 }
 
-/// Versioned AES-256 keyring used for encrypted Hook destination secrets.
+/// Versioned AES-256 keyring used for encrypted webhook destination secrets.
 #[derive(Clone, Debug)]
 pub struct EncryptionSettings {
     /// Version used for newly encrypted values.
@@ -203,16 +203,14 @@ impl EncryptionSettings {
     }
 }
 
-/// Silicon Hook outbound-delivery policy.
+/// Generic outbound webhook-delivery policy.
 #[derive(Clone, Debug)]
-pub struct HookSettings {
-    /// Allowed Hook service base URL used to validate stored destinations.
-    pub base_url: Url,
+pub struct WebhookSettings {
     /// TCP/TLS connection establishment deadline.
     pub connect_timeout: Duration,
-    /// End-to-end Hook request deadline.
+    /// End-to-end webhook request deadline.
     pub request_timeout: Duration,
-    /// Maximum accepted Hook response body size.
+    /// Maximum accepted webhook response body size.
     pub max_response_bytes: usize,
 }
 
@@ -223,7 +221,7 @@ pub struct WorkerSettings {
     pub operational_bind_addr: SocketAddr,
     /// Maximum records claimed by one worker query.
     pub batch_size: NonZeroUsize,
-    /// Maximum Hook deliveries attempted concurrently by one worker process.
+    /// Maximum webhook deliveries attempted concurrently by one worker process.
     pub max_delivery_concurrency: NonZeroUsize,
     /// Delay between idle worker polls.
     pub poll_interval: Duration,
@@ -310,15 +308,10 @@ impl Settings {
             bearer_token: required_secret(source, "REMIND_INTERNAL_API_TOKEN")?,
         };
         let encryption = encryption_settings(source)?;
-        let hook = HookSettings {
-            base_url: parse_or(
-                source,
-                "REMIND_HOOK_BASE_URL",
-                "http://127.0.0.1:8082/api/v1",
-            )?,
-            connect_timeout: duration_millis(source, "REMIND_HOOK_CONNECT_TIMEOUT_MS", 2_000)?,
-            request_timeout: duration_millis(source, "REMIND_HOOK_REQUEST_TIMEOUT_MS", 10_000)?,
-            max_response_bytes: positive_size(source, "REMIND_HOOK_MAX_RESPONSE_BYTES", 65_536)?,
+        let webhook = WebhookSettings {
+            connect_timeout: duration_millis(source, "REMIND_WEBHOOK_CONNECT_TIMEOUT_MS", 2_000)?,
+            request_timeout: duration_millis(source, "REMIND_WEBHOOK_REQUEST_TIMEOUT_MS", 10_000)?,
+            max_response_bytes: positive_size(source, "REMIND_WEBHOOK_MAX_RESPONSE_BYTES", 65_536)?,
         };
         let worker = WorkerSettings {
             operational_bind_addr: parse_or(
@@ -359,7 +352,7 @@ impl Settings {
             iam,
             internal_api,
             encryption,
-            hook,
+            webhook,
             worker,
             retry,
             retention,
@@ -558,7 +551,7 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
         database,
         iam,
         internal_api,
-        hook,
+        webhook,
         worker,
         retry,
         retention,
@@ -566,7 +559,6 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
     } = settings;
     validate_http_url("REMIND_PUBLIC_BASE_URL", &server.public_base_url)?;
     validate_http_url("REMIND_IAM_BASE_URL", &iam.base_url)?;
-    validate_http_url("REMIND_HOOK_BASE_URL", &hook.base_url)?;
 
     if iam.app_id.len() > 255 {
         return Err(invalid("REMIND_IAM_APP_ID", "must be at most 255 bytes"));
@@ -608,7 +600,7 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
                 "delivery database safety budget is too large",
             )
         })?;
-    let minimum_lease = hook
+    let minimum_lease = webhook
         .request_timeout
         .checked_add(database_budget)
         .and_then(|duration| duration.checked_add(worker.poll_interval))
@@ -622,7 +614,7 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
     if worker.lease_duration <= minimum_lease {
         return Err(invalid(
             "REMIND_WORKER_LEASE_SECONDS",
-            "must exceed the Hook timeout, two database operation budgets, the poll interval, and a five-second safety margin",
+            "must exceed the webhook timeout, two database operation budgets, the poll interval, and a five-second safety margin",
         ));
     }
     if retry.max_attempts == 0 {
@@ -651,7 +643,6 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
     validate_database_transport(*environment, database, "REMIND_DATABASE_URL")?;
     require_https("REMIND_PUBLIC_BASE_URL", &server.public_base_url)?;
     require_https("REMIND_IAM_BASE_URL", &iam.base_url)?;
-    require_https("REMIND_HOOK_BASE_URL", &hook.base_url)?;
     validate_secret_strength("REMIND_IAM_APP_SECRET", &iam.app_secret)?;
     validate_secret_strength("REMIND_INTERNAL_API_TOKEN", &internal_api.bearer_token)?;
     Ok(())
@@ -1064,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_insecure_hook_transport_in_production() {
+    fn production_settings_do_not_require_a_hook_service() {
         let mut source = valid_source();
         source
             .0
@@ -1090,13 +1081,7 @@ mod tests {
             "a-production-internal-token-that-is-long-enough".to_owned(),
         );
 
-        assert!(matches!(
-            Settings::from_source(&source),
-            Err(SettingsError::Invalid {
-                name: "REMIND_HOOK_BASE_URL",
-                ..
-            })
-        ));
+        assert!(Settings::from_source(&source).is_ok());
     }
 
     #[test]
