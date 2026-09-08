@@ -315,5 +315,11 @@ checksum; it was copied separately and fresh databases were migrated instead.
   Strict Clippy also exposed a missing crate documentation comment in `build.rs`;
   the comment was added.
 
-The source fix is verified locally. Updating the deployed backend is pending
-renewal of the expired `silicon-production` AWS SSO session.
+The fix was deployed after renewing the AWS session. The public sandbox
+reproduced `409 silicon_unavailable` on the old image, then returned 201 for
+the same authenticated Silicon with zero subscriptions on the new image. Its
+one-time occurrence at `2026-09-08T11:44:00Z` was processed successfully as
+execution `01a080d5-0982-7e73-8832-9a7afe2fc9a9`. Both backend containers and the
+frontend gateway health checks passed. The disposable public Remind and IAM
+sandboxes were retired afterward. Image and rollout evidence is recorded in
+[the backend deployment follow-up](../deploy/aws/backend-2026-09-08-8912907.md).

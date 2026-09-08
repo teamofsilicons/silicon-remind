@@ -14,7 +14,20 @@ security group. The runtime secret must contain these non-empty values:
 `REMIND_ENCRYPTION_KEYRING`, `REMIND_INTERNAL_API_TOKEN`,
 `REMIND_DATABASE_URL`, and `REMIND_TEST_DATABASE_URL`.
 
-Build and push an ARM64 backend image, resolve its digest, then deploy:
+Build the ARM64 base image, then wrap it with `deploy/aws/Dockerfile.runtime`
+before pushing. The wrapper installs the AWS RDS CA bundle required by the
+production database URLs; the base image alone cannot connect to RDS.
+
+```bash
+docker build --platform linux/arm64 -t silicon-remind:release .
+docker build --platform linux/arm64 -f deploy/aws/Dockerfile.runtime \
+  --build-arg BACKEND_IMAGE=silicon-remind:release \
+  -t <ecr-repository>:<release-tag> .
+docker push <ecr-repository>:<release-tag>
+```
+
+Resolve the wrapped image's digest, verify API startup and `/health/ready` in a
+temporary container using the existing runtime configuration, then deploy:
 
 ```bash
 AWS_PROFILE=silicon-production AWS_REGION=us-east-1 \
