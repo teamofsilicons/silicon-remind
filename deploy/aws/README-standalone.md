@@ -96,3 +96,5 @@ curl --fail --show-error https://remind.teamofsilicons.com/ui/api/health/ready
 ```
 
 See [the initial frontend deployment record](frontend-2026-09-08.md).
+
+Current release: [unscoped IAM sign-in](unscoped-login-2026-09-08.md).

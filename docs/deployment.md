@@ -1,5 +1,10 @@
 # Production deployment and releases
 
+The current live deployment uses the [standalone EC2 setup](../deploy/aws/README-standalone.md).
+Its latest image digests and verification are recorded in the
+[unscoped IAM login release](../deploy/aws/unscoped-login-2026-09-08.md).
+The Fargate configuration below remains an alternative deployment template.
+
 Remind uses the `silicon-production` AWS profile, account `234951665042`, region
 `us-east-1`. Its dedicated CloudFormation stack is `silicon-remind-production`.
 The public origin is `https://backend.remind.teamofsilicons.com`, with the IAM

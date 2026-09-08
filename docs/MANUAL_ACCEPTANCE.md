@@ -337,3 +337,10 @@ sandboxes were retired afterward. Image and rollout evidence is recorded in
 - Rust workspace tests, strict all-target Clippy, formatting, synchronized
   package documentation, frontend tests and production build passed. Backend
   identity checks retain principal, membership, audience and test-plane guards.
+
+The update was also deployed and verified in Chrome on the public Remind site.
+The existing browser session survived deployment, and a fresh unscoped IAM
+handoff returned successfully with the existing `tos` grant. Both backend
+containers were healthy and both public readiness routes returned 200. See the
+[deployment record](../deploy/aws/unscoped-login-2026-09-08.md) for pinned images
+and successful rollout commands.
