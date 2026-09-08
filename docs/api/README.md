@@ -34,12 +34,20 @@ and rejects this test header. See [testing environments](../testing-environments
 | `POST /auth/refresh` | `{"refresh_token":"…"}` | Successor access and rotating refresh tokens |
 | `POST /auth/logout` | `{"token":"…"}` | `204`; refresh token revokes the whole family |
 | `GET /auth/me` | Bearer and org headers | Current identity, disclosed org role and reminder-write capability |
+| `GET /auth/organizations` | Bearer; no org header required | `items` containing identities for organizations currently authorized through IAM |
 
 The three POST endpoints accept a token in their JSON body. Remind's Application
 secret stays on the server. They do not ask for an IAM password, email, phone,
 OTP, or a browser redirect. Pass an `Idempotency-Key` on login and refresh when a
 retry must replay the same logical exchange. It must be 16–255 visible ASCII
 characters. Session responses use `Cache-Control: no-store`.
+
+Browser sign-in sends only `app_id=tos>remind` and `redirect_uri` to IAM; it must
+not send `org_id` or `org_ids`. The user chooses the authorized organizations in
+IAM. After exchanging the resulting unscoped SLT, use `/auth/organizations` to
+discover that explicit grant list, then choose one as `X-Org-ID` for ordinary
+requests. Membership alone does not grant application access. Legacy scoped
+sessions remain usable within their original organization.
 
 Example, with a short-lived token supplied from a protected file:
 

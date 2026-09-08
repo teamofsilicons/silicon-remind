@@ -132,7 +132,51 @@ impl IamClient {
         org_id: &str,
         now: DateTime<Utc>,
     ) -> Result<Actor, IamError> {
-        // Introspection can also describe refresh tokens. Those never authorize actions.
+        let inspected = self.inspect(token, Some(org_id), now).await?;
+        let snapshot = inspected
+            .authorization
+            .as_ref()
+            .ok_or(IamError::Unauthenticated)?;
+        if inspected.authorizations.is_some() || snapshot.org_id != org_id {
+            return Err(IamError::Unauthenticated);
+        }
+        self.actor(&inspected, snapshot)
+    }
+
+    /// Returns only organizations currently authorized through IAM for this token.
+    ///
+    /// # Errors
+    /// Rejects invalid, expired, wrong-audience, or cross-plane authority.
+    pub async fn organizations(
+        &self,
+        token: &SecretString,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Actor>, IamError> {
+        let inspected = self.inspect(token, None, now).await?;
+        let snapshots = match (&inspected.authorization, &inspected.authorizations) {
+            (Some(snapshot), None) => std::slice::from_ref(snapshot),
+            (None, Some(snapshots)) if inspected.org_id.is_none() => snapshots.as_slice(),
+            _ => return Err(IamError::Unauthenticated),
+        };
+        let mut seen = std::collections::HashSet::new();
+        snapshots
+            .iter()
+            .map(|snapshot| {
+                if !seen.insert(&snapshot.org_id) {
+                    return Err(IamError::Unauthenticated);
+                }
+                self.actor(&inspected, snapshot)
+            })
+            .collect()
+    }
+
+    async fn inspect(
+        &self,
+        token: &SecretString,
+        org_id: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<models::TokenIntrospection, IamError> {
+        // Refresh tokens never authorize requests or organization discovery.
         if !token.expose_secret().starts_with("oat_") {
             return Err(IamError::Unauthenticated);
         }
@@ -146,21 +190,36 @@ impl IamClient {
                         models::TokenIntrospectionRequestTokenTypeHint::AccessToken,
                     ),
                 },
-                Some(org_id),
+                org_id,
             )
             .await
             .map_err(classify)?;
-        let snapshot = inspected.authorization.ok_or(IamError::Unauthenticated)?;
         if !inspected.active
             || inspected
                 .expires_at
                 .is_none_or(|expiry| expiry <= now.timestamp())
             || inspected.client_id.as_deref() != Some(&self.app_id)
-            || snapshot.audience != self.app_id
-            || snapshot.org_id != org_id
-            || inspected.org_id.as_deref() != Some(org_id)
+            || inspected.principal_id.is_none()
+        {
+            return Err(IamError::Unauthenticated);
+        }
+        Ok(inspected)
+    }
+
+    fn actor(
+        &self,
+        inspected: &models::TokenIntrospection,
+        snapshot: &models::ApplicationAuthorization,
+    ) -> Result<Actor, IamError> {
+        if snapshot.audience != self.app_id
+            || inspected
+                .org_id
+                .as_deref()
+                .is_some_and(|org| org != snapshot.org_id)
             || inspected.principal_id != Some(snapshot.principal_id)
-            || inspected.membership_id != Some(snapshot.membership_id)
+            || inspected
+                .membership_id
+                .is_some_and(|id| id != snapshot.membership_id)
             || snapshot.testing_environment_id != self.testing_environment_id
         {
             return Err(IamError::Unauthenticated);
@@ -177,12 +236,12 @@ impl IamClient {
         Ok(Actor {
             kind,
             id: snapshot.principal_id.to_string(),
-            org_id: org_id.to_owned(),
+            org_id: snapshot.org_id.clone(),
             membership_id: snapshot.membership_id,
             authorization_epoch: epoch,
             organization_iam_id: Some(snapshot.organization_id),
-            public_id: Some(snapshot.public_id),
-            org_role: snapshot.org_role,
+            public_id: Some(snapshot.public_id.clone()),
+            org_role: snapshot.org_role.clone(),
             read_scope: ReminderReadScope::organization(),
         })
     }
@@ -196,5 +255,64 @@ fn classify(error: silicon_iam_client::Error) -> IamError {
             IamError::Unauthenticated
         }
         _ => IamError::Unavailable(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unscoped_authority_preserves_identity_audience_and_plane_boundaries() -> anyhow::Result<()> {
+        let client = IamClient {
+            client: Client::builder("http://127.0.0.1:8080")?
+                .auto_update(false)
+                .build()?,
+            app_id: "tos>remind".to_owned(),
+            testing_environment_id: None,
+        };
+        let principal = Uuid::now_v7();
+        let membership = Uuid::now_v7();
+        let inspected: models::TokenIntrospection = serde_json::from_value(json!({
+            "active": true, "principal_id": principal, "client_id": "tos>remind",
+            "org_id": null, "membership_id": null,
+        }))?;
+        let snapshot: models::ApplicationAuthorization = serde_json::from_value(json!({
+            "principal_id": principal, "actor_type": "carbon", "public_id": "person",
+            "organization_id": Uuid::now_v7(), "org_id": "alpha", "membership_id": membership,
+            "membership_version": 1, "authorization_epoch": 1, "audience": "tos>remind",
+            "testing_environment_id": null, "scopes": [], "org_role": "member", "tags": null,
+        }))?;
+        assert_eq!(client.actor(&inspected, &snapshot)?.org_id, "alpha");
+        let mut scoped = inspected.clone();
+        scoped.org_id = Some("alpha".to_owned());
+        scoped.membership_id = Some(membership);
+        assert!(client.actor(&scoped, &snapshot).is_ok());
+        scoped.org_id = Some("other".to_owned());
+        assert!(matches!(
+            client.actor(&scoped, &snapshot),
+            Err(IamError::Unauthenticated)
+        ));
+        scoped.org_id = None;
+        scoped.membership_id = Some(Uuid::now_v7());
+        assert!(matches!(
+            client.actor(&scoped, &snapshot),
+            Err(IamError::Unauthenticated)
+        ));
+        for change in ["principal", "audience", "plane", "epoch"] {
+            let mut invalid = snapshot.clone();
+            match change {
+                "principal" => invalid.principal_id = Uuid::now_v7(),
+                "audience" => invalid.audience = "tos>other".to_owned(),
+                "plane" => invalid.testing_environment_id = Some(Uuid::now_v7()),
+                _ => invalid.authorization_epoch = -1,
+            }
+            assert!(matches!(
+                client.actor(&inspected, &invalid),
+                Err(IamError::Unauthenticated)
+            ));
+        }
+        Ok(())
     }
 }

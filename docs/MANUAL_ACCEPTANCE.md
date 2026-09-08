@@ -323,3 +323,17 @@ execution `01a080d5-0982-7e73-8832-9a7afe2fc9a9`. Both backend containers and th
 frontend gateway health checks passed. The disposable public Remind and IAM
 sandboxes were retired afterward. Image and rollout evidence is recorded in
 [the backend deployment follow-up](../deploy/aws/backend-2026-09-08-8912907.md).
+
+## 2026-09-08 — Unscoped IAM sign-in
+
+- Chrome on local Remind: Continue with IAm opened IAM with `app_id` and
+  `redirect_uri`, without either organization query parameter.
+- IAM displayed Choose organizations and the existing authorized `tos` grant.
+  Continuing with that grant returned to `/#reminders` as Carbon `saket`, with
+  `tos` selected in the organization dropdown and the read-only reminder view.
+- Gateway regression checks cover unscoped exchange/discovery, multiple grants,
+  switching, refusal of unauthorized organizations, removed/empty grants, and
+  existing CSRF, cross-browser correlation, replay and token-secrecy behavior.
+- Rust workspace tests, strict all-target Clippy, formatting, synchronized
+  package documentation, frontend tests and production build passed. Backend
+  identity checks retain principal, membership, audience and test-plane guards.

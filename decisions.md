@@ -693,3 +693,15 @@ inactive organizations cannot be overwritten or reactivated. The final schedule
 transaction retains its lifecycle locks and rechecks. No API or schema change is
 required. See the resumed run in `docs/MANUAL_ACCEPTANCE.md` for real zero- and
 two-subscriber delivery evidence.
+
+## 2026-09-08 — IAM owns organization selection during sign-in
+
+Remind starts an unscoped IAM login with only the application ID and callback.
+IAM presents the organization grants. The backend uses silicon-iam-client 1.4.0
+to introspect the resulting token and expose its currently authorized identities
+through `GET /api/v1/auth/organizations`. The frontend selects one of those grants
+for ordinary organization-bound API requests and lets users switch in the sidebar.
+Session reload rechecks the grants, dropping a removed selection. Access tokens
+remain server-side, and every API request retains live IAM authorization checks.
+The login page no longer asks for an organization handle or offers a production
+SLT form. The sandbox SLT form remains for testing-environment credentials.

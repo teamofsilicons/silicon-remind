@@ -152,6 +152,10 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
         .route("/metrics", get(handlers::health::metrics))
         .route("/webhook/", post(handlers::internal::accept_iam_event))
         .route("/api/v1/auth/login", post(handlers::auth::login))
+        .route(
+            "/api/v1/auth/organizations",
+            get(handlers::auth::organizations),
+        )
         .route("/api/v1/auth/refresh", post(handlers::auth::refresh))
         .route("/api/v1/auth/logout", post(handlers::auth::logout))
         .route(

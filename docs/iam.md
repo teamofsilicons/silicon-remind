@@ -21,7 +21,12 @@ Client/CLI users of Remind have separate default-on updater behavior.
 The CLI and Rust client submit an IAM short-lived token to Remind's login route.
 The server exchanges it through `oauth().login` with its Application credential.
 Refresh uses `oauth().refresh`; logout uses `oauth().revoke`. No IAM password or
-OTP is accepted by Remind. Use organization-bound SLTs for org reminder access.
+OTP is accepted by Remind. Browser sign-in starts an unscoped IAM login: the user
+selects the organizations to authorize in IAM itself. Remind exchanges the SLT
+without an organization header, then discovers the granted organizations through
+`GET /api/v1/auth/organizations`. The sidebar switches between those grants.
+`X-Org-ID` selects an already-authorized organization for reminder requests; it
+does not add grants or scope a new login.
 
 Every authenticated request calls IAM introspection with the requested org and
 requires an active Application access token, future expiry, matching app/client

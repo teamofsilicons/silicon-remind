@@ -94,15 +94,36 @@ pub async fn logout(
 
 /// Returns the actor's current organization-bound identity and permissions.
 pub async fn me(Extension(actor): Extension<Actor>) -> Response {
-    no_store(
-        Json(serde_json::json!({
+    no_store(Json(identity(&actor)).into_response())
+}
+
+/// Lists the organizations explicitly authorized through IAM for this session.
+///
+/// # Errors
+/// Returns unauthorized for invalid authority or unavailable when IAM cannot answer.
+pub async fn organizations(
+    ScopedState(state): ScopedState,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let token = crate::api::middleware::bearer_token(&headers)?;
+    let actors = state
+        .iam
+        .organizations(&token, chrono::Utc::now())
+        .await
+        .map_err(|error| map_error(&error))?;
+    let items: Vec<_> = actors.iter().map(identity).collect();
+    Ok(no_store(
+        Json(serde_json::json!({"items": items})).into_response(),
+    ))
+}
+
+fn identity(actor: &Actor) -> serde_json::Value {
+    serde_json::json!({
             "principal_id": actor.id, "actor_type": actor.kind, "public_id": actor.public_id,
             "org_id": actor.org_id, "membership_id": actor.membership_id,
             "org_role": actor.org_role, "authorization_epoch": actor.authorization_epoch,
             "can_manage_reminders": actor.kind == crate::domain::ActorKind::Silicon,
-        }))
-        .into_response(),
-    )
+    })
 }
 
 fn mutation(headers: &HeaderMap) -> Result<Mutation, AppError> {

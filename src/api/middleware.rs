@@ -128,7 +128,7 @@ pub async fn authenticate_internal(
     }
 }
 
-fn bearer_token(headers: &http::HeaderMap) -> Result<SecretString, AppError> {
+pub(crate) fn bearer_token(headers: &http::HeaderMap) -> Result<SecretString, AppError> {
     let value =
         unique_header(headers, header::AUTHORIZATION.as_str()).ok_or(AppError::Unauthenticated)?;
     let token = value

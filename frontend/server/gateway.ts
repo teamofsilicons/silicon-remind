@@ -6,6 +6,7 @@ interface Context {
   id: string;
   name: string;
   org: string;
+  organizations?: string[];
   key?: string;
   identity?: any;
   token?: string;
@@ -17,7 +18,7 @@ interface State {
   active: string;
   contexts: Record<string, Context>;
   touched: number;
-  login?: { nonce: string; contextId: string; org: string; expires: number };
+  login?: { nonce: string; contextId: string; expires: number };
 }
 const MAX = 1_048_576;
 export function createGateway(config: {
@@ -153,6 +154,7 @@ export function createGateway(config: {
       id: c.id,
       name: c.name,
       org: c.org,
+      organizations: c.organizations || [],
       identity: c.identity || null,
     })),
     identity: s.contexts[s.active]?.identity || null,
@@ -252,6 +254,15 @@ export function createGateway(config: {
           }
         }
       }
+      async function selectOrganization(c: Context, requested?: string) {
+        const result = await remote("/api/v1/auth/organizations", { ...c, org: "" });
+        const organizations: string[] = result.items.map((item: any) => item.org_id);
+        if (requested !== undefined && !organizations.includes(requested))
+          throw Object.assign(Error("This organization has not been authorized in IAm"), { status: 403 });
+        c.organizations = organizations;
+        c.org = requested ?? (organizations.includes(c.org) ? c.org : organizations[0] || "");
+        c.identity = c.org ? await remote("/api/v1/auth/me", c) : undefined;
+      }
       if (callback) {
         const attempt = state.login;
         const nonce = url.searchParams.get("state");
@@ -278,7 +289,7 @@ export function createGateway(config: {
         await save(id, state);
         const candidate = {
           ...state.contexts[attempt.contextId],
-          org: attempt.org,
+          org: "",
         };
         const tokens = await remote(
           "/api/v1/auth/login",
@@ -292,7 +303,7 @@ export function createGateway(config: {
         candidate.refresh = tokens.refresh_token;
         candidate.expires = Date.now() + tokens.expires_in * 1000;
         delete candidate.pending;
-        candidate.identity = await remote("/api/v1/auth/me", candidate);
+        await selectOrganization(candidate);
         state.contexts[attempt.contextId] = candidate;
         await save(id, state);
         res.setHeader("Set-Cookie", [sessionCookie(id), loginCookie("", 0)]);
@@ -307,15 +318,9 @@ export function createGateway(config: {
             ),
             { status: 422 },
           );
-        const org = typeof body.org === "string" ? body.org.trim() : "";
-        if (!/^[a-z0-9][a-z0-9_-]{0,99}$/.test(org))
-          throw Object.assign(Error("Enter an organization handle"), {
-            status: 422,
-          });
         const nonce = randomBytes(32).toString("hex");
         state.login = {
           nonce,
-          org,
           contextId: state.active,
           expires: Date.now() + 600000,
         };
@@ -323,7 +328,6 @@ export function createGateway(config: {
         redirect.searchParams.set("state", nonce);
         const destination = new URL("/login", authOrigin);
         destination.searchParams.set("app_id", "tos>remind");
-        destination.searchParams.set("org_id", org);
         destination.searchParams.set("redirect_uri", redirect.href);
         res.setHeader("Set-Cookie", [
           sessionCookie(id),
@@ -331,20 +335,31 @@ export function createGateway(config: {
         ]);
         data = { url: destination.href };
       } else if (url.pathname === "/ui/session" && req.method === "GET") {
+        if (ctx.token) {
+          await authenticated(ctx);
+          await selectOrganization(ctx);
+        }
+        data = summary(state);
+      } else if (url.pathname === "/ui/organization" && req.method === "POST") {
+        if (typeof body.org !== "string" || !body.org)
+          throw Object.assign(Error("Select an authorized organization"), { status: 422 });
+        delete state.login;
+        await authenticated(ctx);
+        const candidate = { ...ctx };
+        await selectOrganization(candidate, body.org);
+        state.contexts[state.active] = candidate;
         data = summary(state);
       } else if (url.pathname === "/ui/login" && req.method === "POST") {
         delete state.login;
         if (
-          typeof body.org !== "string" ||
           typeof body.slt !== "string" ||
-          !body.org.trim() ||
           !body.slt.trim()
         )
           throw Object.assign(
-            Error("Organization and short-lived token are required"),
+            Error("A short-lived token is required"),
             { status: 422 },
           );
-        const candidate = { ...ctx, org: body.org.trim() };
+        const candidate = { ...ctx, org: "" };
         const tokens = await remote(
           "/api/v1/auth/login",
           candidate,
@@ -358,7 +373,7 @@ export function createGateway(config: {
         candidate.refresh = tokens.refresh_token;
         candidate.expires = Date.now() + tokens.expires_in * 1000;
         delete candidate.pending;
-        candidate.identity = await remote("/api/v1/auth/me", candidate);
+        await selectOrganization(candidate);
         state.contexts[state.active] = candidate;
         data = summary(state);
       } else if (url.pathname === "/ui/logout" && req.method === "POST") {
@@ -375,6 +390,8 @@ export function createGateway(config: {
         delete ctx.token;
         delete ctx.refresh;
         delete ctx.identity;
+        delete ctx.organizations;
+        ctx.org = "";
         delete ctx.pending;
         data = summary(state);
       } else if (url.pathname === "/ui/context" && req.method === "POST") {

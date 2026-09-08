@@ -143,13 +143,11 @@ export default function App() {
     open({ title, description, submit: label, danger, run });
   }
   const [signingIn, setSigningIn] = createSignal(false);
-  async function continueWithIam(org: string) {
+  async function continueWithIam() {
     if (signingIn()) return;
     setSigningIn(true);
     try {
-      const result = await request<{ url: string }>("auth/start", "POST", {
-        org,
-      });
+      const result = await request<{ url: string }>("auth/start", "POST", {});
       window.location.assign(result.url);
     } catch (e) {
       setSigningIn(false);
@@ -158,42 +156,21 @@ export default function App() {
   }
   function login() {
     if (test()) return tokenLogin();
-    void perform(() => continueWithIam(context()?.org || "tos"));
+    void perform(continueWithIam);
   }
   function changeOrganization() {
-    if (test()) return tokenLogin();
-    open({
-      title: "Continue with IAm",
-      description: "Choose the organization you want to open in Remind.",
-      submit: "Continue with IAm",
-      fields: [
-        {
-          name: "org",
-          label: "Organization",
-          required: true,
-          value: context()?.org || "tos",
-        },
-      ],
-      run: (v) => continueWithIam(v.org),
-    });
+    login();
   }
   function tokenLogin() {
     open({
       title: test() ? "Sign in to " + context()?.name : "Sign in to Remind",
       description:
-        "Use an organization-bound short-lived token from Silicon IAm for tos>remind." +
+        "Use a short-lived token from Silicon IAm for tos>remind. Choose your organizations in IAm." +
         (test()
           ? " The token must come from this environment’s linked IAm sandbox."
           : ""),
       submit: "Sign in",
       fields: [
-        {
-          name: "org",
-          label: "Organization",
-          required: true,
-          value: context()?.org || "tos",
-          placeholder: "your-organization",
-        },
         {
           name: "slt",
           label: "IAm short-lived token",
@@ -592,9 +569,21 @@ export default function App() {
             </select>
           </label>
           <Show when={context()?.org}>
-            <span class="org-label">
-              Organization <strong>{context()?.org}</strong>
-            </span>
+            <label>
+              Organization
+              <select aria-label="Organization" value={context()?.org}
+                onChange={(e) => {
+                  const org = e.currentTarget.value;
+                  void perform(async () => {
+                    await request("organization", "POST", { org });
+                    await switchContext(active());
+                  });
+                }}>
+                <For each={context()?.organizations || []}>
+                  {(org) => <option value={org}>{org}</option>}
+                </For>
+              </select>
+            </label>
           </Show>
         </div>
         <nav aria-label="Main navigation">
@@ -1403,10 +1392,7 @@ export default function App() {
                       </dl>
                       <div class="actions">
                         <button class="secondary" onClick={changeOrganization}>
-                          Change identity / organization
-                        </button>
-                        <button class="text-button" onClick={tokenLogin}>
-                          Use a short-lived token
+                          {test() ? "Sign in with a test token" : "Continue with IAm"}
                         </button>
                         <Show when={identity()}>
                           <button

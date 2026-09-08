@@ -23,6 +23,7 @@ export interface Context {
   id: string;
   name: string;
   org: string;
+  organizations: string[];
   identity: Identity | null;
 }
 export interface Session {

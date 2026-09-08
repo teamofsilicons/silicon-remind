@@ -301,6 +301,27 @@ paths:
       description: 'App credentials remain on the server. Responses containing tokens use Cache-Control:
         no-store. In a sandbox all IAM requests carry the linked IAM environment key and test Application
         credential.'
+  /auth/organizations:
+    get:
+      operationId: listAuthorizedOrganizations
+      summary: List organizations currently authorized through IAM
+      description: Lists only IAM-selected organizations with active membership. No X-Org-ID is required. Unscoped access tokens can use an organization from this list as X-Org-ID for ordinary reminder requests. Legacy scoped sessions return their single authorized organization.
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '200':
+          description: Current authorized organization identities; empty when none are authorized
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Identity'
+        default: *id001
   /auth/me:
     get:
       operationId: getIdentity

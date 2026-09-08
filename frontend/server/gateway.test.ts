@@ -28,6 +28,7 @@ const cookies = (response: Response) =>
 
 test("IAm browser handoff binds the browser, consumes state once, and keeps tokens on the server", async () => {
   let exchanges = 0;
+  let grantedOrgs = ["alpha", "beta"];
   const envId = "11111111-1111-4111-8111-111111111111";
   const upstream = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -35,7 +36,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
       let text = "";
       for await (const chunk of req) text += chunk;
       assert.equal(JSON.parse(text).slt, "valid-short-lived-token");
-      assert.equal(req.headers["x-org-id"], "tos");
+      assert.equal(req.headers["x-org-id"], undefined);
       assert.ok(req.headers["idempotency-key"]);
       exchanges++;
       res.end(
@@ -43,15 +44,21 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
           access_token: "private-access",
           refresh_token: "private-refresh",
           expires_in: 3600,
+          org_id: null,
         }),
       );
+    } else if (req.url === "/api/v1/auth/organizations") {
+      assert.equal(req.headers.authorization, "Bearer private-access");
+      assert.equal(req.headers["x-org-id"], undefined);
+      res.end(JSON.stringify({ items: grantedOrgs.map((org_id) => ({ org_id })) }));
     } else if (req.url === "/api/v1/auth/me") {
       assert.equal(req.headers.authorization, "Bearer private-access");
+      assert.ok(grantedOrgs.includes(req.headers["x-org-id"] as string));
       res.end(
         JSON.stringify({
           public_id: "person",
           principal_id: "person-id",
-          org_id: "tos",
+          org_id: req.headers["x-org-id"],
           actor_type: "carbon",
           can_manage_reminders: false,
         }),
@@ -88,7 +95,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
         "Content-Type": "application/json",
         Cookie: cookie,
       },
-      body: JSON.stringify({ org: "tos" }),
+      body: "{}",
     });
   const callback = (url: string, cookie = "") =>
     fetch(url, {
@@ -108,7 +115,8 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
     assert.equal(auth.origin, "https://auth.iam.teamofsilicons.com");
     assert.equal(auth.pathname, "/login");
     assert.equal(auth.searchParams.get("app_id"), "tos>remind");
-    assert.equal(auth.searchParams.get("org_id"), "tos");
+    assert.equal(auth.searchParams.has("org_id"), false);
+    assert.equal(auth.searchParams.has("org_ids"), false);
     const redirect = new URL(auth.searchParams.get("redirect_uri")!);
     assert.equal(redirect.origin, origin);
     assert.equal(redirect.pathname, "/ui/auth/callback");
@@ -158,6 +166,21 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
     assert.ok(!body.includes("private-access"));
     assert.ok(!body.includes("private-refresh"));
     assert.equal(JSON.parse(body).identity.public_id, "person");
+    assert.equal(JSON.parse(body).identity.org_id, "alpha");
+    assert.deepEqual(JSON.parse(body).contexts[0].organizations, ["alpha", "beta"]);
+    const changeOrg = (org: string) => fetch(origin + "/ui/organization", {
+      method: "POST",
+      headers: { Cookie: cookies(success), Origin: origin, "X-Remind-UI": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ org }),
+    });
+    assert.equal((await changeOrg("unapproved")).status, 403);
+    const switched = await changeOrg("beta");
+    assert.equal(switched.status, 200);
+    assert.equal((await switched.json()).identity.org_id, "beta");
+    grantedOrgs = ["alpha"];
+    const refreshed = await fetch(origin + "/ui/session", { headers: { Cookie: cookies(success) } });
+    assert.equal((await refreshed.json()).identity.org_id, "alpha");
+    assert.equal((await changeOrg("beta")).status, 403);
     const restored = await fetch(
       origin + `/ui/api/test-environments/${envId}/restorations`,
       {
@@ -188,6 +211,11 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
       "/?login_error=1#reminders",
     );
     assert.equal(exchanges, 1);
+    grantedOrgs = [];
+    const empty = await fetch(origin + "/ui/session", { headers: { Cookie: cookies(success) } });
+    const emptySession = await empty.json();
+    assert.equal(emptySession.identity, null);
+    assert.equal(emptySession.contexts[0].org, "");
     // Starting a second attempt invalidates the first tab's outstanding callback.
     const old = await start(cookies(success));
     const oldUrl = new URL(

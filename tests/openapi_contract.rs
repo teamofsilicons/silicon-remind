@@ -156,6 +156,7 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
         ("post", "/auth/refresh", "authRefresh"),
         ("post", "/auth/logout", "authLogout"),
         ("get", "/auth/me", "getIdentity"),
+        ("get", "/auth/organizations", "listAuthorizedOrganizations"),
         ("get", "/webhook", "getWebhook"),
         ("put", "/webhook", "configureWebhook"),
         ("delete", "/webhook", "disableWebhook"),
