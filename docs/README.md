@@ -9,6 +9,7 @@ reminders.
 - [API contract and examples](api/README.md)
 - [Rust client guide](client/README.md)
 - [CLI guide and command reference](cli/README.md)
+- [SolidJS frontend and local preview](../frontend/README.md)
 - [IAM application integration](iam.md)
 - [webhook delivery, signatures and receipt semantics](webhook-delivery.md)
 - [Internal service API](internal-api.md)
@@ -23,4 +24,6 @@ API guide are relative to `https://backend.remind.teamofsilicons.com/api/v1` unl
 an origin-relative path is explicitly shown. A local development instance can
 use a loopback origin, for example `http://127.0.0.1:8086`.
 
-No frontend is part of this build. `remind report` is reserved for later work.
+The SolidJS frontend covers the public browser workflows and is hosted at
+[remind.teamofsilicons.com](https://remind.teamofsilicons.com).
+`remind report` is reserved for later work.

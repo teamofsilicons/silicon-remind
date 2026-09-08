@@ -2,6 +2,11 @@
 
 SolidJS application styled from the hosted Silicon IAm application: Plex Sans and Plex Mono, pale navigation, compact white panels, blue actions and restrained status badges. Brand assets come from the sibling Silicon IAm frontend.
 
+The visual reference was checked against the live `iam.teamofsilicons.com`
+console on 2026-09-08. The frontend uses the application’s styling rather than
+the integration documentation layout. Webhook subscriptions use a compact list,
+with a dedicated empty state for zero receivers.
+
 ## Run locally
 
 Requires Node.js 24 or newer. From this directory:
@@ -27,7 +32,7 @@ Open http://127.0.0.1:4330. The default upstream is the public Remind backend. T
 
 Internal service/admin APIs and CLI package installation/updating are not browser workflows.
 
-## Build and host later
+## Build and host
 
 ```sh
 npm run build
@@ -52,4 +57,6 @@ The gateway allows only public product routes, validates request origin/Host and
 
 `npm run build` includes TypeScript checking and creates the optimized client and production Node server. Manual HTTP checks passed against the public backend using a real production Carbon and a linked test Silicon: login/logout, organization reads, sandbox isolation, root access without login, webhook configuration, reminder create/edit/bulk pause/resume/archive and history reads. The mutation smoke used a future-only test schedule and removed its webhook afterward; it did not test delivery to webhook. Production-server checks passed for HTML/assets, SPA routing, security headers and private-file isolation. Cross-origin requests and internal API paths were rejected. The browser workflow E2E results, two UI fixes and the unresolved webhook DNS delivery blocker are recorded in [the browser test report](docs/browser-e2e-2026-09-06.md). See the parent project's existing backend delivery E2E evidence for worker-to-webhook delivery.
 
-This frontend has not been deployed by the build task.
+The frontend is deployed at [remind.teamofsilicons.com](https://remind.teamofsilicons.com)
+on the standalone AWS host. See the [deployment record](../deploy/aws/frontend-2026-09-08.md)
+for image, DNS and verification details, and the [update procedure](../deploy/aws/README-standalone.md#frontend).

@@ -41,3 +41,45 @@ curl --fail --show-error https://backend.remind.teamofsilicons.com/health/ready
 
 Container logs are available in SSM with `docker logs remind-api`,
 `docker logs remind-worker`, and `docker logs remind-caddy`.
+
+## Frontend
+
+The SolidJS frontend and Node session gateway run on the same instance, with
+Caddy serving `https://remind.teamofsilicons.com`. No load balancer or public
+container port is added. Namecheap's `remind` CNAME points to
+`backend.remind.teamofsilicons.com`, so both names follow the backend A record.
+The instance currently has an automatically assigned public IP: after a
+stop/start or replacement, update the backend A record to the new IP.
+
+Build `frontend/Dockerfile` with the `frontend/` build context for `linux/arm64`,
+push it to `silicon-remind-production` ECR, then install using its resolved digest:
+
+```bash
+AWS_PROFILE=silicon-production AWS_REGION=us-east-1 \
+  python3 deploy/aws/deploy-frontend.py \
+  234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:<frontend-digest> \
+  --instance <InstanceId>
+```
+
+The SSM installer creates and enables `remind-frontend.service`, preserves the
+existing backend Caddy routes, validates the new configuration and reloads
+Caddy. Updates briefly restart only the frontend. To roll back, run the same
+command with the previous frontend digest. The installer preserves the session
+key in `/etc/remind/frontend.env` (root, mode 0600) and encrypted session files
+in `/var/lib/remind-frontend/sessions` (UID/GID 10001, mode 0700). Back up both
+together through a protected process before replacing the instance.
+
+The frontend container has a read-only root filesystem, no Linux capabilities,
+256 MiB memory limit and rotating logs. Callback query strings are not access
+logged. Read logs with `journalctl -u remind-frontend` or `docker logs remind-frontend`.
+The frontend installation is separate from CloudFormation: rerun it after
+provisioning/replacing the backend host or rerunning its bootstrap.
+
+Verify the public page and gateway after deployment:
+
+```bash
+curl --fail --show-error https://remind.teamofsilicons.com/
+curl --fail --show-error https://remind.teamofsilicons.com/ui/api/health/ready
+```
+
+See [the initial frontend deployment record](frontend-2026-09-08.md).

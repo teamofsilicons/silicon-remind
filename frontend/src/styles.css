@@ -663,6 +663,21 @@ tbody tr:hover {
 .list-row button {
   margin-top: 4px;
 }
+.subscription-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.subscription-info {
+  flex: 1;
+  min-width: 0;
+}
+.subscription-info > p {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
 .section-heading {
   margin-top: 35px;
   padding-top: 24px;
@@ -789,11 +804,13 @@ dialog footer {
 }
 @media (max-width: 760px) {
   .sidebar {
+    visibility: hidden;
     transform: translateX(-100%);
     top: 65px;
     box-shadow: 10px 0 30px #1923351a;
   }
   .sidebar.open {
+    visibility: visible;
     transform: translateX(0);
   }
   .sidebar .brand {

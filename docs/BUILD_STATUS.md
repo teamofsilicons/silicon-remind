@@ -2,11 +2,17 @@
 
 Implemented and manually exercised locally on 2026-09-06 IST against hosted IAM
 sandbox identities and the real local configured webhook receiver backend. Scope follows
-[UNDERSTANDING.md](../UNDERSTANDING.md). The frontend and `remind report` remain
-explicit later work in that document.
+[UNDERSTANDING.md](../UNDERSTANDING.md). The SolidJS frontend is now available
+under [frontend](../frontend/README.md); `remind report` remains later work.
 
 ## Delivered
 
+- Minimal SolidJS frontend covering IAM sessions, reminders, archive, execution
+  history, Silicon discovery, optional multiple webhooks, and testing environments.
+  Its visual reference is the hosted IAM console, checked on 2026-09-08, using
+  its Plex typography, pale navigation, white panels and blue actions.
+  Deployed at [remind.teamofsilicons.com](https://remind.teamofsilicons.com)
+  on the standalone AWS server; see the [frontend deployment verification](../deploy/aws/frontend-2026-09-08.md).
 - Official `silicon-iam-client` 1.2.1 integration for `tos>remind`: SLT exchange,
   refresh, logout, live app/org/test authorization and signed lifecycle receiver.
 - Reminder create/list/get/edit, one-time and recurring five-field cron, IANA

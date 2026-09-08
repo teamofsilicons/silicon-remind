@@ -27,7 +27,7 @@ const navigation: { id: View; label: string; icon: string }[] = [
   { id: "reminders", label: "Reminders", icon: "◷" },
   { id: "archive", label: "Archive", icon: "▤" },
   { id: "silicons", label: "Silicons", icon: "⌘" },
-  { id: "webhook", label: "Webhook", icon: "↗" },
+  { id: "webhook", label: "Webhooks", icon: "↗" },
   { id: "testing", label: "Testing environments", icon: "◇" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
@@ -560,7 +560,7 @@ export default function App() {
       <a class="skip" href="#main">
         Skip to content
       </a>
-      <aside classList={{ sidebar: true, open: mobile() }}>
+      <aside id="workspace-navigation" classList={{ sidebar: true, open: mobile() }}>
         <a class="brand" href="#reminders">
           <img src="/brand/mark.svg" alt="" />
           silicon <span>REMIND</span>
@@ -640,6 +640,8 @@ export default function App() {
           <button
             class="icon-button mobile-menu"
             aria-label="Toggle navigation"
+            aria-expanded={mobile()}
+            aria-controls="workspace-navigation"
             onClick={() => setMobile(!mobile())}
           >
             ☰
@@ -704,7 +706,7 @@ export default function App() {
                     reminders: "The right reminder, at the right time.",
                     archive: "Past reminders, retained for 45 days.",
                     silicons: "Reminders across your organization.",
-                    webhook: "Where your reminders are delivered.",
+                    webhook: "Optional receivers for your reminders.",
                     testing: "A separate space to try everything.",
                     settings: "Your session and service connection.",
                   }[view()]
@@ -989,7 +991,9 @@ export default function App() {
                             }
                             detail={
                               view() === "reminders"
-                                ? "Create a reminder or change your filters."
+                                ? identity()?.can_manage_reminders
+                                  ? "Create a reminder or change your filters."
+                                  : "Reminders created by your organization’s Silicons appear here."
                                 : view() === "archive"
                                   ? "Archived reminders will appear here."
                                   : view() === "testing"
@@ -1297,7 +1301,7 @@ export default function App() {
               </Show>
               <Show when={view() === "webhook"}>
                 <Panel
-                  title="Delivery endpoint"
+                  title="Webhook subscriptions"
                   action={
                     <Show when={identity()?.can_manage_reminders}>
                       <button class="primary" onClick={setWebhook}>
@@ -1311,24 +1315,25 @@ export default function App() {
                     fallback={
                       <Empty
                         title="Webhook settings belong to a Silicon"
-                        detail="Sign in as a Silicon to configure its own delivery destination."
+                        detail="Sign in as a Silicon to add or remove its receivers. Reminders work without a webhook."
                       />
                     }
                   >
                     <Show
                       when={!destinations.loading}
-                      fallback={<div class="loading">Loading webhook…</div>}
+                      fallback={<div class="loading" role="status">Loading webhooks…</div>}
                     >
                       <Show
                         when={!destinations.error}
                         fallback={
-                          <div class="error">
+                          <div class="error" role="alert">
                             {readError(destinations.error)}
+                            {" "}<button class="text-button" onClick={invalidate}>Retry</button>
                           </div>
                         }
                       >
                         <Show
-                          when={destinations.error ? undefined : destinations()}
+                          when={!destinations.error && destinations()?.items.length ? destinations() : undefined}
                           fallback={
                             <Empty
                               title="No webhook subscriptions"
@@ -1340,17 +1345,12 @@ export default function App() {
                             <div class="detail-body">
                               <For each={collection().items}>
                                 {(d) => (
-                                  <div class="list-row">
-                                    <dl>
-                                      <dt>Endpoint</dt>
-                                      <dd class="mono break">{d.endpoint_url}</dd>
-                                      <dt>Version</dt>
-                                      <dd>{d.version}</dd>
-                                      <dt>Updated</dt>
-                                      <dd>{date(d.updated_at)}</dd>
-                                      <dt>Signing secret</dt>
-                                      <dd>Stored securely · never returned</dd>
-                                    </dl>
+                                  <div class="list-row subscription-row">
+                                    <div class="subscription-info">
+                                      <p class="mono break">{d.endpoint_url}</p>
+                                      <small class="mono break">{d.id}</small>
+                                      <small>Added {date(d.updated_at)}</small>
+                                    </div>
                                     <button
                                       class="secondary danger-text"
                                       onClick={() =>
@@ -1377,9 +1377,8 @@ export default function App() {
                       </Show>
                     </Show>
                     <p class="panel-note">
-                      Delivery is at least once. webhook receipts confirm ingress,
-                      not downstream processing. Consumers should deduplicate
-                      the execution ID.
+                      Each receiver gets the reminder independently. Deliveries can
+                      be retried; use the execution ID to ignore duplicates.
                     </p>
                   </Show>
                 </Panel>
