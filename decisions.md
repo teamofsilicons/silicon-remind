@@ -680,3 +680,16 @@ target UUID. The exact ordered request body is fingerprinted: an identical
 replay returns the original `200` status and compact response, while changing
 the UUID membership, UUID order, or requested status under the same key returns
 `409 idempotency_conflict`.
+
+## 2026-09-08 — First reminder without webhook registration
+
+Manual acceptance with a fresh IAM Silicon revealed that optional webhook
+subscriptions still indirectly required a destination: only subscribing created
+the local Silicon identity projection. First reminder creation now registers the
+IAM-authenticated principal and public Silicon ID before checking schedulability.
+It reuses the same lifecycle-aware registration as subscriptions, without
+creating any destination. Existing public-ID bindings, revoked identities, and
+inactive organizations cannot be overwritten or reactivated. The final schedule
+transaction retains its lifecycle locks and rechecks. No API or schema change is
+required. See the resumed run in `docs/MANUAL_ACCEPTANCE.md` for real zero- and
+two-subscriber delivery evidence.

@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 use crate::{
     application::{ports::Clock, schedules::ScheduleService},
-    domain::{Actor, ReminderReadScope, ScheduleSection, ScheduleStatus},
+    domain::{
+        Actor, CreateScheduleCommand, ReminderReadScope, ScheduleKind, ScheduleSection,
+        ScheduleStatus,
+    },
     error::AppError,
 };
 
@@ -1424,6 +1427,72 @@ async fn seed_expired_archive(pool: &PgPool) -> anyhow::Result<ExpiredArchiveFix
         created_at,
         completed_at,
     })
+}
+
+#[tokio::test]
+async fn first_reminder_needs_no_webhook_and_preserves_revocation() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let now = fixture_now();
+    let principal = Uuid::now_v7();
+    let mut actor = Actor::silicon(principal.to_string(), "tos", Uuid::now_v7(), 1);
+    actor.public_id = Some("first:tos".to_owned());
+    let service = ScheduleService::new(
+        database.repository.clone(),
+        Arc::new(FixedClock(now)),
+        std::time::Duration::from_hours(24),
+    );
+    let command = || CreateScheduleCommand {
+        text: "No subscribers required".to_owned(),
+        timezone: "UTC".to_owned(),
+        kind: ScheduleKind::OneTime,
+        cron: "* * * * *".to_owned(),
+    };
+    let created = service
+        .create(&actor, command(), "first-create".to_owned(), [91; 32])
+        .await?;
+    assert_eq!(created.status_code, 201);
+    assert!(
+        database
+            .repository
+            .get_hook_destinations("tos", "first:tos")
+            .await?
+            .is_empty()
+    );
+    let replay = service
+        .create(&actor, command(), "first-create".to_owned(), [91; 32])
+        .await?;
+    assert_eq!(replay.body, created.body);
+    assert!(matches!(
+        database
+            .repository
+            .register_authenticated_silicon("tos", principal, "different:tos")
+            .await,
+        Err(RepositoryError::SiliconUnavailable)
+    ));
+    let removal = lifecycle_event(
+        "first-removal",
+        "organization.membership.removed.v1",
+        Some(&principal.to_string()),
+        now,
+    )?;
+    database
+        .repository
+        .apply_iam_lifecycle_event(&removal, &service_audit())
+        .await?;
+    assert!(
+        service
+            .create(&actor, command(), "after-removal".to_owned(), [92; 32])
+            .await
+            .is_err()
+    );
+    assert!(
+        database
+            .repository
+            .get_active_silicon_identity("tos", principal)
+            .await?
+            .is_none()
+    );
+    Ok(())
 }
 
 #[tokio::test]

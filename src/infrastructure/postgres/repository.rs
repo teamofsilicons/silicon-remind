@@ -167,6 +167,26 @@ impl PostgresRepository {
         })
     }
 
+    /// Registers a Silicon verified by IAM without requiring a webhook.
+    /// Existing revocation and organization lifecycle records remain authoritative.
+    ///
+    /// # Errors
+    /// Returns validation, lifecycle conflict, or database errors.
+    pub async fn register_authenticated_silicon(
+        &self,
+        org_id: &str,
+        principal_id: Uuid,
+        silicon_id: &str,
+    ) -> Result<(), RepositoryError> {
+        validate_org_id(org_id)?;
+        validate_global_silicon_id(silicon_id, org_id)?;
+        let mut transaction = self.pool.begin().await?;
+        register_active_silicon_identity(&mut transaction, org_id, principal_id, silicon_id)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Begins an explicit transaction for the two-stage due-materialization API.
     ///
     /// # Errors
@@ -1311,7 +1331,13 @@ impl PostgresRepository {
     ) -> Result<HookDestinationRow, RepositoryError> {
         validate_hook_destination(destination)?;
         let mut transaction = self.pool.begin().await?;
-        register_active_silicon_identity(&mut transaction, destination).await?;
+        register_active_silicon_identity(
+            &mut transaction,
+            &destination.org_id,
+            destination.owner_principal_id,
+            &destination.silicon_id,
+        )
+        .await?;
         let sql = format!(
             "INSERT INTO hook_destinations (\
                  id, org_id, owner_principal_id, silicon_id, endpoint_url_ciphertext, \
@@ -2403,21 +2429,23 @@ async fn append_worker_execution_audit(
 
 async fn register_active_silicon_identity(
     transaction: &mut Transaction<'_, Postgres>,
-    destination: &NewHookDestination,
+    org_id: &str,
+    principal_id: Uuid,
+    silicon_id: &str,
 ) -> Result<(), RepositoryError> {
     sqlx::query(
         "INSERT INTO organization_lifecycle (org_id, state) \
          VALUES ($1, 'active') \
          ON CONFLICT (org_id) DO NOTHING",
     )
-    .bind(&destination.org_id)
+    .bind(org_id)
     .execute(&mut **transaction)
     .await?;
 
     let organization_state = sqlx::query_scalar::<_, String>(
         "SELECT state FROM organization_lifecycle WHERE org_id = $1 FOR UPDATE",
     )
-    .bind(&destination.org_id)
+    .bind(org_id)
     .fetch_one(&mut **transaction)
     .await?;
     if organization_state != "active" {
@@ -2429,9 +2457,9 @@ async fn register_active_silicon_identity(
          VALUES ($1, $2, $3, 'active') \
          ON CONFLICT (org_id, principal_id) DO NOTHING",
     )
-    .bind(&destination.org_id)
-    .bind(destination.owner_principal_id)
-    .bind(&destination.silicon_id)
+    .bind(org_id)
+    .bind(principal_id)
+    .bind(silicon_id)
     .execute(&mut **transaction)
     .await?;
 
@@ -2439,11 +2467,11 @@ async fn register_active_silicon_identity(
         "SELECT state, silicon_id FROM silicon_identities \
          WHERE org_id = $1 AND principal_id = $2 FOR UPDATE",
     )
-    .bind(&destination.org_id)
-    .bind(destination.owner_principal_id)
+    .bind(org_id)
+    .bind(principal_id)
     .fetch_one(&mut **transaction)
     .await?;
-    if binding.0 != "active" || binding.1.as_deref() != Some(destination.silicon_id.as_str()) {
+    if binding.0 != "active" || binding.1.as_deref() != Some(silicon_id) {
         return Err(RepositoryError::SiliconUnavailable);
     }
     Ok(())

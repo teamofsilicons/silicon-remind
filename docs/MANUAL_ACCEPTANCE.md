@@ -277,3 +277,43 @@ webhook-approval and registry-installation notes. Public API/worker health,
 Carbon/test Silicon authentication, sandbox creation, active IAM receiver,
 processed signed-event receipt and a real crates.io CLI installation are verified.
 Automatic replacement with a newer release remains a subsequent-release check.
+
+## Resumed optional-webhook acceptance: 2026-09-08
+
+The previous chat completed deployment but left the post-subscription-change
+local delivery run and fresh hosted browser sign-in unverified. This follow-up
+used fresh disposable local databases (`remind_qa`, `remind_testing_qa`) and a
+new real IAM sandbox `01a080c0-25f9-7333-a805-04ccf25aa2ec`. Production data was
+not used for reminder mutations. An old Compose volume had an outdated migration
+checksum; it was copied separately and fresh databases were migrated instead.
+
+- Public frontend and backend readiness returned HTTP 200 with normal DNS.
+- In Chrome, **Continue with IAm** → **Continue to application** returned to
+  `https://remind.teamofsilicons.com/#reminders` as the production Carbon in
+  `tos`, with the correct read-only organization view and a clean callback URL.
+- A newly created test Silicon authenticated through real IAM. Listing webhook
+  subscriptions returned an empty list, but its first reminder creation returned
+  `409 silicon_unavailable`. The local identity projection was only created when
+  configuring a webhook, contradicting optional subscriptions.
+- Fixed first reminder creation to register the authenticated Silicon's verified
+  public identity independently of webhook configuration. Existing identity
+  bindings and organization/revocation tombstones are preserved; schedule
+  persistence still checks and locks active lifecycle state.
+- Repeating creation without subscriptions returned 201. The worker processed
+  the one-time occurrence at `2026-09-08T11:29:00Z` without outbound requests,
+  recording execution `01a080c7-4f4d-7c50-9ff9-10736a1b5840` as delivered.
+- Added two loopback receivers: unsigned HTTP 204 and HMAC-signed HTTP 200.
+  A new one-time reminder fired at `2026-09-08T11:30:00Z`. Both received identical
+  event bodies and execution/idempotency ID
+  `01a080c8-39be-7641-b396-36c0c87b438d`, with the original Unicode text.
+  The signed receiver verified the HMAC over the actual raw bytes; the unsigned
+  receiver had no signature header. API history reported delivered without an
+  error.
+- Full Rust checks passed: 116 core tests (including the new first-reminder and
+  revocation regression), 6 OpenAPI tests, and 5 webhook contract tests.
+  Formatting, strict all-target/all-feature Clippy, and ARM64 Docker build passed.
+  Strict Clippy also exposed a missing crate documentation comment in `build.rs`;
+  the comment was added.
+
+The source fix is verified locally. Updating the deployed backend is pending
+renewal of the expired `silicon-production` AWS SSO session.

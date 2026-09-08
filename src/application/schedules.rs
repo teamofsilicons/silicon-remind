@@ -96,11 +96,18 @@ impl ScheduleService {
             });
         }
         let owner_principal_id = principal_id(actor)?;
+        let validated = command.validate(now).map_err(|_| AppError::Validation)?;
+        let silicon_id = actor
+            .public_id
+            .as_deref()
+            .ok_or(AppError::Unauthenticated)?;
+        self.repository
+            .register_authenticated_silicon(&actor.org_id, owner_principal_id, silicon_id)
+            .await?;
         let identity = self
             .repository
             .get_schedulable_silicon_identity(&actor.org_id, owner_principal_id)
             .await?;
-        let validated = command.validate(now).map_err(|_| AppError::Validation)?;
         let schedule = CreateSchedule {
             id: Uuid::now_v7(),
             org_id: actor.org_id.clone(),
