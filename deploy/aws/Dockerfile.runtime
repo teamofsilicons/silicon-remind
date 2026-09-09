@@ -6,6 +6,7 @@ RUN apt-get update \
     && curl --fail --silent --show-error --location --retry 3 \
        https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
        --output /aws-rds-global-bundle.pem \
+    && test -s /aws-rds-global-bundle.pem \
     && chmod 0644 /aws-rds-global-bundle.pem
 FROM ${BACKEND_IMAGE}
 COPY --from=certificates /aws-rds-global-bundle.pem /opt/silicon-remind/aws-rds-global-bundle.pem

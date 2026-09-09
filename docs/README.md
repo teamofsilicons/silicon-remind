@@ -18,6 +18,7 @@ reminders.
 - [Manual acceptance record](MANUAL_ACCEPTANCE.md)
 - [Build and acceptance status](BUILD_STATUS.md)
 - [Public release 0.1.0](RELEASE_0.1.0.md)
+- [Client and CLI 0.1.2; backend rollout status](RELEASE_0.1.2.md)
 
 The machine-readable contract is [openapi.yaml](../openapi.yaml). API paths in the
 API guide are relative to `https://backend.remind.teamofsilicons.com/api/v1` unless
