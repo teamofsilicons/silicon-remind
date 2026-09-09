@@ -1,7 +1,7 @@
 # remind CLI
 
 `remind` is built entirely on `silicon-remind-client`. It stores preferences,
-application sessions, refresh tokens, and test keys under `{home}/.remind/` (default `{home}` is `~`). On Unix,
+application sessions, refresh tokens, and test keys under `{home}/.remind/` (default `{home}` is `SILICON_HOME` when set, otherwise `~`). On Unix,
 the directory is mode 0700 and state files are mode 0600. A process lock serializes
 state mutations and refreshes; saves use an atomic rename. State is separated by
 server origin and test-environment UUID so switching servers or sandboxes never
@@ -23,11 +23,12 @@ remind --no-update health --ready
 remind login <slt> --org tos
 ```
 
-Login securely prompts for the short-lived token supplied by IAM. It does not
+`remind login <slt>` accepts the short-lived token supplied by IAM directly.
+`remind auth login` securely prompts for it. Login does not
 start an OTP ceremony or redirect a browser. For an agent/noninteractive shell:
 
 ```sh
-remind login <slt> --org tos --slt-stdin < /secure/path/slt.txt
+remind auth login --org tos --slt-stdin < /secure/path/slt.txt
 remind auth whoami
 remind config home /secure/remind-state
 ```
@@ -37,6 +38,57 @@ login verifies the organization before saving the new session. Near expiry, a
 normal authenticated command rotates the saved refresh token before proceeding.
 `auth refresh` requests an explicit rotation; `auth logout` revokes the IAM family
 and then removes local credentials.
+
+## IAM discovery and login status
+
+```sh
+remind --help
+remind iam --json
+remind login status --json
+remind --test <test_id> login status --json
+```
+
+`iam` requires no saved session. It reads the selected backend's public IAM
+configuration and returns `app_id`, `iam_url`, and `iam_environment_id` (null in
+production). Use this app ID when obtaining an SLT from IAM. App secrets and test
+keys are never printed. With `--test`, a saved environment key is required and
+metadata describes the linked IAM sandbox; its IAM app secret must be configured.
+
+`login status` checks the session for the selected server and environment against
+the live `/auth/me` endpoint, refreshing near-expiry tokens first. A successful
+check returns `authenticated: true` alongside `actor_type` (`carbon` or `silicon`),
+`principal_id`, `public_id`, `org_id`, `membership_id`, `org_role`,
+`authorization_epoch`, and `can_manage_reminders`. It never prints access or refresh
+tokens. For example:
+
+```json
+{"authenticated":true,"principal_id":"01992000-0000-7000-8000-000000000001","actor_type":"silicon","public_id":"assistant:tos","org_id":"tos","membership_id":"01992000-0000-7000-8000-000000000002","org_role":"member","authorization_epoch":1,"can_manage_reminders":true}
+```
+
+No saved session or an HTTP 401 from verification/refresh returns
+`{"authenticated":false}` with exit status 0. A permission denial, unavailable
+server, or malformed response remains an error with a nonzero exit status; it is
+not reported as a successful authentication check. `--org` selects the organization
+to verify. `auth whoami` remains available with its existing identity/error output.
+
+## Home directory selection
+
+`SILICON_HOME` replaces `HOME` as the default state parent when present. Remind
+reads the optional `.remind/home` pointer from that default parent; an explicit
+`config home` setting stored there takes precedence. Without a pointer, state is
+stored directly in `<SILICON_HOME>/.remind/` or `~/.remind/`. An empty
+`SILICON_HOME` is an error. A missing default directory is created as needed.
+
+```sh
+SILICON_HOME=/private/silicon remind --no-update config show --json
+SILICON_HOME=/private/silicon remind config home /existing/remind-state
+```
+
+`config home` requires an existing directory and saves its absolute path in the
+selected default parent's `.remind/home`. The next invocation uses the new
+location. It does not move existing sessions or keys. Unsetting `SILICON_HOME`
+selects the normal home and its own pointer again. The Rust client remains
+stateless and does not read or create these CLI state files.
 
 ## Ordinary reminder workflow
 
@@ -76,6 +128,8 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 | --- | --- |
 | `auth login` | Secure SLT prompt; `--org`, `--slt-stdin` |
 | `login <slt>` | Direct IAM SLT login; `--org` may select the organization |
+| `iam` | Public `app_id`, IAM URL and linked IAM environment; no login needed |
+| `login status` | Live authentication result and Carbon/Silicon identity; supports `--json` |
 | `auth whoami` | Live IAM identity and permissions |
 | `auth refresh` | Rotate current refresh token |
 | `auth logout` | Revoke and forget this session |

@@ -64,9 +64,13 @@ impl Store {
         let lock = options.open(dir.join("state.lock"))?;
         lock.lock()?;
         let path = dir.join("state.json");
-        let state = match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .context("invalid ~/.remind/state.json; repair the file before continuing")?,
+        let state = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+                format!(
+                    "invalid {}; repair the file before continuing",
+                    path.display()
+                )
+            })?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
             Err(e) => return Err(e.into()),
         };
@@ -80,8 +84,8 @@ impl Store {
         if !location.is_dir() {
             anyhow::bail!("home location is not a directory: {}", location.display());
         }
-        let default_home = std::env::var_os("HOME").context("HOME is not set")?;
-        let pointer_dir = PathBuf::from(default_home).join(".remind");
+        let location = std::fs::canonicalize(location)?;
+        let pointer_dir = default_home()?.join(".remind");
         std::fs::create_dir_all(&pointer_dir)?;
         std::fs::write(
             pointer_dir.join("home"),
@@ -114,8 +118,7 @@ impl Store {
 }
 
 fn configured_home() -> anyhow::Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME is not set")?;
-    let default_home = PathBuf::from(home);
+    let default_home = default_home()?;
     let pointer = default_home.join(".remind/home");
     match std::fs::read_to_string(pointer) {
         Ok(value) => {
@@ -131,6 +134,15 @@ fn configured_home() -> anyhow::Result<PathBuf> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(default_home),
         Err(error) => Err(error.into()),
     }
+}
+fn default_home() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("SILICON_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .context("neither SILICON_HOME nor HOME is set")?;
+    if home.is_empty() {
+        anyhow::bail!("home directory is empty; set SILICON_HOME or HOME to a directory");
+    }
+    Ok(PathBuf::from(home))
 }
 pub fn slot(url: &str, test: Option<uuid::Uuid>) -> String {
     format!(

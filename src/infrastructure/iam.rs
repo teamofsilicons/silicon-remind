@@ -27,6 +27,7 @@ pub enum IamError {
 pub struct IamClient {
     client: Client,
     app_id: String,
+    base_url: url::Url,
     testing_environment_id: Option<Uuid>,
 }
 
@@ -48,6 +49,7 @@ impl IamClient {
         Ok(Self {
             client,
             app_id: settings.app_id.clone(),
+            base_url: settings.base_url.clone(),
             testing_environment_id: None,
         })
     }
@@ -64,8 +66,19 @@ impl IamClient {
                     app_secret.expose_secret(),
                 )),
             app_id: self.app_id.clone(),
+            base_url: self.base_url.clone(),
             testing_environment_id: Some(id),
         }
+    }
+
+    /// Public application configuration for SLT discovery; excludes all credentials.
+    #[must_use]
+    pub fn public_info(&self) -> serde_json::Value {
+        serde_json::json!({
+            "app_id": self.app_id,
+            "iam_url": self.base_url,
+            "iam_environment_id": self.testing_environment_id,
+        })
     }
 
     /// Exchanges a user-supplied SLT, without receiving IAM login credentials.
@@ -264,12 +277,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn public_info_exposes_configuration_and_plane_without_secrets() -> anyhow::Result<()> {
+        let client = IamClient::new(&IamSettings {
+            base_url: url::Url::parse("http://127.0.0.1:8080")?,
+            app_id: "custom>remind".into(),
+            app_secret: SecretString::from("private-app-secret"),
+            request_timeout: std::time::Duration::from_secs(5),
+            webhook_keys: std::collections::BTreeMap::new(),
+        })?;
+        let mut expected = json!({"app_id":"custom>remind", "iam_url":"http://127.0.0.1:8080/", "iam_environment_id":null});
+        assert_eq!(client.public_info(), expected);
+        let id = Uuid::now_v7();
+        let sandbox = client.in_environment(
+            id,
+            EnvironmentKey::new("12345678901234567890123456789012")?,
+            &SecretString::from("private-test-secret"),
+        );
+        expected["iam_environment_id"] = json!(id);
+        assert_eq!(sandbox.public_info(), expected);
+        assert!(client.public_info()["iam_environment_id"].is_null());
+        Ok(())
+    }
+
+    #[test]
     fn unscoped_authority_preserves_identity_audience_and_plane_boundaries() -> anyhow::Result<()> {
         let client = IamClient {
             client: Client::builder("http://127.0.0.1:8080")?
                 .auto_update(false)
                 .build()?,
             app_id: "tos>remind".to_owned(),
+            base_url: url::Url::parse("http://127.0.0.1:8080")?,
             testing_environment_id: None,
         };
         let principal = Uuid::now_v7();

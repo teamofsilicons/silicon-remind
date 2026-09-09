@@ -30,6 +30,7 @@ and rejects this test header. See [testing environments](../testing-environments
 
 | Method and path | Request | Result |
 | --- | --- | --- |
+| `GET /auth/iam` | No session; optional test key | Public `app_id`, `iam_url`, and `iam_environment_id` (null in production); no credentials |
 | `POST /auth/login` | `{"slt":"…"}` | Access/refresh tokens, expiry seconds, actor and optional org |
 | `POST /auth/refresh` | `{"refresh_token":"…"}` | Successor access and rotating refresh tokens |
 | `POST /auth/logout` | `{"token":"…"}` | `204`; refresh token revokes the whole family |

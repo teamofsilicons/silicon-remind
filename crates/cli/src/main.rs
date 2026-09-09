@@ -2,7 +2,7 @@
 mod args;
 mod state;
 use anyhow::{Context as _, bail};
-use args::{Auth, Cli, Command, Config, Environment, Toggle, Webhook};
+use args::{Auth, Cli, Command, Config, Environment, Login, Toggle, Webhook};
 use clap::Parser as _;
 use silicon_remind_client::{Client, Mutation, Secret, models, updates};
 use state::{Store, StoredSession, slot};
@@ -85,6 +85,18 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         let key=store.state.test_keys.get(&slot(&url,Some(id))).context("test key is not saved for this server; run remind env import <id>, or remind env key <id> using your production session")?;
         client = client.with_test_environment(key.clone())?;
     }
+    if matches!(
+        &cli.command,
+        Command::Login {
+            command: Some(Login::Status),
+            ..
+        }
+    ) {
+        return output(
+            cli,
+            &login_status(cli, store, &client, &session_slot).await?,
+        );
+    }
     let needs_session = matches!(
         &cli.command,
         Command::Create { .. }
@@ -128,7 +140,11 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         None => Mutation::new(),
     };
     match &cli.command {
-        Command::Login { slt } => {
+        Command::Iam => output(cli, &client.iam().await?)?,
+        Command::Login { slt, .. } => {
+            let slt = slt
+                .as_ref()
+                .context("provide an SLT or use remind login status")?;
             login_with_token(cli, store, &client, &session_slot, Secret::new(slt.clone())).await?;
         }
         Command::Auth { command } => match command {
@@ -484,6 +500,39 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         Command::Health { ready } => output(cli, &client.health(*ready).await?)?,
     }
     Ok(())
+}
+
+async fn login_status(
+    cli: &Cli,
+    store: &mut Store,
+    client: &Client,
+    session_slot: &str,
+) -> anyhow::Result<models::LoginStatus> {
+    let Some(stored) = store.state.sessions.get(session_slot) else {
+        return Ok(models::LoginStatus::default());
+    };
+    let org = cli.org.clone().unwrap_or_else(|| stored.org.clone());
+    if (stored.pending_refresh_key.is_some()
+        || stored.expires_at <= chrono::Utc::now().timestamp() + 30)
+        && let Err(error) = refresh_session(store, session_slot, client, None).await
+    {
+        if matches!(
+            error.downcast_ref::<silicon_remind_client::Error>(),
+            Some(silicon_remind_client::Error::Api { status: 401, .. })
+        ) {
+            return Ok(models::LoginStatus::default());
+        }
+        return Err(error);
+    }
+    let stored = store
+        .state
+        .sessions
+        .get(session_slot)
+        .context("session disappeared")?;
+    Ok(client
+        .with_session(stored.session.access_token.clone(), org)?
+        .login_status()
+        .await?)
 }
 
 async fn login_with_token(

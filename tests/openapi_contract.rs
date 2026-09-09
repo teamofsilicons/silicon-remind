@@ -153,6 +153,7 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
 
     let expected = [
         ("post", "/auth/login", "authLogin"),
+        ("get", "/auth/iam", "getIamInfo"),
         ("post", "/auth/refresh", "authRefresh"),
         ("post", "/auth/logout", "authLogout"),
         ("get", "/auth/me", "getIdentity"),

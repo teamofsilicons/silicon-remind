@@ -92,6 +92,11 @@ pub async fn logout(
     Ok(no_store(StatusCode::NO_CONTENT.into_response()))
 }
 
+/// Returns public IAM application metadata without requiring a login session.
+pub async fn iam(ScopedState(state): ScopedState) -> Response {
+    no_store(Json(state.iam.public_info()).into_response())
+}
+
 /// Returns the actor's current organization-bound identity and permissions.
 pub async fn me(Extension(actor): Extension<Actor>) -> Response {
     no_store(Json(identity(&actor)).into_response())

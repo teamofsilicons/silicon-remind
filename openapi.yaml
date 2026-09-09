@@ -249,6 +249,33 @@ paths:
       description: 'App credentials remain on the server. Responses containing tokens use Cache-Control:
         no-store. In a sandbox all IAM requests carry the linked IAM environment key and test Application
         credential.'
+  /auth/iam:
+    get:
+      operationId: getIamInfo
+      summary: Discover public IAM application configuration before login
+      description: Returns the selected deployment's app ID, IAM URL and linked IAM test environment UUID (null in production). No app secrets or environment keys are returned. Uses Cache-Control no-store.
+      security: []
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '200':
+          description: Public IAM configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [app_id, iam_url, iam_environment_id]
+                properties:
+                  app_id:
+                    type: string
+                  iam_url:
+                    type: string
+                    format: uri
+                  iam_environment_id:
+                    type: [string, 'null']
+                    format: uuid
+        default:
+          $ref: '#/components/responses/Error'
   /auth/refresh:
     post:
       operationId: authRefresh

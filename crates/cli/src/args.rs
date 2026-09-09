@@ -7,6 +7,7 @@ use uuid::Uuid;
     version,
     about = "Create and manage Silicon reminders through Silicon IAM.",
     long_about = "Silicon Remind schedules one-time or recurring reminders using five-field Linux cron. Silicons manage their own reminders; Carbons and Silicons can read their organization's reminders.\n\nStart with: remind login <slt>\nOptionally subscribe a receiver: remind webhook subscribe <url>\nCreate a reminder: remind create --text 'Check the build' --cron '*/5 * * * *'\nUse any command in a saved sandbox: remind --test <test_id> <command>.",
+    after_help = "Authentication:\n  remind iam --json                 Discover the IAM app_id before obtaining an SLT\n  remind login <slt>                Exchange your IAM short-lived token\n  remind login status --json        Verify the saved Carbon or Silicon identity\n\nLocal state defaults to $SILICON_HOME/.remind when SILICON_HOME is set, otherwise ~/.remind. Use remind config home <directory> to select an existing directory.\n\nRun remind <command> --help for command-specific options and examples.",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -34,11 +35,16 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
-    /// Log in directly with an IAM short-lived token.
+    /// Log in with an IAM short-lived token, or inspect live authentication status.
+    #[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
     Login {
         #[arg(value_name = "SLT")]
-        slt: String,
+        slt: Option<String>,
+        #[command(subcommand)]
+        command: Option<Login>,
     },
+    /// Show public IAM application information, including the app_id needed for an SLT.
+    Iam,
     /// Log in using an IAM short-lived token; inspect or revoke the current session.
     Auth {
         #[command(subcommand)]
@@ -145,6 +151,11 @@ pub enum Command {
         #[arg(long)]
         ready: bool,
     },
+}
+#[derive(Subcommand)]
+pub enum Login {
+    /// Verify the saved session with IAM and report the Carbon or Silicon identity.
+    Status,
 }
 #[derive(Subcommand)]
 pub enum Auth {

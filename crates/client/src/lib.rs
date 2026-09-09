@@ -189,6 +189,23 @@ impl Client {
         )?)
         .await
     }
+    /// Discover the selected server's public IAM configuration without a session.
+    pub async fn iam(&self) -> Result<models::IamInfo> {
+        self.json(self.request(Method::GET, "/api/v1/auth/iam")?)
+            .await
+    }
+    /// Verify current authority. Only an HTTP 401 becomes an unauthenticated result;
+    /// permission, transport, and service failures remain errors.
+    pub async fn login_status(&self) -> Result<models::LoginStatus> {
+        match self.me().await {
+            Ok(identity) => Ok(models::LoginStatus {
+                authenticated: true,
+                identity: Some(identity),
+            }),
+            Err(Error::Api { status: 401, .. }) => Ok(models::LoginStatus::default()),
+            Err(error) => Err(error),
+        }
+    }
     pub async fn login(&self, slt: &Secret, mutation: &Mutation) -> Result<models::Session> {
         self.json(
             self.mutation(Method::POST, "/api/v1/auth/login", mutation)?

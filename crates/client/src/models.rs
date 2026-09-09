@@ -162,6 +162,20 @@ pub struct Session {
     pub actor: serde_json::Value,
     pub org_id: Option<String>,
 }
+/// Public application metadata; never contains application credentials.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IamInfo {
+    pub app_id: String,
+    pub iam_url: String,
+    pub iam_environment_id: Option<Uuid>,
+}
+/// Live authentication result. Identity fields are present only after verification.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LoginStatus {
+    pub authenticated: bool,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
+}
 /// Current organization authority obtained from IAM on this request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Identity {

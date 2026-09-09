@@ -51,6 +51,14 @@ Webhook subscriptions are optional; use `configure_webhook` or
 `subscribe_webhook` when a receiver should receive deliveries. A Carbon may log
 in and read reminders but cannot create one.
 
+Use `anonymous.iam().await?` before login to discover the server's `app_id` for
+obtaining an IAM SLT. `client.login_status().await?` verifies the attached session
+and returns `LoginStatus { authenticated: true, identity: Some(identity) }` on
+success. HTTP 401 returns an unauthenticated status with no identity; all other
+failures remain errors. The client does not refresh automatically. These methods
+respect `with_test_environment` like other public operations. The CLI's
+`SILICON_HOME` setting does not affect this stateless package.
+
 ## State and secrets
 
 `Client` is immutable configuration: `with_session` and `with_test_environment`
@@ -76,6 +84,8 @@ once; retry decisions belong to the caller.
 | Method | Input / result |
 | --- | --- |
 | `health(ready)` | Liveness or readiness `Health` |
+| `iam()` | Public `IamInfo`: app ID, IAM URL and optional IAM sandbox UUID; no session needed |
+| `login_status()` | `LoginStatus` with verified identity, or `authenticated: false` for HTTP 401 |
 | `login(slt, mutation)` | `Session` from IAM SLT |
 | `refresh(refresh_token, mutation)` | Successor `Session` |
 | `logout(token, mutation)` | Revocation; refresh token revokes its family |
