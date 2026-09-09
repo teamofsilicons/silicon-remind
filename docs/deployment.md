@@ -1,7 +1,8 @@
 # Production deployment and releases
 
 The current live deployment uses the [standalone EC2 setup](../deploy/aws/README-standalone.md).
-Its latest image digests and verification are recorded in the
+The latest backend digest and verification are recorded in the
+[0.1.2 release](RELEASE_0.1.2.md). The frontend image is recorded in the
 [unscoped IAM login release](../deploy/aws/unscoped-login-2026-09-08.md).
 The Fargate configuration below remains an alternative deployment template.
 

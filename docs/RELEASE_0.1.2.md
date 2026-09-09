@@ -33,27 +33,47 @@ version, help, `SILICON_HOME`, unauthenticated JSON status, public readiness,
 and current-version updater checks. Both package archives were built and
 verified before publishing; the CLI resolved client 0.1.2 from the registry.
 
-## Backend deployment pending
+## Production backend deployed
 
-AWS SSO credentials expired. Deployment requires renewing the
-`silicon-production` profile before ECR push and SSM preflight/rollout.
-Production has not yet been changed by this release; the new `iam` command
-requires the new backend endpoint before it can work against production.
+The ARM64 runtime image was pushed to ECR and deployed to the existing standalone
+instance `i-0546693fac4a32d6d`, account `234951665042`, region `us-east-1`.
 
-The ARM64 runtime image is prepared locally as:
+- ECR tag: `silicon-remind-production:release-0.1.2-aws`.
+- API and worker image:
+  `234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:1e2576372b0a912f67e299563fde406409643f7801dcd30e0b8ce1a601cbe73f`.
+- Preflight SSM command: `91c4bd5e-d03f-48c1-aa05-0869dba18258`.
+- Rollout SSM command: `e9960352-ee44-4a0c-ba26-fd1d75764430`.
+- Previous image:
+  `sha256:0e3ceff90919b23ec4279e819a7f282c6d80d5c9ab9f51c790d6b6b32fb5e6fd`.
+- Previous startup script: `/usr/local/sbin/remind-start.before-46b36bc`.
 
-`234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production:release-0.1.2-aws`
+The runtime includes the nonempty 165408-byte AWS RDS CA bundle. An empty cached
+bundle was discovered during release validation; the runtime Dockerfile now
+rejects empty downloads and the wrapper was rebuilt without cache. A temporary
+API container passed readiness and IAM discovery with the existing production
+runtime configuration before rollout, then was removed.
 
-Local image digest:
-`sha256:1e2576372b0a912f67e299563fde406409643f7801dcd30e0b8ce1a601cbe73f`.
-Resolve the ECR digest after pushing before deployment. The runtime includes
-the API/worker executables and the nonempty 165408-byte AWS RDS CA bundle.
-An empty cached bundle was discovered during release validation; the runtime
-Dockerfile now rejects empty downloads and the wrapper was rebuilt without cache.
+API and worker were gracefully replaced and both became healthy on the new
+digest. Both persistent image references in `/usr/local/sbin/remind-start` were
+updated. The `remind` and `remind-frontend` systemd units remained active; Caddy
+and the frontend were not restarted. No migration, DNS, credential, or production
+reminder data changes were made. CloudFormation was not changed; use the new
+digest when reprovisioning, and reinstall the existing frontend as documented in
+the [standalone guide](../deploy/aws/README-standalone.md).
 
-The target is the existing standalone instance `i-0546693fac4a32d6d` in account
-`234951665042`, region `us-east-1`. Use the existing runtime environment for a
-temporary API readiness preflight, then gracefully replace API and worker and
-update their persistent startup image references. Preserve the previous digest
-and startup script for rollback. Verify public readiness, `/api/v1/auth/iam`,
-and the published CLI against the deployed server. No schema migration is needed.
+Public verification after rollout:
+
+- Backend `/health/ready` returned HTTP 200.
+- `/api/v1/auth/iam` returned HTTP 200 with `Cache-Control: no-store`,
+  `app_id: "tos>remind"`, `iam_url: "https://backend.iam.teamofsilicons.com/"`,
+  and `iam_environment_id: null`.
+- Frontend `/` and gateway `/ui/api/health/ready` returned HTTP 200.
+- The fresh crates.io CLI 0.1.2 returned the deployed IAM metadata through
+  `remind iam --json`, passed public readiness, and returned
+  `authenticated: false` for an isolated store with no session. Carbon/Silicon
+  authenticated status and refresh behavior are covered by the CLI regression
+  tests; this rollout did not create a new production IAM session.
+
+The backend package version remains 0.1.0; client and CLI are 0.1.2. The pinned
+image digest identifies this backend release. For rollback, gracefully replace
+the API and worker with the previous image and restore the saved startup script.
