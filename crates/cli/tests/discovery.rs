@@ -17,6 +17,7 @@ fn cli(home: &Path) -> Command {
     command
         .env("HOME", home)
         .env_remove("SILICON_HOME")
+        .env_remove("SILICON_REMIND_TEST")
         .env_remove("REMIND_URL")
         .env_remove("REMIND_ORG")
         .arg("--no-update");
@@ -244,12 +245,13 @@ async fn status_refreshes_expired_sandbox_session_in_the_same_context() -> Resul
         ))
         .and(header("authorization", "Bearer successor-access"))
         .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
-        .expect(1)
+        .expect(2)
         .mount(&server)
         .await;
     let status = success(
         cli(home.path())
-            .args(["--test", id, "login", "status", "--json"])
+            .env("SILICON_REMIND_TEST", id)
+            .args(["login", "status", "--json"])
             .output()?,
     )?;
     assert_eq!(status["authenticated"], true);
@@ -257,6 +259,16 @@ async fn status_refreshes_expired_sandbox_session_in_the_same_context() -> Resul
     let stored = &state["sessions"][format!("{}#{id}", server.uri())];
     assert_eq!(stored["session"]["refresh_token"], "successor-refresh");
     assert!(stored["pending_refresh_key"].is_null());
+    let explicit = success(
+        cli(home.path())
+            .env(
+                "SILICON_REMIND_TEST",
+                "01992000-0000-7000-8000-000000000004",
+            )
+            .args(["--test", id, "login", "status", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(explicit["authenticated"], true);
     let production = success(
         cli(home.path())
             .args(["login", "status", "--json"])
@@ -298,5 +310,19 @@ async fn status_distinguishes_rejected_authority_from_service_failures() -> Resu
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_native_binary_keeps_the_public_command_name() -> Result<()> {
+    let dir = TempDir::new()?;
+    let executable = dir.path().join("remind-native");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_remind"), &executable)?;
+    let output = Command::new(executable).arg("--help").output()?;
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout)?;
+    assert!(help.contains("Usage: remind [OPTIONS]"));
+    assert!(!help.contains("remind-native"));
     Ok(())
 }

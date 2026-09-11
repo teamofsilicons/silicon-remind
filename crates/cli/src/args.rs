@@ -4,6 +4,7 @@ use uuid::Uuid;
 #[derive(Parser)]
 #[command(
     name = "remind",
+    bin_name = "remind",
     version,
     about = "Create and manage Silicon reminders through Silicon IAM.",
     long_about = "Silicon Remind schedules one-time or recurring reminders using five-field Linux cron. Silicons manage their own reminders; Carbons and Silicons can read their organization's reminders.\n\nStart with: remind login <slt>\nOptionally subscribe a receiver: remind webhook subscribe <url>\nCreate a reminder: remind create --text 'Check the build' --cron '*/5 * * * *'\nUse any command in a saved sandbox: remind --test <test_id> <command>.",
@@ -19,7 +20,7 @@ pub struct Cli {
     #[arg(long, global = true, env = "REMIND_ORG")]
     pub org: Option<String>,
     /// Run the same command in a saved test environment, using its isolated session.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SILICON_REMIND_TEST")]
     pub test: Option<Uuid>,
     /// Print machine-readable JSON; suggestions go to stderr only in human mode.
     #[arg(long, global = true)]

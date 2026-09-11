@@ -179,6 +179,11 @@ API's machine error code in the error text to distinguish state conflicts.
 
 ## Sandboxes
 
+For a dedicated runtime, set `SILICON_REMIND_TEST` to the environment UUID.
+Plain `remind` commands then use that saved environment and its session.
+An explicit `--test` overrides the variable. Unset it for production environment
+management. This does not share credentials between homes or environments.
+
 Manage environments with the production session, without `--test`:
 
 ```sh
