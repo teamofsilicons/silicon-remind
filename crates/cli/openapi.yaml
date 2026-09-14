@@ -782,7 +782,7 @@ components:
       type: apiKey
       in: header
       name: X-Remind-Test-Key
-      description: 32-character Remind root key. Selects an isolated test environment; ordinary actions
+      description: Imported IAM application secret or legacy 32-character Remind root key. Selects an isolated test environment; ordinary actions
         still require a test IAM access token.
   parameters:
     OrgId:
@@ -827,7 +827,7 @@ components:
         management routes reject this header.
       schema:
         type: string
-        pattern: ^[a-zA-Z0-9]{32}$
+        pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
   responses:
     WebhookNotConfigured:
       description: The requested legacy subscription does not exist or is inactive.
@@ -1187,13 +1187,17 @@ components:
       properties:
         id: *id007
         org_id: *id009
-        creator_id: *id007
+        creator_id:
+          type: string
         name: *id009
         description:
           type:
           - string
           - 'null'
         iam_environment_id: *id007
+        iam_control_version:
+          type: [integer, "null"]
+          description: Current IAM lifecycle revision for automatically discovered environments.
         version:
           type: integer
         created_at: *id011

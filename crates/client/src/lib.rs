@@ -25,6 +25,54 @@ impl Secret {
         self.0.expose_secret()
     }
 }
+
+#[cfg(test)]
+mod testing_selection_tests {
+    use super::*;
+
+    #[test]
+    fn imported_and_legacy_selectors_clear_the_previous_actor_session() -> Result<()> {
+        let production = Client::new("http://127.0.0.1:8080")?
+            .with_session(Secret::new("oat_production"), "tos")?;
+        for selector in ["A".repeat(32), format!("ask_{}", "_-a".repeat(14) + "a")] {
+            let testing = production.with_test_environment(Secret::new(selector))?;
+            assert!(testing.test_key.is_some());
+            assert!(testing.bearer.is_none());
+            assert!(testing.org.is_none());
+        }
+        assert!(production.test_key.is_none());
+        assert!(production.bearer.is_some());
+        for invalid in [
+            Uuid::nil().to_string(),
+            format!("ask_{}", "a".repeat(42)),
+            format!("ask_{}", "a".repeat(44)),
+            format!("ask_{} ", "a".repeat(42)),
+            format!("oat_{}", "a".repeat(43)),
+        ] {
+            assert!(
+                production
+                    .with_test_environment(Secret::new(invalid))
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_metadata_accepts_public_and_legacy_uuid_creators()
+    -> std::result::Result<(), serde_json::Error> {
+        for creator in ["test-carbon".to_owned(), Uuid::nil().to_string()] {
+            let metadata: models::TestEnvironment = serde_json::from_value(serde_json::json!({
+                "id":Uuid::nil(), "org_id":"tos", "creator_id":creator, "name":"test",
+                "description":null, "iam_environment_id":Uuid::nil(), "version":1,
+                "iam_control_version":1, "created_at":"2026-09-14T00:00:00Z", "last_activity_at":"2026-09-14T00:00:00Z",
+                "deleted_at":null, "purge_after":null
+            }))?;
+            assert_eq!(metadata.creator_id, creator);
+        }
+        Ok(())
+    }
+}
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("[REDACTED]")
@@ -147,11 +195,19 @@ impl Client {
         next.org = Some(org);
         Ok(next)
     }
-    /// Selects a sandbox by its root key. Its public UUID is not a credential.
+    /// Selects a sandbox by its legacy root or imported IAM application secret.
+    /// Its public UUID is not a credential. Selection clears any prior session.
     pub fn with_test_environment(&self, key: Secret) -> Result<Self> {
-        if key.expose().len() != 32 || !key.expose().bytes().all(|b| b.is_ascii_alphanumeric()) {
+        let value = key.expose();
+        let legacy = value.len() == 32 && value.bytes().all(|b| b.is_ascii_alphanumeric());
+        let imported = value.len() == 47
+            && value.starts_with("ask_")
+            && value[4..]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+        if !legacy && !imported {
             return Err(Error::Invalid(
-                "test key must contain exactly 32 alphanumeric characters".into(),
+                "test selector must be a 32-character legacy root or imported IAM application secret".into(),
             ));
         }
         let mut next = self.clone();

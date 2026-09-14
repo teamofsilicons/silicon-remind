@@ -5,7 +5,34 @@ retention implementation against isolated storage. It begins empty. It can creat
 real reminders and submit real deliveries to its configured test destination.
 It is not a mock-only API and does not use a second set of reminder routes.
 
-## The two credentials and two identities
+## Imported IAM application discovery
+
+For an IAM-managed test world, import `tos>remind` and send its returned
+`ask_…` application secret (47 characters) in `X-Remind-Test-Key` to
+`GET /api/v1/testing-environment`. Remind discovers and validates the world
+through IAM, creates its isolated reminder schema and returns metadata whose
+`id` and `iam_environment_id` match the IAM world UUID. The imported credential
+selects the world; ordinary reminder operations still require a test actor's
+Remind access token and the intended `X-Org-ID`.
+
+Every IAM request in this context uses the imported credential for both HTTP
+application authentication and the `X-Testing-Application` selector. The
+production application credential is not reused. Requests and worker admission
+recheck IAM discovery; revoked imports, unavailable IAM or stale lifecycle
+revisions block access. An IAM cleaning clears the isolated reminder data before
+new requests proceed. Imported-secret selection grants no local root cleaning,
+rotation or reconfiguration rights: manage these worlds through IAM. Legacy
+local inactivity and purge deadlines do not apply to IAM-owned replicas; admission
+follows current IAM authority. Local replica records remain until cleanup
+reconciliation or operator removal. IAM controls imported-world names, so a
+deleted world does not reserve that name in Remind.
+
+The Rust client's `with_test_environment` accepts either an imported application
+secret or a legacy Remind root, and clears any previously attached actor session.
+This backend integration requires IAM client 1.8.0. The discovery response's
+`creator_id` is an IAM public identifier; legacy UUID creators remain strings.
+
+## Legacy pairing: two roots and two identities
 
 There are two independent services and root keys:
 
@@ -44,7 +71,7 @@ will use. The current receiver uses its configured shared IAM keyring; importing
 the production Remind app with the inherited signing key is the supported setup.
 Never point a test Silicon at another party's production delivery endpoint.
 
-## Create Remind's empty environment
+## Create a legacy Remind environment
 
 Any production Carbon or Silicon member can create an environment for their
 current organization. That org owns it, and the principal is recorded as creator.
@@ -125,7 +152,7 @@ query string. Missing/invalid/duplicate/revoked environment headers fail closed.
 The test-only `test-info`/`clean` equivalents return `test_environment_required`
 without a key. Production environment-management paths reject the test header.
 
-## Permissions and lifecycle
+## Legacy permissions and lifecycle
 
 | Action | Authority |
 | --- | --- |
@@ -176,8 +203,10 @@ reminder's 45-day retention expires.
 IAM test webhooks contain `test.testing_key`, `test.metadata`, and `test.data`.
 The receiver verifies the signature over the exact raw outer body through the
 official SDK before reading the routing key. It finds active Remind replicas
-bound to that IAM root key, verifies the expected key with the SDK, normalizes
-the event, and writes it only inside those replicas. Root keys are excluded from
+bound to that IAM root key. Legacy replicas verify the expected key through the
+SDK; imported replicas compare its digest against fresh IAM discovery metadata
+using a constant-time comparison. The receiver normalizes the event and writes
+it only inside the admitted replica. Root keys are excluded from
 stored event payloads and logs. Production events use production storage.
 Receipt IDs deduplicate retries, and lifecycle revocations share a transaction
 with their receipt. Multiple replicas bound to the same IAM sandbox each receive
