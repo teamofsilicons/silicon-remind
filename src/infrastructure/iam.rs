@@ -71,6 +71,45 @@ impl IamClient {
         }
     }
 
+    /// Resolves the imported test application without an IAM root credential.
+    /// # Errors
+    /// Rejects production secrets, unavailable worlds and mismatched applications.
+    pub async fn discover(
+        settings: &IamSettings,
+        secret: &SecretString,
+    ) -> Result<(Self, models::ApplicationTestingContext), IamError> {
+        let mut iam = Self::new(settings).map_err(IamError::Unavailable)?;
+        iam.client = iam
+            .client
+            .with_credential(Credential::application(
+                &settings.app_id,
+                secret.expose_secret(),
+            ))
+            .with_testing_application(&settings.app_id, secret.expose_secret())
+            .map_err(classify)?;
+        let context = iam
+            .client
+            .applications()
+            .testing_context()
+            .await
+            .map_err(classify)?;
+        let meta = context
+            .environment
+            .as_ref()
+            .ok_or(IamError::Unauthenticated)?;
+        if context.application.app_id != settings.app_id
+            || context.environment_id.is_nil()
+            || meta.environment_id != context.environment_id
+            || meta.version < 1
+            || !matches!(meta.creator_type.as_str(), "carbon" | "silicon")
+            || meta.creator_id.is_empty()
+        {
+            return Err(IamError::Unauthenticated);
+        }
+        iam.testing_environment_id = Some(context.environment_id);
+        Ok((iam, context))
+    }
+
     /// Public application configuration for SLT discovery; excludes all credentials.
     #[must_use]
     pub fn public_info(&self) -> serde_json::Value {
@@ -91,6 +130,9 @@ impl IamClient {
         slt: &SecretString,
         mutation: &Mutation,
     ) -> Result<models::OAuthTokenResponse, IamError> {
+        if self.testing_environment_id.is_none() && !slt.expose_secret().starts_with("oac_") {
+            return Err(IamError::Unauthenticated);
+        }
         self.client
             .oauth()
             .login(&self.app_id, slt.expose_secret(), mutation)
@@ -238,9 +280,9 @@ impl IamClient {
             return Err(IamError::Unauthenticated);
         }
         let kind = match snapshot.actor_type {
-            models::ApplicationAuthorizationActorType::Carbon => ActorKind::Carbon,
-            models::ApplicationAuthorizationActorType::Silicon => ActorKind::Silicon,
-            models::ApplicationAuthorizationActorType::Other(_) => {
+            Some(models::ApplicationAuthorizationActorType::Carbon) => ActorKind::Carbon,
+            Some(models::ApplicationAuthorizationActorType::Silicon) => ActorKind::Silicon,
+            _ => {
                 return Err(IamError::Unauthenticated);
             }
         };
@@ -253,7 +295,12 @@ impl IamClient {
             membership_id: snapshot.membership_id,
             authorization_epoch: epoch,
             organization_iam_id: Some(snapshot.organization_id),
-            public_id: Some(snapshot.public_id.clone()),
+            public_id: Some(
+                snapshot
+                    .public_id
+                    .clone()
+                    .ok_or(IamError::Unauthenticated)?,
+            ),
             org_role: snapshot.org_role.clone(),
             read_scope: ReminderReadScope::organization(),
         })
@@ -275,6 +322,109 @@ fn classify(error: silicon_iam_client::Error) -> IamError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn discovery_fixture(id: Uuid) -> serde_json::Value {
+        json!({
+            "environment_id":id,
+            "application":{"app_id":"tos>remind","base_url":"https://remind.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},
+            "environment":{"environment_id":id,"org_id":"tos","name":"Test world","version":1,"key_generation":1,"created_at":"2026-09-13T00:00:00Z","creator_type":"carbon","creator_id":"tester"}
+        })
+    }
+
+    #[tokio::test]
+    async fn discovery_and_login_use_the_imported_credential_for_both_headers() -> anyhow::Result<()>
+    {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{basic_auth, header, method, path},
+        };
+        let server = MockServer::start().await;
+        let settings = IamSettings {
+            base_url: server.uri().parse()?,
+            app_id: "tos>remind".into(),
+            app_secret: SecretString::from(format!("ask_{}", "p".repeat(43))),
+            request_timeout: std::time::Duration::from_secs(2),
+            webhook_keys: std::collections::BTreeMap::new(),
+        };
+        let secret = SecretString::from(format!("ask_{}", "t".repeat(43)));
+        let selector = format!(
+            "Basic {}",
+            STANDARD.encode(format!("tos>remind:{}", secret.expose_secret()))
+        );
+        let id = Uuid::now_v7();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/application/testing-context"))
+            .and(basic_auth("tos>remind", secret.expose_secret()))
+            .and(header("x-testing-application", selector.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(discovery_fixture(id)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/api/v1/app-auth/tokens"))
+            .and(basic_auth("tos>remind", secret.expose_secret()))
+            .and(header("x-testing-application", selector.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token":"oat_fixture", "refresh_token":"ort_fixture", "token_type":"Bearer", "expires_in":1800,
+                "scope":"self.identity.read", "actor":null,"org_id":null
+            }))).expect(1).mount(&server).await;
+        let (iam, context) = IamClient::discover(&settings, &secret).await?;
+        assert_eq!(context.environment_id, id);
+        assert_eq!(iam.public_info()["iam_environment_id"], json!(id));
+        iam.login(
+            &SecretString::from("existing-test-carbon"),
+            &Mutation::new(),
+        )
+        .await?;
+        let requests = server
+            .received_requests()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("requests unavailable"))?;
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.headers.contains_key("x-testing-environment-key"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_mismatched_or_missing_environment_authority() -> anyhow::Result<()> {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        let settings = IamSettings {
+            base_url: server.uri().parse()?,
+            app_id: "tos>remind".into(),
+            app_secret: SecretString::from(format!("ask_{}", "p".repeat(43))),
+            request_timeout: std::time::Duration::from_secs(2),
+            webhook_keys: std::collections::BTreeMap::new(),
+        };
+        let secret = SecretString::from(format!("ask_{}", "t".repeat(43)));
+        for change in ["application", "world", "missing", "version", "creator"] {
+            server.reset().await;
+            let mut context = discovery_fixture(Uuid::now_v7());
+            match change {
+                "application" => context["application"]["app_id"] = json!("tos>other"),
+                "world" => context["environment"]["environment_id"] = json!(Uuid::now_v7()),
+                "missing" => context["environment"] = serde_json::Value::Null,
+                "version" => context["environment"]["version"] = json!(0),
+                _ => context["environment"]["creator_type"] = json!("application"),
+            }
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(context))
+                .mount(&server)
+                .await;
+            assert!(
+                matches!(
+                    IamClient::discover(&settings, &secret).await,
+                    Err(IamError::Unauthenticated)
+                ),
+                "{change}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn public_info_exposes_configuration_and_plane_without_secrets() -> anyhow::Result<()> {

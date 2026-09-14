@@ -153,9 +153,19 @@ pub async fn accept_iam_event(
         let mut receipt_id = None;
         for id in ids {
             if let Some(lease) = tests.enter_worker(id).await? {
-                verified
-                    .verify_testing_environment(&lease.iam_key)
-                    .map_err(|_| AppError::Unauthenticated)?;
+                if let Some(iam_key) = &lease.iam_key {
+                    verified
+                        .verify_testing_environment(iam_key)
+                        .map_err(|_| AppError::Unauthenticated)?;
+                } else {
+                    use subtle::ConstantTimeEq as _;
+                    let digest = hex::encode(Sha256::digest(key.as_bytes()));
+                    if !lease.webhook_key_digest.as_ref().is_some_and(|expected| {
+                        bool::from(expected.as_bytes().ct_eq(digest.as_bytes()))
+                    }) {
+                        return Err(AppError::Unauthenticated);
+                    }
+                }
                 let repository =
                     crate::infrastructure::postgres::PostgresRepository::new(lease.pool.clone());
                 receipt_id = Some(apply_verified_event(&repository, &verified, received_at).await?);

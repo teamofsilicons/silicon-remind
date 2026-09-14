@@ -21,8 +21,8 @@ Carbon access is read-only for reminders, even if that Carbon is an org owner.
 An org owner/admin can administer test environments; their reminder permissions
 are still those of a Carbon.
 
-A request carrying `X-Remind-Test-Key: <32-character-key>` uses an isolated Remind
-sandbox. Its bearer must be from the linked IAM sandbox. Invalid keys never fall
+A request carrying `X-Remind-Test-Key` with an imported IAM application secret
+(`ask_…`) or legacy 32-character root uses an isolated Remind sandbox. Its bearer must be from the linked IAM sandbox. Invalid keys never fall
 through to production. Environment lifecycle management uses production identity
 and rejects this test header. See [testing environments](../testing-environments.md).
 

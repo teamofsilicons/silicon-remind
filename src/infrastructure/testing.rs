@@ -27,6 +27,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+mod discovery;
+
 static CONTROL_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./testing/migrations");
 const MAX_CACHED_TEST_POOLS: usize = 4;
 
@@ -38,7 +40,7 @@ pub struct TestEnvironment {
     /// Production organization that owns this test environment.
     pub org_id: String,
     /// Production principal that created it.
-    pub creator_id: Uuid,
+    pub creator_id: String,
     /// Human-readable name.
     pub name: String,
     /// Optional purpose.
@@ -47,6 +49,8 @@ pub struct TestEnvironment {
     pub iam_environment_id: Uuid,
     /// Monotonic metadata revision.
     pub version: i64,
+    /// IAM-owned worlds use IAM lifecycle administration, without a Remind god key.
+    pub iam_control_version: Option<i64>,
     /// Creation instant.
     pub created_at: DateTime<Utc>,
     /// Most recent successful user activity; worker ticks do not keep it alive.
@@ -105,7 +109,9 @@ pub struct EnvironmentLease {
     /// Official IAM client with mandatory test credentials.
     pub iam: Option<IamClient>,
     /// Expected IAM root key for signed test webhook verification.
-    pub iam_key: EnvironmentKey,
+    pub iam_key: Option<EnvironmentKey>,
+    /// Live IAM digest for secret-selected webhook admission.
+    pub webhook_key_digest: Option<String>,
     guard: Transaction<'static, Postgres>,
 }
 
@@ -186,7 +192,7 @@ impl TestEnvironments {
             .map_err(iam_error)?
             .auto_update(false)
             .timeout(self.iam_settings.request_timeout)
-            .environment(lease.iam_key.clone())
+            .environment(lease.iam_key.clone().ok_or(AppError::Forbidden)?)
             .build()
             .map_err(iam_error)?;
         self.validate_app(&iam, &secret).await?;
@@ -289,7 +295,7 @@ impl TestEnvironments {
         let sealed = self.seal(id, &credentials)?;
         let mut transaction = self.control.begin().await?;
         sqlx::query("INSERT INTO public.testing_environments (id,org_id,creator_id,name,description,iam_environment_id,key_hash,secrets,iam_key_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
-            .bind(id).bind(&actor.org_id).bind(Uuid::parse_str(&actor.id).map_err(|_| AppError::Unauthenticated)?)
+            .bind(id).bind(&actor.org_id).bind(&actor.id)
             .bind(input.name.trim()).bind(input.description).bind(binding.id).bind(hash(&key)).bind(sealed)
             .bind(hash(&credentials.iam_key))
             .execute(&mut *transaction).await?;
@@ -322,7 +328,7 @@ impl TestEnvironments {
         if !(1..=100).contains(&limit) {
             return Err(AppError::Validation);
         }
-        Ok(sqlx::query_as("SELECT * FROM public.testing_environments WHERE org_id = $1 AND (COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp()) AND ($2 OR (deleted_at IS NULL AND last_activity_at>clock_timestamp()-interval '15 days')) AND ($3::uuid IS NULL OR id > $3) ORDER BY id LIMIT $4")
+        Ok(sqlx::query_as("SELECT * FROM public.testing_environments WHERE org_id = $1 AND ((iam_control_version IS NOT NULL OR COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp())) AND ($2 OR (deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at>clock_timestamp()-interval '15 days'))) AND ($3::uuid IS NULL OR id > $3) ORDER BY id LIMIT $4")
             .bind(&actor.org_id).bind(deleted).bind(after).bind(limit).fetch_all(&self.control).await?.into_iter().map(logical_lifecycle).collect())
     }
 
@@ -332,7 +338,7 @@ impl TestEnvironments {
     ///
     /// Returns not found for other organizations or expired environments, or a database error.
     pub async fn get(&self, actor: &Actor, id: Uuid) -> Result<TestEnvironment, AppError> {
-        sqlx::query_as("SELECT * FROM public.testing_environments WHERE id = $1 AND org_id = $2 AND (COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp())")
+        sqlx::query_as("SELECT * FROM public.testing_environments WHERE id = $1 AND org_id = $2 AND ((iam_control_version IS NOT NULL OR COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp()))")
             .bind(id).bind(&actor.org_id).fetch_optional(&self.control).await?.map(logical_lifecycle).ok_or(AppError::NotFound)
     }
 
@@ -405,6 +411,12 @@ impl TestEnvironments {
         key: &SecretString,
         exclusive: bool,
     ) -> Result<EnvironmentLease, AppError> {
+        if key.expose_secret().starts_with("ask_") {
+            if exclusive {
+                return Err(AppError::Forbidden);
+            }
+            return self.discover(key, None).await;
+        }
         if key.expose_secret().len() != 32
             || !key
                 .expose_secret()
@@ -422,7 +434,7 @@ impl TestEnvironments {
         .ok_or(AppError::Unauthenticated)?;
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, exclusive).await?;
-        let environment: TestEnvironment = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND key_hash=$2 AND deleted_at IS NULL AND last_activity_at > clock_timestamp() - interval '15 days'")
+        let environment: TestEnvironment = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND key_hash=$2 AND deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days')")
             .bind(id).bind(hash(key.expose_secret())).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthenticated)?;
         let credentials = self.credentials(&mut tx, id).await?;
         self.lease(environment, credentials, tx).await
@@ -436,7 +448,7 @@ impl TestEnvironments {
     pub async fn enter_worker(&self, id: Uuid) -> Result<Option<EnvironmentLease>, AppError> {
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, false).await?;
-        let row: Option<TestEnvironment> = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND last_activity_at > clock_timestamp() - interval '15 days'")
+        let row: Option<TestEnvironment> = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days')")
             .bind(id).fetch_optional(&mut *tx).await?;
         match row {
             Some(environment) => {
@@ -471,8 +483,8 @@ impl TestEnvironments {
         if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
             return Err(AppError::Unauthenticated);
         }
-        Ok(sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE iam_key_hash=$1 AND deleted_at IS NULL ORDER BY id")
-            .bind(hash(key)).fetch_all(&self.control).await?)
+        Ok(sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE (iam_key_hash=$1 OR webhook_key_digest=$2) AND deleted_at IS NULL ORDER BY id")
+            .bind(hash(key)).bind(hex::encode(hash(key))).fetch_all(&self.control).await?)
     }
 
     /// Bounded active environment page for workers.
@@ -481,7 +493,7 @@ impl TestEnvironments {
     ///
     /// Returns a database error if the bounded page cannot be read.
     pub async fn active_ids(&self, after: Option<Uuid>) -> Result<Vec<Uuid>, AppError> {
-        Ok(sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE deleted_at IS NULL AND last_activity_at > clock_timestamp() - interval '15 days' AND ($1::uuid IS NULL OR id > $1) ORDER BY id LIMIT 100")
+        Ok(sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days') AND ($1::uuid IS NULL OR id > $1) ORDER BY id LIMIT 100")
             .bind(after).fetch_all(&self.control).await?)
     }
 
@@ -491,7 +503,7 @@ impl TestEnvironments {
     ///
     /// Returns database errors while retiring or dropping an environment under its lifecycle lock.
     pub async fn sweep(&self) -> Result<(), AppError> {
-        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE (deleted_at IS NULL AND last_activity_at <= clock_timestamp() - interval '15 days') OR purge_after <= clock_timestamp() ORDER BY id LIMIT 100")
+        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE (iam_control_version IS NULL AND deleted_at IS NULL AND last_activity_at <= clock_timestamp() - interval '15 days') OR purge_after <= clock_timestamp() ORDER BY id LIMIT 100")
             .fetch_all(&self.control).await?;
         for id in ids {
             let mut tx = self.control.begin().await?;
@@ -524,6 +536,15 @@ impl TestEnvironments {
         credentials: Credentials,
         guard: Transaction<'static, Postgres>,
     ) -> Result<EnvironmentLease, AppError> {
+        if credentials.iam_key.is_empty() {
+            // Release the shared fence before discovery may need an exclusive clean.
+            guard.commit().await?;
+            let secret = credentials
+                .iam_app_secret
+                .ok_or(AppError::Unauthenticated)?;
+            return Box::pin(self.discover(&SecretString::from(secret), Some(environment.id)))
+                .await;
+        }
         let iam_key = EnvironmentKey::new(credentials.iam_key).map_err(iam_error)?;
         let iam = credentials
             .iam_app_secret
@@ -543,7 +564,8 @@ impl TestEnvironments {
             pool: self.pool(environment.id).await?,
             environment,
             iam,
-            iam_key,
+            iam_key: Some(iam_key),
+            webhook_key_digest: None,
             guard,
         })
     }
@@ -610,7 +632,10 @@ impl TestEnvironments {
 }
 
 fn require_manager(actor: &Actor, environment: &TestEnvironment) -> Result<(), AppError> {
-    if actor.id == environment.creator_id.to_string()
+    if environment.iam_control_version.is_some() {
+        return Err(AppError::Forbidden);
+    }
+    if actor.id == environment.creator_id
         || matches!(actor.org_role.as_deref(), Some("owner" | "admin"))
     {
         Ok(())
@@ -702,7 +727,10 @@ async fn migrate_data_schema(tx: &mut Transaction<'_, Postgres>) -> Result<(), A
 // Deadlines apply independently of when a background sweep physically runs.
 fn logical_lifecycle(mut environment: TestEnvironment) -> TestEnvironment {
     let retired_at = environment.last_activity_at + chrono::Duration::days(15);
-    if environment.deleted_at.is_none() && retired_at <= Utc::now() {
+    if environment.iam_control_version.is_none()
+        && environment.deleted_at.is_none()
+        && retired_at <= Utc::now()
+    {
         environment.deleted_at = Some(retired_at);
         environment.purge_after = Some(retired_at + chrono::Duration::days(30));
     }
@@ -717,3 +745,6 @@ async fn guarded_get(
     sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND org_id=$2 AND (COALESCE(purge_after,last_activity_at+interval '45 days')>clock_timestamp())")
         .bind(id).bind(&actor.org_id).fetch_optional(&mut **tx).await?.map(logical_lifecycle).ok_or(AppError::NotFound)
 }
+
+#[cfg(test)]
+mod tests;

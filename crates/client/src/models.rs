@@ -254,7 +254,7 @@ pub struct TestEnvironment {
     /// Production organization that owns this test environment.
     pub org_id: String,
     /// Production principal that created it.
-    pub creator_id: Uuid,
+    pub creator_id: String,
     /// Human-readable name.
     pub name: String,
     /// Optional purpose.
