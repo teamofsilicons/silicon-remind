@@ -70,7 +70,9 @@ def run(*command: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--honeycomb", default="honeycomb", help="Honeycomb CLI executable")
-    parser.add_argument("--binaries-dir", type=Path, help="CI artifact directory")
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--binaries-dir", type=Path, help="CI artifact directory")
+    inputs.add_argument("--target-tree", type=Path, help="Populated Honeycomb targets directory")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     version = tomllib.loads((ROOT / "crates/cli/Cargo.toml").read_text())["package"]["version"]
@@ -91,7 +93,9 @@ def main() -> None:
         for target, triple in TARGETS.items():
             name = "remind.exe" if target.startswith("windows-") else "remind"
             source = (
-                args.binaries_dir / target / name
+                args.target_tree / target / "bin" / name
+                if args.target_tree
+                else args.binaries_dir / target / name
                 if args.binaries_dir
                 else ROOT / "target" / triple / "release" / name
             )
