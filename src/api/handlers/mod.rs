@@ -22,3 +22,6 @@ pub async fn not_found() -> Response {
 pub async fn method_not_allowed() -> Response {
     AppError::MethodNotAllowed.into_response()
 }
+
+/// Honeycomb service lifecycle endpoints.
+pub mod honeycomb;

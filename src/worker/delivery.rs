@@ -35,6 +35,10 @@ pub struct DeliveryProcessor {
     clock: Arc<dyn Clock>,
     metrics: Metrics,
     testing: bool,
+    test_admission: Option<(
+        crate::infrastructure::testing::TestEnvironments,
+        crate::infrastructure::testing::TestEnvironment,
+    )>,
     test_webhook_urls: Vec<String>,
 }
 
@@ -68,6 +72,7 @@ impl DeliveryProcessor {
             clock,
             metrics,
             testing: false,
+            test_admission: None,
             test_webhook_urls: Vec::new(),
         }
     }
@@ -78,10 +83,16 @@ impl DeliveryProcessor {
     }
 
     /// Reuses delivery policy against an isolated repository.
-    pub(crate) fn with_repository(&self, repository: PostgresRepository) -> Self {
+    pub(crate) fn with_repository(
+        &self,
+        repository: PostgresRepository,
+        tests: crate::infrastructure::testing::TestEnvironments,
+        environment: crate::infrastructure::testing::TestEnvironment,
+    ) -> Self {
         let mut delivery = self.clone();
         delivery.repository = repository;
         delivery.testing = true;
+        delivery.test_admission = Some((tests, environment));
         delivery
     }
 
@@ -177,6 +188,9 @@ impl DeliveryProcessor {
                     .any(|url| url == destination.endpoint_url.as_str())
             {
                 continue;
+            }
+            if let Some((tests, environment)) = &self.test_admission {
+                tests.validate_dispatch(environment).await?;
             }
             if let Err(error) = self
                 .webhook_client

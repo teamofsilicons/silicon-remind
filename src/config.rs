@@ -44,6 +44,10 @@ pub struct Settings {
     pub test_webhook_urls: Vec<String>,
     /// Postmark server credential; absent disables production bug submission.
     pub postmark_server_token: Option<SecretString>,
+    /// Dedicated Honeycomb control-plane credential, independent of test sessions.
+    pub honeycomb_service_token: Option<SecretString>,
+    /// Honeycomb origin used for retryable retention activity reports.
+    pub honeycomb_base_url: Option<Url>,
     /// Space Station telemetry, enabled unless explicitly opted out.
     pub telemetry_enabled: bool,
     /// Write-only key for the dedicated Remind production event table.
@@ -290,6 +294,10 @@ impl Settings {
         Self::from_source(&ProcessEnvironment)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Typed environment settings are assembled in one place"
+    )]
     fn from_source(source: &impl ConfigSource) -> Result<Self, SettingsError> {
         let environment = parse_or(source, "REMIND_ENVIRONMENT", "development")?;
         let server = ServerSettings {
@@ -364,6 +372,14 @@ impl Settings {
             encryption,
             webhook,
             worker,
+            honeycomb_service_token: optional(source, "REMIND_HONEYCOMB_SERVICE_TOKEN")
+                .map(SecretString::from),
+            honeycomb_base_url: optional(source, "REMIND_HONEYCOMB_BASE_URL")
+                .map(|url| {
+                    url.parse()
+                        .map_err(|_| invalid("REMIND_HONEYCOMB_BASE_URL", "must be an HTTP origin"))
+                })
+                .transpose()?,
             telemetry_enabled: parse_or(source, "REMIND_TELEMETRY_ENABLED", "true")?,
             telemetry_table_key: optional(source, "REMIND_TELEMETRY_TABLE_KEY")
                 .map(SecretString::from),
@@ -580,6 +596,7 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
         retention,
         ..
     } = settings;
+    validate_honeycomb(settings)?;
     validate_http_url("REMIND_PUBLIC_BASE_URL", &server.public_base_url)?;
     validate_http_url("REMIND_IAM_BASE_URL", &iam.base_url)?;
 
@@ -971,6 +988,30 @@ fn testing_database_settings(
         }
     }
     Ok(testing_database)
+}
+
+fn validate_honeycomb(settings: &Settings) -> Result<(), SettingsError> {
+    if let Some(token) = &settings.honeycomb_service_token
+        && (token.expose_secret().len() < 32
+            || !token.expose_secret().bytes().all(|b| b.is_ascii_graphic()))
+    {
+        return Err(invalid(
+            "REMIND_HONEYCOMB_SERVICE_TOKEN",
+            "must contain at least 32 visible ASCII characters",
+        ));
+    }
+    if let Some(url) = &settings.honeycomb_base_url {
+        validate_http_url("REMIND_HONEYCOMB_BASE_URL", url)?;
+        if !matches!(url.path(), "" | "/")
+            || (settings.environment == RuntimeEnvironment::Production && url.scheme() != "https")
+        {
+            return Err(invalid(
+                "REMIND_HONEYCOMB_BASE_URL",
+                "must be an origin, using HTTPS in production",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

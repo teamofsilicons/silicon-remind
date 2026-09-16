@@ -51,7 +51,7 @@ Selecting an environment clears any bearer on the cloned client. Preserve separa
 
 The application secret selects a world, not a god identity. Carbons can read organization reminders. Silicons can change only their own reminders. Every request revalidates the sandbox application with IAM and ordinary operations use live user authorization. Tokens from another sandbox or production fail the environment check.
 
-IAM owns creation, cleanup, key rotation, retirement, and recovery of discovered worlds. Remind compares IAM's monotonic control revision and cleanup time under a database lifecycle lock, atomically clears old data after an IAM cleanup, and rejects stale state. Background workers revalidate IAM before admission; revoked secrets and unavailable worlds stop work. There is no 100-reminder quota for IAM-discovered worlds.
+Honeycomb owns creation, cleanup, key rotation, retirement, and recovery. Remind accepts its separately authenticated lifecycle operations even while IAM test sessions are disabled. Cleanup runs under an exclusive fence, preserves the participant link, and completes only after all sandbox records are cleared. Replays are safe; stale revisions and generations cannot recreate cleared data. IAM remains the runtime authority for shared readiness and permissions. Workers revalidate IAM before admission and before each outbound test dispatch, including retries. There is no 100-reminder quota for discovered worlds. See the [service integration contract](honeycomb-lifecycle.md).
 
 All reminders, subscriptions, execution history, deleted-reminder records, permissions, idempotency records, webhook receipts, contract usage and audit records use a separate schema in a dedicated testing database. Pool caches hold connections only, not authorization. Cleaning resets environment data; production data is untouched.
 
@@ -63,4 +63,4 @@ Outbound reminder deliveries are **simulated by default in testing**: the execut
 
 ## Legacy manually paired sandboxes
 
-Existing 32-character Remind keys remain accepted. Legacy environments retain their old 100-reminder quota, 15-day inactivity retirement, and 30-day recovery window. `env create/import/key/rotate/restore`, `configure-iam`, and `clean` are legacy administrative commands. They are not needed for `app_secret` selection and cannot administer IAM-discovered worlds. Prefer IAM lifecycle administration for new sandboxes.
+Existing 32-character Remind keys remain accepted. Legacy environments retain their old 100-reminder quota, 15-day inactivity retirement, and 30-day recovery window. `env create/import/key/rotate/restore`, `configure-iam`, and `clean` are legacy administrative commands. They are not needed for `app_secret` selection and cannot administer IAM-discovered worlds. Use Honeycomb lifecycle administration for new sandboxes.

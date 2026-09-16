@@ -3,23 +3,38 @@ use super::*;
 type PriorLifecycle = (Option<DateTime<Utc>>, Option<i64>, Option<DateTime<Utc>>);
 
 impl TestEnvironments {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Discovery holds one lifecycle fence through schema reconciliation"
+    )]
     pub(super) async fn discover(
         &self,
         secret: &SecretString,
     ) -> Result<EnvironmentLease, AppError> {
-        let (iam, current) = IamClient::discover(&self.iam_settings, secret)
+        let (mut iam, mut current) = IamClient::discover(&self.iam_settings, secret)
             .await
-            .map_err(|error| match error {
-                super::super::iam::IamError::Unauthenticated => AppError::Unauthenticated,
-                super::super::iam::IamError::Unavailable(_) => {
-                    AppError::DependencyUnavailable { dependency: "iam" }
-                }
-            })?;
+            .map_err(|e| discovery_error(&e))?;
+        let id = current.environment_id;
+        let mut tx = self.control.begin().await?;
+        lock(&mut tx, id, true).await?;
+        let fence = Self::honeycomb_fence(&mut tx, id).await?;
+        if let Some(fence) = &fence {
+            if fence.state != "active" || fence.app_id != self.iam_settings.app_id {
+                return Err(AppError::Unauthenticated);
+            }
+            // Resolve again under the fence: a response obtained before clean/disable
+            // cannot admit a request into the new generation.
+            (iam, current) = IamClient::discover(&self.iam_settings, secret)
+                .await
+                .map_err(|e| discovery_error(&e))?;
+            if current.environment_id != id {
+                return Err(AppError::Unauthenticated);
+            }
+        }
         let meta = current
             .environment
             .as_ref()
             .ok_or(AppError::Unauthenticated)?;
-        let id = current.environment_id;
         let cleaned = meta
             .cleaned_at
             .map(|v| {
@@ -27,8 +42,18 @@ impl TestEnvironments {
                     .ok_or(AppError::Unauthenticated)
             })
             .transpose()?;
-        let mut tx = self.control.begin().await?;
-        lock(&mut tx, id, true).await?;
+        if let Some(fence) = &fence {
+            if fence.org_id != meta.org_id
+                || fence.key_version != meta.key_generation
+                || current.webhook_key_digest.as_deref() != Some(fence.root_digest.as_str())
+                || (fence.require_iam_clean
+                    && (cleaned.is_none() || cleaned == fence.iam_cleaned_before))
+            {
+                return Err(AppError::Unauthenticated);
+            }
+            sqlx::query("UPDATE public.honeycomb_environments SET require_iam_clean=false WHERE environment_id=$1")
+                .bind(id).execute(&mut *tx).await?;
+        }
         let prior: Option<PriorLifecycle> = sqlx::query_as("SELECT deleted_at,iam_control_version,iam_cleaned_at FROM public.testing_environments WHERE id=$1")
             .bind(id).fetch_optional(&mut *tx).await?;
         if prior.as_ref().is_some_and(|(deleted, version, _)| {
@@ -61,7 +86,7 @@ impl TestEnvironments {
             .await?;
         // Publish new schema before opening a separate pool. The lifecycle fence
         // is reacquired and revision-checked below before any data access.
-        if reset {
+        if reset && fence.is_none() {
             clean_schema(&mut tx, id).await?;
         }
         tx.commit().await?;
@@ -69,7 +94,17 @@ impl TestEnvironments {
         lock(&mut guard, id, false).await?;
         let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND iam_control_version=$2 AND key_hash=$3)")
             .bind(id).bind(meta.version).bind(hash(secret.expose_secret())).fetch_one(&mut *guard).await?;
-        if !valid {
+        let current_fence = Self::honeycomb_fence(&mut guard, id).await?;
+        let same_fence = match (&fence, &current_fence) {
+            (None, None) => true,
+            (Some(before), Some(after)) => {
+                after.state == "active"
+                    && before.environment_revision == after.environment_revision
+                    && before.generation == after.generation
+            }
+            _ => false,
+        };
+        if !valid || !same_fence {
             return Err(AppError::Unauthenticated);
         }
         Ok(EnvironmentLease {
@@ -96,4 +131,13 @@ pub(super) async fn clean_schema(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn discovery_error(error: &super::super::iam::IamError) -> AppError {
+    match error {
+        super::super::iam::IamError::Unauthenticated => AppError::Unauthenticated,
+        super::super::iam::IamError::Unavailable(_) => {
+            AppError::DependencyUnavailable { dependency: "iam" }
+        }
+    }
 }

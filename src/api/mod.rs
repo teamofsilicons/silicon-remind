@@ -44,6 +44,7 @@ pub struct ApiState {
     pub(crate) iam: IamClient,
     pub(crate) iam_webhook: IamWebhookVerifier,
     pub(crate) internal_api_token: SecretString,
+    pub(crate) honeycomb_service_token: Option<SecretString>,
     pub(crate) encryption: SecretCipherKeyring,
     pub(crate) is_test: bool,
     pub(crate) reports_enabled: bool,
@@ -81,6 +82,7 @@ impl ApiState {
             iam,
             iam_webhook,
             internal_api_token: settings.internal_api.bearer_token.clone(),
+            honeycomb_service_token: settings.honeycomb_service_token.clone(),
             encryption,
             is_test: false,
             telemetry: crate::telemetry::Recorder::new(settings),
@@ -155,6 +157,7 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
         .route("/iam/events", post(handlers::internal::accept_iam_event));
 
     Router::new()
+        .route("/internal/honeycomb/organizations/{org}/testing-environments/{id}/operations/{operation}", put(handlers::honeycomb::apply).get(handlers::honeycomb::receipt))
         .route("/api/versions", get(contracts::versions))
         .route("/health/live", get(handlers::health::live))
         .route("/health/ready", get(handlers::health::ready))

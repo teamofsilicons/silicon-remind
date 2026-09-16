@@ -5,6 +5,10 @@ sandbox identities and the real local configured webhook receiver backend. Scope
 [UNDERSTANDING.md](../UNDERSTANDING.md). The SolidJS frontend is now available
 under [frontend](../frontend/README.md). This historical acceptance record is supplemented by the [September update](UPDATE_2026_09_13.md).
 
+## Current local implementation
+
+The September 16 update adds Honeycomb lifecycle participant operations, durable receipts, cleanup and dispatch fences, activity reporting, and six-target release packaging. Honeycomb now owns CLI updates; the Rust client never updates dependencies at runtime. See [lifecycle integration](honeycomb-lifecycle.md) and [release packaging](releases.md). The historical deployment and acceptance records below describe earlier behavior, including the retired standalone updater and legacy environment management; they are not evidence of deployment of this update.
+
 ## Delivered
 
 - Minimal SolidJS frontend covering IAM sessions, reminders, archive, execution

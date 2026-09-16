@@ -24,6 +24,7 @@ pub mod scheduler;
 
 struct WorkerRuntime {
     telemetry: crate::telemetry::Recorder,
+    honeycomb_base_url: Option<url::Url>,
     tests: Option<crate::infrastructure::testing::TestEnvironments>,
     repository: PostgresRepository,
     encryption: SecretCipherKeyring,
@@ -90,6 +91,7 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     };
     let runtime = WorkerRuntime {
         telemetry: crate::telemetry::Recorder::new(&settings),
+        honeycomb_base_url: settings.honeycomb_base_url.clone(),
         tests,
         repository,
         encryption,
@@ -314,7 +316,11 @@ async fn run_test_cycles(
         *cursor = Some(id);
         if let Some(lease) = tests.enter_worker(id).await? {
             let repository = PostgresRepository::new(lease.pool.clone());
-            let delivery = runtime.delivery.with_repository(repository.clone());
+            let delivery = runtime.delivery.with_repository(
+                repository.clone(),
+                tests.clone(),
+                lease.environment.clone(),
+            );
             run_work_cycle(
                 &repository,
                 &delivery,
@@ -340,6 +346,11 @@ async fn run_test_cycles(
 }
 
 async fn sweep_test_environments(runtime: &WorkerRuntime) {
+    if let (Some(tests), Some(origin)) = (&runtime.tests, &runtime.honeycomb_base_url)
+        && let Err(error) = tests.report_honeycomb_activity(origin).await
+    {
+        tracing::error!(error = %error, "Honeycomb activity report failed; retained for retry");
+    }
     if let Some(tests) = &runtime.tests
         && let Err(error) = tests.sweep().await
     {

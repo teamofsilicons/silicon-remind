@@ -28,6 +28,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 mod discovery;
+/// Honeycomb participant lifecycle contract.
+pub mod honeycomb;
 
 static CONTROL_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./testing/migrations");
 const MAX_CACHED_TEST_POOLS: usize = 4;
@@ -124,6 +126,10 @@ impl EnvironmentLease {
     pub async fn finish(mut self, activity: bool) -> Result<(), AppError> {
         if activity {
             sqlx::query("UPDATE public.testing_environments SET last_activity_at = clock_timestamp() WHERE id = $1 AND deleted_at IS NULL")
+                .bind(self.environment.id).execute(&mut *self.guard).await?;
+        }
+        if activity {
+            sqlx::query("UPDATE public.honeycomb_environments SET last_activity_at=clock_timestamp() WHERE environment_id=$1 AND state='active'")
                 .bind(self.environment.id).execute(&mut *self.guard).await?;
         }
         self.guard.commit().await?;
@@ -436,6 +442,9 @@ impl TestEnvironments {
         lock(&mut tx, id, exclusive).await?;
         let environment: TestEnvironment = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND key_hash=$2 AND deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days')")
             .bind(id).bind(hash(key.expose_secret())).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthenticated)?;
+        if Self::honeycomb_fence(&mut tx, id).await?.is_some() {
+            return Err(AppError::Unauthenticated);
+        }
         let credentials = self.credentials(&mut tx, id).await?;
         self.lease(environment, credentials, tx).await
     }
@@ -450,9 +459,19 @@ impl TestEnvironments {
         lock(&mut tx, id, false).await?;
         let row: Option<TestEnvironment> = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days')")
             .bind(id).fetch_optional(&mut *tx).await?;
+        if Self::honeycomb_fence(&mut tx, id)
+            .await?
+            .is_some_and(|f| f.state != "active")
+        {
+            return Ok(None);
+        }
         match row {
             Some(environment) => {
                 let credentials = self.credentials(&mut tx, id).await?;
+                if credentials.iam_app_secret.is_none() && environment.iam_control_version.is_some()
+                {
+                    return Ok(None);
+                }
                 Ok(Some(self.lease(environment, credentials, tx).await?))
             }
             None => Ok(None),
@@ -747,3 +766,6 @@ async fn guarded_get(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod honeycomb_tests;
