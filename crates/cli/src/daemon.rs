@@ -1,12 +1,13 @@
-//! Operating-system supervised hourly maintenance, independent of CLI usage.
+//! Removal and inspection of the retired standalone update service.
 use crate::{args::Daemon, state::Store};
 use anyhow::{Context as _, bail};
-use silicon_remind_client::updates;
-use std::{fs::OpenOptions, path::PathBuf, process::Command, time::Duration};
+use std::{path::PathBuf, process::Command};
 
 pub async fn execute(command: &Daemon) -> anyhow::Result<()> {
-    if matches!(command, Daemon::Run) {
-        return run().await;
+    if matches!(command, Daemon::Run | Daemon::Install) {
+        bail!(
+            "Honeycomb manages Remind updates. Run `honeycomb update 'tos>remind'`; remove the old updater with `remind daemon uninstall`."
+        );
     }
     let os_home = PathBuf::from(
         std::env::var_os("HOME").context("HOME is required to install the user service")?,
@@ -120,56 +121,4 @@ fn invoke(args: &[String]) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-async fn run() -> anyhow::Result<()> {
-    let store = Store::open()?;
-    let path = store.home_dir().join(".remind/daemon.lock");
-    drop(store);
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let lock = options.open(path)?;
-    lock.try_lock()
-        .context("another Remind updater daemon is already running")?;
-    loop {
-        let due = match Store::open() {
-            Ok(mut store) => {
-                let due = store.state.auto_update
-                    && updates::unix_time().saturating_sub(store.state.last_update_check) >= 3600;
-                if due {
-                    store.state.last_update_check = updates::unix_time();
-                    store.save()?;
-                }
-                due
-            }
-            Err(_) => false,
-        };
-        if due {
-            let started = std::time::Instant::now();
-            let result =
-                updates::maintain("silicon-remind-cli", env!("CARGO_PKG_VERSION"), true, true)
-                    .await;
-            if let Ok(store) = Store::open() {
-                let test = store.state.selected_tests.get(&store.state.url).copied();
-                crate::emit_local_event(
-                    &store,
-                    test,
-                    None,
-                    "daemon",
-                    "update_completed",
-                    !matches!(result, updates::UpdateStatus::Unavailable),
-                    started.elapsed(),
-                )
-                .await;
-            }
-            if matches!(result, updates::UpdateStatus::Updated { .. }) {
-                return Ok(());
-            } // supervisor restarts the new executable
-        }
-        tokio::time::sleep(Duration::from_secs(60)).await;
-    }
 }

@@ -353,3 +353,27 @@ async fn selected_sandbox_footer_survives_errors_and_exit_preserves_production()
     );
     Ok(())
 }
+
+#[test]
+fn updates_are_honeycomb_managed_and_parse_errors_keep_the_test_footer() -> Result<()> {
+    let home = TempDir::new()?;
+    let result = success(cli(home.path()).args(["update", "--json"]).output()?)?;
+    assert_eq!(result["status"], "managed");
+    assert_eq!(result["command"], "honeycomb update 'tos>remind'");
+    let result = cli(home.path()).args(["daemon", "install"]).output()?;
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Honeycomb manages"));
+    let id = "01992000-0000-7000-8000-000000000011";
+    let result = cli(home.path())
+        .args(["--test", id, "not-a-command"])
+        .output()?;
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains(id))
+    );
+    Ok(())
+}

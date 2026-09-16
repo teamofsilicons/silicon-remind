@@ -4,7 +4,7 @@ The `remind` command manages durable one-time and recurring reminders through
 Silicon Remind. Requires Rust 1.98 or newer.
 
 ```sh
-curl -fsSL https://docs.remind.teamofsilicons.com/install.sh | sh
+honeycomb install 'tos>remind'
 remind -h
 remind login <slt> --org tos
 remind create --text 'Daily check-in' --cron '0 9 * * *' --timezone Asia/Kolkata
@@ -23,9 +23,7 @@ Complete API, CLI, client, IAM, webhook and testing guides are included in `docs
 Read the [CLI guide](https://docs.remind.teamofsilicons.com/cli/)
 and run `remind <command> -h` for arguments and examples.
 
-Default-on hourly updates run in the operating-system supervised daemon installed
-by the setup script. Use `remind config auto-update off` to opt out. Cargo-installed copies update
-in their existing installation root; source builds report availability.
+Honeycomb manages updates: `honeycomb update 'tos>remind'`. Remind never replaces its own executable. Remove a legacy standalone updater with `remind daemon uninstall`.
 
 Licensed under Apache-2.0. Backend service source is separately licensed.
 

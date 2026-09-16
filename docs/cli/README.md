@@ -9,13 +9,15 @@ state mutations and refreshes; saves use an atomic rename. State is separated by
 server origin and test-environment UUID so switching servers or sandboxes never
 reuses another context's session.
 
-## Build and start
+## Install and start
 
 ```sh
-cargo build -p silicon-remind-cli
-cargo run -p silicon-remind-cli -- --help
-cargo install --path crates/cli --locked
+honeycomb install 'tos>remind'
+remind --help
+remind login '<SLT-from-IAM>'
 ```
+
+For local development, use `cargo build -p silicon-remind-cli` and `cargo run -p silicon-remind-cli -- --help`. Release packaging is described in the [release guide](../releases.md).
 
 The default origin is `https://backend.remind.teamofsilicons.com`. For local work:
 
@@ -164,9 +166,9 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 | `clean` | Clear selected sandbox data; requires `--test` |
 | `config show` | Preferences and counts; no saved secrets |
 | `config set-url <origin>` | Change the saved service origin |
-| `config auto-update on\|off` | Persist updater preference |
-| `update --check` | Query the registry without installation |
-| `update` | Explicitly install a newer published CLI |
+| `config auto-update off` | Disable the retired updater preference |
+| `update --check` | Show Honeycomb update instructions |
+| `update` | Show Honeycomb update instructions |
 | `health` | Liveness; `--ready` checks database readiness |
 
 Every command accepts `-h`/`--help`. Missing required flags produce the relevant
@@ -213,9 +215,9 @@ environments can be recovered for 30 days. See the [full guide](../testing-envir
 
 ## Updating
 
-Run `remind daemon install` once (the installer does this automatically). The macOS launchd or Linux systemd user service starts at sign-in, checks hourly even when no CLI command runs, and installs newer stable registry versions into the same Cargo installation root. Failed checks are throttled and do not change sessions. The daemon releases the state lock while downloading/building; foreground commands remain usable. It restarts after an update to run the new binary.
+Install with `honeycomb install 'tos>remind'` and update with `honeycomb update 'tos>remind'`. Remind never replaces its executable. `remind update` and `remind update --check` return the Honeycomb command without changing files or querying crates.io.
 
-Use `remind daemon status`, `remind daemon uninstall`, or `remind daemon run` for foreground supervision. `remind config auto-update off` disables automatic updates; `on` reenables them. `remind update --check` and `remind update` are explicit actions. `--no-update` is retained for older scripts; normal commands no longer trigger maintenance. Cargo must remain available in the service PATH. A copied/source-built binary reports an available update instead of replacing an unrelated executable.
+Remove an older standalone updater with `remind daemon uninstall`; `daemon status` remains available for diagnosis. `daemon install`, `daemon run`, and `config auto-update on` now explain the migration to Honeycomb. `--no-update` and `config auto-update off` remain accepted for older scripts.
 
 ## Sandbox selection, manuals, and reports
 

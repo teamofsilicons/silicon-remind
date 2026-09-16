@@ -38,7 +38,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             url: "https://backend.remind.teamofsilicons.com".into(),
-            auto_update: true,
+            auto_update: false,
             telemetry: true,
             last_update_check: 0,
             sessions: BTreeMap::new(),

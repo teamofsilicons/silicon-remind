@@ -40,23 +40,53 @@ async fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(code)
 }
 
+// Recover only public environment selectors when Clap rejects command syntax.
+fn failed_parse_selection() -> (Option<String>, Option<uuid::Uuid>, bool) {
+    let mut args = std::env::args().skip(1);
+    let (mut url, mut test, mut production) = (None, None, false);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" => break,
+            "--production" => production = true,
+            "--url" => url = args.next(),
+            "--test" => test = args.next().and_then(|v| v.parse().ok()),
+            _ => {
+                if let Some(value) = arg.strip_prefix("--test=") {
+                    test = value.parse().ok();
+                }
+                if let Some(value) = arg.strip_prefix("--url=") {
+                    url = Some(value.into());
+                }
+            }
+        }
+    }
+    (url, test, production)
+}
+
 fn footer(cli: Option<&Cli>) {
+    let (parse_url, parse_test, parse_production) = if cli.is_none() {
+        failed_parse_selection()
+    } else {
+        (None, None, false)
+    };
     if Store::exists()
         && let Ok(store) = Store::open()
     {
         let url = cli
             .and_then(|c| c.url.as_deref())
+            .or(parse_url.as_deref())
             .unwrap_or(&store.state.url)
             .trim_end_matches('/');
-        let test = if cli.is_some_and(|c| {
-            c.production
-                || matches!(
-                    c.command,
-                    Command::Env {
-                        command: Environment::Exit
-                    }
-                )
-        }) {
+        let test = if parse_production
+            || cli.is_some_and(|c| {
+                c.production
+                    || matches!(
+                        c.command,
+                        Command::Env {
+                            command: Environment::Exit
+                        }
+                    )
+            }) {
             None
         } else {
             cli.filter(|c| {
@@ -68,6 +98,7 @@ fn footer(cli: Option<&Cli>) {
                 )
             })
             .and_then(|c| c.test)
+            .or(parse_test)
             .or_else(|| store.state.selected_tests.get(url).copied())
         };
         if let Some(id) = test {
@@ -79,7 +110,11 @@ fn footer(cli: Option<&Cli>) {
                 .map_or("unverified environment", String::as_str);
             eprintln!("Test environment: {name} ({id}) · Exit: remind env exit");
         }
-    } else if let Some(id) = cli.and_then(|c| c.test) {
+    } else if let Some(id) = cli
+        .and_then(|c| c.test)
+        .or(parse_test)
+        .filter(|_| !parse_production)
+    {
         eprintln!("Test environment: {id} (local state unavailable)");
     }
 }
@@ -644,7 +679,7 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         Command::Config { command } => match command {
             Config::Show => output(
                 cli,
-                &serde_json::json!({"url":store.state.url,"home":store.home_dir().display().to_string(),"auto_update":store.state.auto_update,"telemetry":store.state.telemetry,"session_count":store.state.sessions.len(),"saved_test_environment_count":store.state.test_keys.len()}),
+                &serde_json::json!({"url":store.state.url,"home":store.home_dir().display().to_string(),"auto_update":false,"update_manager":"honeycomb","telemetry":store.state.telemetry,"session_count":store.state.sessions.len(),"saved_test_environment_count":store.state.test_keys.len()}),
             )?,
             Config::SetUrl { service_url } => {
                 Client::new(service_url)?;
@@ -665,11 +700,16 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 )?;
             }
             Config::AutoUpdate { value } => {
-                store.state.auto_update = matches!(value, Toggle::On);
+                if matches!(value, Toggle::On) {
+                    bail!(
+                        "Honeycomb manages Remind updates. Configure updates in Honeycomb and run `honeycomb update 'tos>remind'`."
+                    );
+                }
+                store.state.auto_update = false;
                 store.save()?;
                 output(
                     cli,
-                    &serde_json::json!({"auto_update":store.state.auto_update}),
+                    &serde_json::json!({"auto_update":false,"update_manager":"honeycomb"}),
                 )?;
             }
         },

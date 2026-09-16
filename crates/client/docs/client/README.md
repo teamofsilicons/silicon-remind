@@ -166,23 +166,9 @@ For an ambiguous create/update response, repeat the exact request with the same
 `Mutation`. Do not retry validation errors unchanged. For backpressure, honor
 `retry_after` when supplied and choose a bounded retry policy.
 
-## Automatic dependency maintenance
+## Dependency updates
 
-By default, after an API call finishes, the package may check crates.io if its
-process-local last attempt is at least an hour old. Concurrent calls share a
-single check. A discovered update runs `cargo update -p silicon-remind-client
---precise <version>` against the enclosing Cargo project. This changes the
-lockfile; compiled code changes only after the next build. Idle clients do not
-run a timer or daemon. A restart resets the package's in-memory hourly throttle.
-
-Disable maintenance with `.auto_update(false)` or
-`SILICON_REMIND_CLIENT_AUTO_UPDATE=false`. Set
-`SILICON_REMIND_CLIENT_MANIFEST=/absolute/path/Cargo.toml` when the process working
-directory does not identify the intended consuming project. Missing manifests,
-unpublished crates, registry failures and Cargo failures do not change API
-results. An explicit `updates::maintain` call returns an `UpdateStatus` if a host
-application wants to display maintenance progress. The CLI disables package
-maintenance and manages its own executable update after each command instead.
+The Rust client is a normal, stateless project dependency. Update it explicitly through your project's Cargo manifest and lockfile, then rebuild. API calls never run Cargo, query the package registry, or modify the consuming project. `.auto_update(...)` remains a compatibility no-op. Honeycomb manages the CLI independently.
 
 ## Contract discovery and application-selected sandboxes
 

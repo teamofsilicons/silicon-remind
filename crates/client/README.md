@@ -21,9 +21,7 @@ The package includes complete API, client, CLI, IAM, webhook and testing guides 
 `docs/`. Start with the [client guide](https://docs.remind.teamofsilicons.com/client/)
 or the [API reference](https://docs.rs/silicon-remind-client).
 
-Default-on hourly dependency maintenance checks after requests. Disable it with
-`.auto_update(false)` or `SILICON_REMIND_CLIENT_AUTO_UPDATE=false`. Cargo dependency
-updates change the consuming lockfile; rebuild to use the new compiled version.
+The Rust client is a normal project dependency. Update it explicitly with Cargo and rebuild. It never modifies the consuming project at runtime; `.auto_update(...)` is a compatibility no-op.
 
 Licensed under Apache-2.0. Backend service source is separately licensed.
 

@@ -4,13 +4,13 @@ Schedule reminders for your Silicon, inspect their delivery history, and connect
 
 ## Install
 
-On macOS or Linux, run:
+On Linux, Windows or macOS, run:
 
 ```sh
-curl -fsSL https://docs.remind.teamofsilicons.com/install.sh | sh
+honeycomb install 'tos>remind'
 ```
 
-The installer sets up Rust when needed, builds the public CLI/client source bundle, installs `remind`, and starts its hourly update service. It does not authenticate you. It uses `$SILICON_HOME/.remind` for application state when `SILICON_HOME` is set; otherwise it uses `~/.remind`. See the [CLI guide](cli/README.md) for manual setup, configuration, and service management.
+Honeycomb installs the prebuilt CLI for your OS and architecture and manages its updates. Run `honeycomb update 'tos>remind'` to update it. Application state lives in `$SILICON_HOME/.remind` when set, otherwise `~/.remind`. See the [CLI guide](cli/README.md) for configuration and the [release guide](releases.md) for packaging details.
 
 ## Sign in and schedule
 

@@ -57,7 +57,7 @@ pub enum Command {
     },
     /// Check whether your queued bug report was sent, failed, or simulated.
     ReportStatus { id: uuid::Uuid },
-    /// Manage the hourly background updater. Installation persists across sign-ins.
+    /// Inspect or remove the retired updater service; updates are managed by Honeycomb.
     Daemon {
         #[command(subcommand)]
         command: Daemon,
@@ -168,7 +168,7 @@ pub enum Command {
         #[command(subcommand)]
         command: Config,
     },
-    /// Check crates.io or explicitly update this CLI after the command completes.
+    /// Show Honeycomb update instructions. Never replaces this executable.
     Update {
         #[arg(long)]
         check: bool,
@@ -352,12 +352,12 @@ impl From<Status> for silicon_remind_client::models::ScheduleStatus {
 
 #[derive(Subcommand)]
 pub enum Daemon {
-    /// Install and start a launchd (macOS) or systemd user (Linux) update service.
+    /// Retired: use Honeycomb to manage updates.
     Install,
     /// Stop and remove the installed user service.
     Uninstall,
     /// Inspect the operating system service state.
     Status,
-    /// Run the hourly updater in the foreground (normally invoked by the user service).
+    /// Retired: use `honeycomb update 'tos>remind'`.
     Run,
 }

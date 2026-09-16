@@ -92,7 +92,6 @@ pub struct Client {
     bearer: Option<Secret>,
     org: Option<String>,
     test_key: Option<Secret>,
-    auto_update: bool,
     telemetry_enabled: bool,
 }
 impl Client {
@@ -130,7 +129,6 @@ impl Client {
             bearer: None,
             org: None,
             test_key: None,
-            auto_update: true,
             telemetry_enabled: true,
         })
     }
@@ -214,9 +212,8 @@ impl Client {
         .await
     }
 
-    /// Disables or enables best-effort hourly dependency maintenance.
-    pub fn auto_update(mut self, enabled: bool) -> Self {
-        self.auto_update = enabled;
+    /// Compatibility no-op. Dependencies are updated explicitly by the consuming project.
+    pub fn auto_update(self, _enabled: bool) -> Self {
         self
     }
     pub fn is_testing(&self) -> bool {
@@ -519,9 +516,6 @@ impl Client {
             status_code: None,
         })
         .await;
-        if self.auto_update {
-            updates::client_maintenance().await;
-        }
         result
     }
     async fn empty(&self, request: RequestBuilder) -> Result<()> {
@@ -536,9 +530,6 @@ impl Client {
             status_code: None,
         })
         .await;
-        if self.auto_update {
-            updates::client_maintenance().await;
-        }
         result
     }
     async fn send(&self, request: RequestBuilder) -> Result<Vec<u8>> {
