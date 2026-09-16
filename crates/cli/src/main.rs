@@ -270,6 +270,7 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 "client" => include_str!("../docs/client/README.md"),
                 "testing" => include_str!("../docs/testing-environments.md"),
                 "webhooks" => include_str!("../docs/webhook-delivery.md"),
+                "releases" => include_str!("../docs/releases.md"),
                 _ => include_str!("../docs/cli/README.md"),
             };
             if cli.json {

@@ -43,10 +43,10 @@ pub enum Command {
         after_help = "Examples: remind docs cli; remind docs testing; remind docs api. Online: https://docs.remind.teamofsilicons.com"
     )]
     Docs {
-        #[arg(default_value = "cli", value_parser = ["cli", "api", "client", "testing", "webhooks"])]
+        #[arg(default_value = "cli", value_parser = ["cli", "api", "client", "testing", "webhooks", "releases"])]
         topic: String,
     },
-    /// Submit a GitHub issue using your existing gh authentication; optionally link a fix.
+    /// Submit a bug report by email through Remind; optionally link a pull request.
     #[command(
         after_help = "Example: remind report 'Steps, expected result, actual result' --pr https://github.com/teamofsilicons/silicon-remind/pull/123\nUses your Remind session to queue a Postmark email. Sandbox reports simulate delivery. Do not include secrets."
     )]

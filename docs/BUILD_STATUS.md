@@ -9,6 +9,8 @@ under [frontend](../frontend/README.md). This historical acceptance record is su
 
 The September 16 update adds Honeycomb lifecycle participant operations, durable receipts, cleanup and dispatch fences, activity reporting, and six-target release packaging. Honeycomb now owns CLI updates; the Rust client never updates dependencies at runtime. See [lifecycle integration](honeycomb-lifecycle.md) and [release packaging](releases.md). The historical deployment and acceptance records below describe earlier behavior, including the retired standalone updater and legacy environment management; they are not evidence of deployment of this update.
 
+Local verification: 149 Rust tests passed across the serial workspace suite and the final focused authorization/CLI checks; formatting and strict all-target Clippy passed. The frontend built and all three tests passed. OpenAPI validation passed. The documentation build verified 19 pages and 554 local links/assets. Release packaging accepted the local native CLI and rejected missing/wrong-format inputs. The six native release jobs, the final six-target archive, and deployment of this update have not been run.
+
 ## Delivered
 
 - Minimal SolidJS frontend covering IAM sessions, reminders, archive, execution
