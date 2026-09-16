@@ -3,7 +3,7 @@
 Implemented and manually exercised locally on 2026-09-06 IST against hosted IAM
 sandbox identities and the real local configured webhook receiver backend. Scope follows
 [UNDERSTANDING.md](../UNDERSTANDING.md). The SolidJS frontend is now available
-under [frontend](../frontend/README.md); `remind report` remains later work.
+under [frontend](../frontend/README.md). This historical acceptance record is supplemented by the [September update](UPDATE_2026_09_13.md).
 
 ## Delivered
 

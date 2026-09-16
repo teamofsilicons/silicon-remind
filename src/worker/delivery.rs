@@ -35,6 +35,7 @@ pub struct DeliveryProcessor {
     clock: Arc<dyn Clock>,
     metrics: Metrics,
     testing: bool,
+    test_webhook_urls: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +68,13 @@ impl DeliveryProcessor {
             clock,
             metrics,
             testing: false,
+            test_webhook_urls: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_test_destinations(mut self, urls: Vec<String>) -> Self {
+        self.test_webhook_urls = urls;
+        self
     }
 
     /// Reuses delivery policy against an isolated repository.
@@ -161,6 +168,16 @@ impl DeliveryProcessor {
         // batch is safe for receivers that honor that key.
         let mut first_error = None;
         for destination in destinations {
+            // Test deliveries are simulated unless deployment configuration
+            // explicitly designates this exact URL as a test receiver.
+            if self.testing
+                && !self
+                    .test_webhook_urls
+                    .iter()
+                    .any(|url| url == destination.endpoint_url.as_str())
+            {
+                continue;
+            }
             if let Err(error) = self
                 .webhook_client
                 .deliver(&destination, &event, attempted_at)

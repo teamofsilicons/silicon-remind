@@ -254,7 +254,7 @@ pub struct TestEnvironment {
     /// Production organization that owns this test environment.
     pub org_id: String,
     /// Production principal that created it.
-    pub creator_id: Uuid,
+    pub creator_id: String,
     /// Human-readable name.
     pub name: String,
     /// Optional purpose.
@@ -291,4 +291,29 @@ pub struct Health {
     pub service: String,
     pub status: String,
     pub version: String,
+}
+
+/// User-supplied bug reproduction details. Never include credentials.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BugReportRequest {
+    pub message: String,
+    pub pr: Option<String>,
+}
+/// Durable bug report receipt and email delivery state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BugReportResponse {
+    pub id: Uuid,
+    pub status: String,
+    pub failure_reason: Option<String>,
+}
+
+/// Bounded operational fields; bodies, credentials and arbitrary context are deliberately absent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TelemetryEvent {
+    pub source: String,
+    pub event: String,
+    pub step: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub status_code: Option<u16>,
 }

@@ -29,8 +29,9 @@ fn success(output: Output) -> Result<Value> {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        output.stderr.is_empty(),
-        "JSON commands must not print suggestions"
+        output.stderr.is_empty()
+            || String::from_utf8_lossy(&output.stderr).starts_with("Test environment:"),
+        "JSON commands may only print the selected environment on stderr"
     );
     Ok(serde_json::from_slice(&output.stdout)?)
 }
@@ -298,5 +299,57 @@ async fn status_distinguishes_rejected_authority_from_service_failures() -> Resu
             }
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selected_sandbox_footer_survives_errors_and_exit_preserves_production() -> Result<()> {
+    let home = TempDir::new()?;
+    let server = MockServer::start().await;
+    let id = "01992000-0000-7000-8000-000000000004";
+    save(home.path(), &server.uri(), false, None)?;
+    let file = home.path().join(".remind/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&file)?)?;
+    state["selected_tests"] = json!({server.uri():id});
+    state["test_names"] = json!({format!("{}#{id}",server.uri()):"Isolated test"});
+    state["test_keys"][format!("{}#{id}", server.uri())] = json!(format!("ask_{}", "t".repeat(43)));
+    fs::write(&file, serde_json::to_vec(&state)?)?;
+    let failed = cli(home.path()).args(["list", "--json"]).output()?;
+    assert!(!failed.status.success());
+    assert!(failed.stdout.is_empty());
+    assert!(
+        String::from_utf8(failed.stderr)?
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains("Test environment: Isolated test"))
+    );
+    let help = cli(home.path()).args(["create", "--help"]).output()?;
+    assert!(help.status.success());
+    assert!(String::from_utf8(help.stderr)?.contains("Test environment: Isolated test"));
+    let exit = cli(home.path()).args(["env", "exit", "--json"]).output()?;
+    assert_eq!(success(exit)?["environment"], "production");
+    let after: Value = serde_json::from_slice(&fs::read(file)?)?;
+    let production_slot = format!("{}#production", server.uri());
+    assert_eq!(
+        after["sessions"][&production_slot]["session"],
+        state["sessions"][&production_slot]["session"]
+    );
+    assert_eq!(
+        after["sessions"][&production_slot]["org"],
+        state["sessions"][&production_slot]["org"]
+    );
+    assert!(
+        after["selected_tests"]
+            .as_object()
+            .is_some_and(|m| m.is_empty())
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .context("request log")?
+            .len(),
+        0
+    );
     Ok(())
 }

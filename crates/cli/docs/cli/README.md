@@ -1,3 +1,5 @@
+> For new test environments, start with `remind env use` and the IAM application `app_secret`. The manual pairing commands are maintained only for existing installations. See [the testing guide](../testing-environments.md).
+
 # remind CLI
 
 `remind` is built entirely on `silicon-remind-client`. It stores preferences,
@@ -205,27 +207,21 @@ The environment key provides sandbox administration; ordinary reminder commands
 still need an IAM test identity. Cleaning clears all Remind data and logs but
 keeps the environment, root key and IAM binding. It does not clean IAM itself.
 
-The sandbox supports at most 100 retained reminders. It is retired after 15 days
+Legacy manually paired sandboxes support at most 100 retained reminders. It is retired after 15 days
 without successful user activity; scheduler polls do not keep it alive. Deleted
 environments can be recovered for 30 days. See the [full guide](../testing-environments.md).
 
 ## Updating
 
-Auto-update is on by default. After the command finishes, if at least one hour
-has elapsed since the previous check, the CLI checks crates.io and installs a
-newer `silicon-remind-cli` with Cargo. Attempts are persisted, including failures.
-The current command finishes with its existing binary; the next invocation uses
-the update. No daemon or idle timer runs. Cargo must be available for installation.
-Automatic replacement applies to a Cargo-installed `bin/remind` executable and
-uses that installation's root, including custom Cargo roots. A source build or
-copied binary reports `available` instead of installing an unrelated executable;
-install the release with `cargo install silicon-remind-cli --locked --version
-<version>` or rebuild the source checkout yourself.
+Run `remind daemon install` once (the installer does this automatically). The macOS launchd or Linux systemd user service starts at sign-in, checks hourly even when no CLI command runs, and installs newer stable registry versions into the same Cargo installation root. Failed checks are throttled and do not change sessions. The daemon releases the state lock while downloading/building; foreground commands remain usable. It restarts after an update to run the new binary.
 
-Use `config auto-update off` to persist an opt-out, or `--no-update` for one
-invocation. `update --check` and `update` are explicit actions and work regardless
-of the automatic preference. Unpublished packages or registry/Cargo failures are
-reported as unavailable and do not change the ordinary command's result.
+Use `remind daemon status`, `remind daemon uninstall`, or `remind daemon run` for foreground supervision. `remind config auto-update off` disables automatic updates; `on` reenables them. `remind update --check` and `remind update` are explicit actions. `--no-update` is retained for older scripts; normal commands no longer trigger maintenance. Cargo must remain available in the service PATH. A copied/source-built binary reports an available update instead of replacing an unrelated executable.
+
+## Sandbox selection, manuals, and reports
+
+Use `remind env use --secret-stdin < /private/app-secret` to select the IAM application's sandbox without a root key or environment UUID. Sign in with a test SLT or an existing active test public identity. `remind env exit` restores the production session; `--production` overrides selection for one command. Selected test name/ID always appears on stderr, including failures and help. Legacy administrative commands below apply only to manually paired environments; IAM-discovered worlds follow IAM's lifecycle and have no 100-reminder quota.
+
+Read bundled manuals with `remind docs cli|api|client|testing|webhooks`. `remind report 'reproduction details' --pr https://github.com/teamofsilicons/silicon-remind/pull/123` queues a bug report email through the public Rust client and backend using your Remind session. `--pr` is optional; output contains the report ID and delivery status. Run `remind report-status <id>` to inspect delivery. Reports in a sandbox are simulated. Production delivery uses Postmark. Include expected and actual behavior, versions, and a request ID when available; exclude secrets.
 
 `env create` needs only a name and IAM root key; `--iam-app-secret-file` is
 optional. To install the test app secret later, use
@@ -240,3 +236,7 @@ Runtime `--json` failures return `error.code` and `error.message`. Backend error
 also retain HTTP `status`, `request_id` and optional `retry_after`; local argument
 validation uses `invalid_input`. Clap usage/help errors retain its standard CLI
 help format. Credentials and response bodies are not included in errors.
+
+## Telemetry
+
+Operational telemetry is on by default. `remind config telemetry off` disables both CLI/daemon events and API request observations for this installation; `on` enables them. `REMIND_TELEMETRY_ENABLED=false` also disables them. No command arguments, credentials, reminder text or webhook URLs are included. Test events remain in the selected sandbox. See [diagnostics](../diagnostics.md).

@@ -23,6 +23,7 @@ pub mod retention;
 pub mod scheduler;
 
 struct WorkerRuntime {
+    telemetry: crate::telemetry::Recorder,
     tests: Option<crate::infrastructure::testing::TestEnvironments>,
     repository: PostgresRepository,
     encryption: SecretCipherKeyring,
@@ -72,7 +73,8 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         },
         clock.clone(),
         metrics.clone(),
-    );
+    )
+    .with_test_destinations(settings.test_webhook_urls.clone());
     let operational_listener =
         tokio::net::TcpListener::bind(settings.worker.operational_bind_addr).await?;
     let tests = match &settings.testing_database {
@@ -87,6 +89,7 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         None => None,
     };
     let runtime = WorkerRuntime {
+        telemetry: crate::telemetry::Recorder::new(&settings),
         tests,
         repository,
         encryption,
@@ -99,13 +102,22 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         clock,
         metrics,
     };
-    let run_result = serve_worker(
+    let reports = async {
+        match settings.postmark_server_token.clone() {
+            Some(token) => crate::infrastructure::reports::run(pool.clone(), token).await,
+            None => std::future::pending::<anyhow::Result<()>>().await,
+        }
+    };
+    let serving = serve_worker(
         &runtime,
         operational_listener,
         settings.worker.operational_bind_addr,
         settings.server.shutdown_timeout,
-    )
-    .await;
+    );
+    let run_result = tokio::select! {
+        result = serving => result,
+        result = reports => result,
+    };
     let close_result = tokio::time::timeout(settings.server.shutdown_timeout, pool.close()).await;
     run_result?;
     if close_result.is_err() {
@@ -122,6 +134,10 @@ fn operational_router(runtime: &WorkerRuntime) -> axum::Router {
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One select loop owns worker shutdown and independent timer lifecycles"
+)]
 async fn serve_worker(
     runtime: &WorkerRuntime,
     operational_listener: tokio::net::TcpListener,
@@ -157,6 +173,7 @@ async fn serve_worker(
     );
     let mut operational_failure = None;
     let mut test_cursor = None;
+    let mut heartbeat = heartbeat_interval();
     loop {
         tokio::select! {
             () = &mut shutdown => break,
@@ -172,6 +189,9 @@ async fn serve_worker(
                 });
                 break;
             }
+            _ = heartbeat.tick() => {
+                record_heartbeat(runtime).await;
+            }
             _ = work_interval.tick() => {
                 run_work_cycle(
                     &runtime.repository,
@@ -185,6 +205,7 @@ async fn serve_worker(
             }
             _ = retention.tick() => {
                 sweep_test_environments(runtime).await;
+                if let Err(error) = crate::api::contracts::sweep(runtime.repository.pool()).await { tracing::error!(error=%error,"contract lifecycle sweep failed"); }
                 match retention::sweep(
                     &runtime.repository,
                     &runtime.encryption,
@@ -334,4 +355,14 @@ async fn work_test_environments(runtime: &WorkerRuntime, test_cursor: &mut Optio
         runtime.metrics.worker_errors.inc();
         tracing::error!(error = %error, "test environment work cycle failed");
     }
+}
+
+async fn record_heartbeat(runtime: &WorkerRuntime) {
+    runtime.telemetry.record(runtime.repository.pool(),false,serde_json::json!({"source":"worker","event":"heartbeat","step":"polling","batch_size":runtime.batch_size,"delivery_concurrency":runtime.delivery.max_concurrency()})).await;
+}
+
+fn heartbeat_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    interval
 }

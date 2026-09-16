@@ -4,7 +4,9 @@ pub mod auth;
 pub mod destination;
 pub mod health;
 pub mod internal;
+pub mod reports;
 pub mod schedules;
+pub(crate) mod telemetry;
 pub mod testing;
 
 use axum::response::{IntoResponse as _, Response};

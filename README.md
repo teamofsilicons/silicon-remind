@@ -1,5 +1,7 @@
 # Silicon Remind
 
+Start with the [hosted usage and developer docs](https://docs.remind.teamofsilicons.com). New sandbox selection uses the IAM test application `app_secret`; see [testing environments](docs/testing-environments.md).
+
 Silicon Remind is the durable scheduling backend for one-time and recurring
 Silicon reminders. It authenticates callers through Silicon IAM, stores schedule
 and execution state in PostgreSQL, and submits signed events with stable execution IDs to
@@ -151,8 +153,8 @@ snapshots; no Remind-specific permission projection is required from IAM.
 
 The registered IAM receiver is `POST /webhook/`. Configure its exact signing
 version and secret in the backend keyring. Registering the URL does not deploy
-it or complete IAM review. Test requests require a Remind root key and the
-linked IAM sandbox's own identity/Application credential. Test reminders only
+it or complete IAM review. Test requests select their IAM sandbox with its application `app_secret` and
+use that sandbox's own user identity. Legacy Remind keys remain supported. Test reminders only
 accept webhook test ingress; production reminders only accept production ingress.
 
 Detailed references live in [docs/](docs/README.md): [API](docs/api/README.md),

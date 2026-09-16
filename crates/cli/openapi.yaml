@@ -13,6 +13,105 @@ tags:
 - name: Schedules
 - name: Executions
 paths:
+  /reports:
+    post:
+      operationId: submitBugReport
+      summary: Queue a bug report email, or simulate delivery in testing
+      description: Ten reports per actor per hour. Idempotent retries return the original receipt. Requires Postmark configuration in production.
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/TestKey'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BugReportRequest'
+      responses:
+        '202':
+          description: Queued or simulated receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BugReportResponse'
+        '200':
+          description: Idempotent replay with the latest delivery state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BugReportResponse'
+        default:
+          description: Authentication, validation, rate limit, idempotency or dependency error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /reports/{id}:
+    get:
+      operationId: getBugReport
+      summary: Read your own bug report delivery status
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/TestKey'
+      - name: id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Queued, sending, sent, failed, or simulated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BugReportResponse'
+        default:
+          description: Standard API error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /telemetry/events:
+    post:
+      operationId: recordTelemetryEvent
+      summary: Record an operational event in the selected environment
+      description: Best effort, enabled by default. Testing records remain in the sandbox. Credentials, text, URLs and arbitrary context are rejected.
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/TestKey'
+      - name: X-Remind-Telemetry
+        in: header
+        schema: {type: string, enum: ['on', 'off']}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelemetryEvent'
+      responses:
+        '204':
+          description: Event processed, or ignored after opt-out
+        default:
+          description: Standard API error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/versions:
+    servers:
+    - url: https://backend.remind.teamofsilicons.com
+    get:
+      operationId: discoverVersions
+      summary: Discover implemented wire versions and deprecation state
+      security: []
+      responses:
+        '200':
+          description: Current and supported API contracts, protocol and seven-day idle sunset policy
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
   /schedules:
     get:
       tags:
@@ -823,11 +922,11 @@ components:
       name: X-Remind-Test-Key
       in: header
       required: false
-      description: Optional sandbox selector. Invalid, expired or revoked keys fail closed. Environment
+      description: IAM sandbox application app_secret (ask_...) or legacy Remind key. Invalid, expired or revoked keys fail closed. Environment
         management routes reject this header.
       schema:
         type: string
-        pattern: ^[a-zA-Z0-9]{32}$
+        pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
   responses:
     WebhookNotConfigured:
       description: The requested legacy subscription does not exist or is inactive.
@@ -847,6 +946,37 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
   schemas:
+    BugReportRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 16384
+          description: Reproduction details, maximum 16384 UTF-8 bytes. Exclude credentials.
+        pr:
+          type: [string, 'null']
+          pattern: '^https://github.com/teamofsilicons/silicon-remind/pull/[1-9][0-9]*$'
+    BugReportResponse:
+      type: object
+      required: [id, status, failure_reason]
+      properties:
+        id: {type: string, format: uuid}
+        status: {type: string, enum: [queued, sending, sent, failed, simulated]}
+        failure_reason: {type: [string, 'null']}
+    TelemetryEvent:
+      type: object
+      additionalProperties: false
+      required: [source, event, step, success, duration_ms]
+      properties:
+        source: {type: string, enum: [rust_client, cli, daemon, web]}
+        event: {type: string, enum: [request_completed, command_completed, update_completed, heartbeat, page_view, navigation, interaction, error, performance]}
+        step: {type: string, enum: [response, command, maintenance, browser]}
+        success: {type: boolean}
+        duration_ms: {type: integer, minimum: 0, maximum: 86400000}
+        status_code: {type: [integer, 'null'], minimum: 100, maximum: 599}
     OrgId:
       type: string
       pattern: ^[a-z0-9_-]{3,50}$
@@ -1187,7 +1317,8 @@ components:
       properties:
         id: *id007
         org_id: *id009
-        creator_id: *id007
+        creator_id:
+          type: string
         name: *id009
         description:
           type:
@@ -1230,7 +1361,7 @@ components:
           maxLength: 10000
         iam_test_key:
           type: string
-          pattern: ^[a-zA-Z0-9]{32}$
+          pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
           writeOnly: true
         iam_app_secret: *id002
       required:
@@ -1243,7 +1374,7 @@ components:
           $ref: '#/components/schemas/TestEnvironment'
         key:
           type: string
-          pattern: ^[a-zA-Z0-9]{32}$
+          pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
       required:
       - environment
       - key
@@ -1253,7 +1384,7 @@ components:
         environment_id: *id007
         key:
           type: string
-          pattern: ^[a-zA-Z0-9]{32}$
+          pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
       required:
       - environment_id
       - key

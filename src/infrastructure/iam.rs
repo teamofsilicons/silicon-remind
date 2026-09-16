@@ -71,6 +71,41 @@ impl IamClient {
         }
     }
 
+    /// Resolves the imported test application without an IAM root credential.
+    /// # Errors
+    /// Rejects production secrets, unavailable worlds and mismatched applications.
+    pub async fn discover(
+        settings: &IamSettings,
+        secret: &SecretString,
+    ) -> Result<(Self, models::ApplicationTestingContext), IamError> {
+        let mut iam = Self::new(settings).map_err(IamError::Unavailable)?;
+        iam.client = iam
+            .client
+            .with_testing_application(&settings.app_id, secret.expose_secret())
+            .map_err(classify)?;
+        let context = iam
+            .client
+            .applications()
+            .testing_context()
+            .await
+            .map_err(classify)?;
+        let meta = context
+            .environment
+            .as_ref()
+            .ok_or(IamError::Unauthenticated)?;
+        if context.application.app_id != settings.app_id
+            || context.environment_id.is_nil()
+            || meta.environment_id != context.environment_id
+            || meta.version < 1
+            || !matches!(meta.creator_type.as_str(), "carbon" | "silicon")
+            || meta.creator_id.is_empty()
+        {
+            return Err(IamError::Unauthenticated);
+        }
+        iam.testing_environment_id = Some(context.environment_id);
+        Ok((iam, context))
+    }
+
     /// Public application configuration for SLT discovery; excludes all credentials.
     #[must_use]
     pub fn public_info(&self) -> serde_json::Value {
@@ -91,6 +126,9 @@ impl IamClient {
         slt: &SecretString,
         mutation: &Mutation,
     ) -> Result<models::OAuthTokenResponse, IamError> {
+        if self.testing_environment_id.is_none() && !slt.expose_secret().starts_with("oac_") {
+            return Err(IamError::Unauthenticated);
+        }
         self.client
             .oauth()
             .login(&self.app_id, slt.expose_secret(), mutation)
@@ -238,9 +276,9 @@ impl IamClient {
             return Err(IamError::Unauthenticated);
         }
         let kind = match snapshot.actor_type {
-            models::ApplicationAuthorizationActorType::Carbon => ActorKind::Carbon,
-            models::ApplicationAuthorizationActorType::Silicon => ActorKind::Silicon,
-            models::ApplicationAuthorizationActorType::Other(_) => {
+            Some(models::ApplicationAuthorizationActorType::Carbon) => ActorKind::Carbon,
+            Some(models::ApplicationAuthorizationActorType::Silicon) => ActorKind::Silicon,
+            _ => {
                 return Err(IamError::Unauthenticated);
             }
         };
@@ -253,7 +291,12 @@ impl IamClient {
             membership_id: snapshot.membership_id,
             authorization_epoch: epoch,
             organization_iam_id: Some(snapshot.organization_id),
-            public_id: Some(snapshot.public_id.clone()),
+            public_id: Some(
+                snapshot
+                    .public_id
+                    .clone()
+                    .ok_or(IamError::Unauthenticated)?,
+            ),
             org_role: snapshot.org_role.clone(),
             read_scope: ReminderReadScope::organization(),
         })

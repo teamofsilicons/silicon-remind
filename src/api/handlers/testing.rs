@@ -41,7 +41,9 @@ pub async fn select(State(state): State<ApiState>, mut request: Request, next: N
     let path = request.uri().path();
     // Environment management is a production-org operation, never a sandbox
     // identity's route to production. Internal provisioning is not public SDK API.
-    if !path.starts_with("/api/v1/") || path.starts_with("/api/v1/test-environments") {
+    if !(path.starts_with("/api/v1/") || path == "/api/versions")
+        || path.starts_with("/api/v1/test-environments")
+    {
         return AppError::Forbidden.into_response();
     }
     let tests = match manager(&state) {

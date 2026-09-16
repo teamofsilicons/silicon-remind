@@ -29,6 +29,7 @@ use crate::{
     metrics::Metrics,
 };
 
+pub mod contracts;
 pub mod handlers;
 pub mod middleware;
 pub mod models;
@@ -45,6 +46,8 @@ pub struct ApiState {
     pub(crate) internal_api_token: SecretString,
     pub(crate) encryption: SecretCipherKeyring,
     pub(crate) is_test: bool,
+    pub(crate) reports_enabled: bool,
+    pub(crate) telemetry: crate::telemetry::Recorder,
     pub(crate) environment: RuntimeEnvironment,
     pub(crate) metrics: Metrics,
     pub(crate) request_timeout: Duration,
@@ -80,6 +83,8 @@ impl ApiState {
             internal_api_token: settings.internal_api.bearer_token.clone(),
             encryption,
             is_test: false,
+            telemetry: crate::telemetry::Recorder::new(settings),
+            reports_enabled: settings.postmark_server_token.is_some(),
             environment: settings.environment,
             metrics: Metrics::new(),
             request_timeout: settings.server.request_timeout,
@@ -91,6 +96,9 @@ impl ApiState {
 #[allow(clippy::too_many_lines)]
 pub fn router(state: ApiState, settings: &Settings) -> Router {
     let public_api = Router::new()
+        .route("/telemetry/events", post(handlers::telemetry::record))
+        .route("/reports", post(handlers::reports::create))
+        .route("/reports/{id}", get(handlers::reports::get))
         .route(
             "/schedules",
             get(handlers::schedules::list)
@@ -147,6 +155,7 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
         .route("/iam/events", post(handlers::internal::accept_iam_event));
 
     Router::new()
+        .route("/api/versions", get(contracts::versions))
         .route("/health/live", get(handlers::health::live))
         .route("/health/ready", get(handlers::health::ready))
         .route("/metrics", get(handlers::health::metrics))
@@ -178,6 +187,10 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::observe,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            contracts::negotiate,
         ))
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),

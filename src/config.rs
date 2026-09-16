@@ -40,6 +40,16 @@ pub struct Settings {
     pub webhook: WebhookSettings,
     /// Durable worker polling and lease policy.
     pub worker: WorkerSettings,
+    /// Exact test receiver URLs explicitly allowed to perform external test delivery.
+    pub test_webhook_urls: Vec<String>,
+    /// Postmark server credential; absent disables production bug submission.
+    pub postmark_server_token: Option<SecretString>,
+    /// Space Station telemetry, enabled unless explicitly opted out.
+    pub telemetry_enabled: bool,
+    /// Write-only key for the dedicated Remind production event table.
+    pub telemetry_table_key: Option<SecretString>,
+    /// Private spool directory for the official Space Station Rust client.
+    pub telemetry_home: std::path::PathBuf,
     /// Delivery retry policy.
     pub retry: RetrySettings,
     /// Schedule, execution, and idempotency retention policy.
@@ -354,6 +364,19 @@ impl Settings {
             encryption,
             webhook,
             worker,
+            telemetry_enabled: parse_or(source, "REMIND_TELEMETRY_ENABLED", "true")?,
+            telemetry_table_key: optional(source, "REMIND_TELEMETRY_TABLE_KEY")
+                .map(SecretString::from),
+            telemetry_home: value_or(source, "REMIND_TELEMETRY_HOME", "/var/lib/remind/telemetry")
+                .into(),
+            postmark_server_token: optional(source, "REMIND_POSTMARK_SERVER_TOKEN")
+                .map(SecretString::from),
+            test_webhook_urls: value_or(source, "REMIND_TEST_WEBHOOK_URLS", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
             retry,
             retention,
             log_filter: value_or(

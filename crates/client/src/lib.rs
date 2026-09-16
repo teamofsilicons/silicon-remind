@@ -93,6 +93,7 @@ pub struct Client {
     org: Option<String>,
     test_key: Option<Secret>,
     auto_update: bool,
+    telemetry_enabled: bool,
 }
 impl Client {
     /// Uses HTTPS, permitting HTTP only for literal loopback development addresses.
@@ -130,7 +131,50 @@ impl Client {
             org: None,
             test_key: None,
             auto_update: true,
+            telemetry_enabled: true,
         })
+    }
+    /// Opt out of client and request telemetry; enabled by default.
+    #[must_use]
+    pub fn with_telemetry(&self, enabled: bool) -> Self {
+        let mut next = self.clone();
+        next.telemetry_enabled = enabled;
+        next
+    }
+    /// Send a bounded, best-effort operational event through this session's isolated API.
+    /// Does nothing without a session or after opt-out. Never sends credentials as event data.
+    pub async fn track(&self, event: &models::TelemetryEvent) {
+        if !self.telemetry_enabled || self.bearer.is_none() {
+            return;
+        }
+        if let Ok(request) = self.request(Method::POST, "/api/v1/telemetry/events") {
+            let _ = request
+                .timeout(Duration::from_millis(250))
+                .json(event)
+                .send()
+                .await;
+        }
+    }
+    /// Discover wire protocols and deprecation state in the selected environment.
+    pub async fn versions(&self) -> Result<serde_json::Value> {
+        self.json(self.request(Method::GET, "/api/versions")?).await
+    }
+    /// Queue a bug report via Postmark, or simulate it in the selected sandbox.
+    pub async fn report(
+        &self,
+        input: &models::BugReportRequest,
+        mutation: &Mutation,
+    ) -> Result<models::BugReportResponse> {
+        self.json(
+            self.mutation(Method::POST, "/api/v1/reports", mutation)?
+                .json(input),
+        )
+        .await
+    }
+    /// Read the delivery outcome of your own report.
+    pub async fn report_status(&self, id: Uuid) -> Result<models::BugReportResponse> {
+        self.json(self.request(Method::GET, &format!("/api/v1/reports/{id}"))?)
+            .await
     }
     /// Attaches an application access token and requested organization.
     pub fn with_session(&self, bearer: Secret, org: impl Into<String>) -> Result<Self> {
@@ -149,9 +193,9 @@ impl Client {
     }
     /// Selects a sandbox by its root key. Its public UUID is not a credential.
     pub fn with_test_environment(&self, key: Secret) -> Result<Self> {
-        if key.expose().len() != 32 || !key.expose().bytes().all(|b| b.is_ascii_alphanumeric()) {
+        if !valid_test_secret(key.expose()) {
             return Err(Error::Invalid(
-                "test key must contain exactly 32 alphanumeric characters".into(),
+                "use the IAM sandbox application app_secret (ask_...), or a legacy 32-character Remind key".into(),
             ));
         }
         let mut next = self.clone();
@@ -435,7 +479,13 @@ impl Client {
             .base
             .join(path)
             .map_err(|_| Error::Invalid("invalid API path".into()))?;
-        let mut request = self.http.request(method, url);
+        let mut request = self
+            .http
+            .request(method, url)
+            .header("x-remind-api-version", "1");
+        if !self.telemetry_enabled {
+            request = request.header("x-remind-telemetry", "off");
+        }
         if let Some(token) = &self.bearer {
             request = request.bearer_auth(token.expose());
         }
@@ -443,7 +493,7 @@ impl Client {
             request = request.header("x-org-id", org);
         }
         if let Some(key) = &self.test_key
-            && path.starts_with("/api/v1/")
+            && (path.starts_with("/api/v1/") || path == "/api/versions")
         {
             request = request.header("x-remind-test-key", key.expose());
         }
@@ -455,17 +505,37 @@ impl Client {
             .header("idempotency-key", mutation.key()))
     }
     async fn json<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T> {
+        let started = std::time::Instant::now();
         let result = self
             .send(request)
             .await
             .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|_| Error::Decode));
+        self.track(&models::TelemetryEvent {
+            source: "rust_client".into(),
+            event: "request_completed".into(),
+            step: "response".into(),
+            success: result.is_ok(),
+            duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            status_code: None,
+        })
+        .await;
         if self.auto_update {
             updates::client_maintenance().await;
         }
         result
     }
     async fn empty(&self, request: RequestBuilder) -> Result<()> {
+        let started = std::time::Instant::now();
         let result = self.send(request).await.map(|_| ());
+        self.track(&models::TelemetryEvent {
+            source: "rust_client".into(),
+            event: "request_completed".into(),
+            step: "response".into(),
+            success: result.is_ok(),
+            duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            status_code: None,
+        })
+        .await;
         if self.auto_update {
             updates::client_maintenance().await;
         }
@@ -500,4 +570,13 @@ impl Client {
         }
         Ok(bytes)
     }
+}
+
+fn valid_test_secret(value: &str) -> bool {
+    (value.len() == 32 && value.bytes().all(|b| b.is_ascii_alphanumeric()))
+        || (value.len() == 47
+            && value.starts_with("ask_")
+            && value[4..]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
 }
