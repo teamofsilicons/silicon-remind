@@ -300,3 +300,84 @@ async fn status_distinguishes_rejected_authority_from_service_failures() -> Resu
     }
     Ok(())
 }
+
+fn session_without_org() -> Value {
+    json!({"access_token":"access-fixture", "refresh_token":"refresh-fixture",
+        "expires_in":3600, "token_type":"Bearer", "scope":"", "actor":{}, "org_id":null})
+}
+
+/// A Silicon logging in through `silicon connect` gets an SLT that names no organization.
+/// One authorized organization is not a choice, so the login must not demand --org.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_without_org_uses_the_only_authorized_organization() -> Result<()> {
+    let home = TempDir::new()?;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session_without_org()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/organizations"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items":[identity("silicon")]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/me"))
+        .and(header("x-org-id", "tos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = success(
+        cli(home.path())
+            .args(["--url", &server.uri(), "login", "slt-fixture", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(result["org_id"], json!("tos"));
+    // The resolved organization is persisted, so later commands need no --org either.
+    let state: Value = serde_json::from_slice(&fs::read(home.path().join(".remind/state.json"))?)?;
+    let saved = state["sessions"].as_object().context("sessions")?;
+    assert!(
+        saved.values().any(|entry| entry["org"] == json!("tos")),
+        "the resolved organization must be saved: {state}"
+    );
+    Ok(())
+}
+
+/// Ambiguity is the only case worth a question, and the answer must name the options.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_without_org_asks_only_when_several_are_available() -> Result<()> {
+    let home = TempDir::new()?;
+    let server = MockServer::start().await;
+    let mut second = identity("silicon");
+    second["org_id"] = json!("bricks");
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session_without_org()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/organizations"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"items":[identity("silicon"), second]})),
+        )
+        .mount(&server)
+        .await;
+    let output = cli(home.path())
+        .args(["--url", &server.uri(), "login", "slt-fixture"])
+        .output()?;
+    assert!(!output.status.success(), "an ambiguous login must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--org"), "{stderr}");
+    assert!(
+        stderr.contains("tos") && stderr.contains("bricks"),
+        "{stderr}"
+    );
+    Ok(())
+}

@@ -535,6 +535,25 @@ async fn login_status(
         .await?)
 }
 
+/// An SLT that names no organization still identifies one whenever the session may act in
+/// exactly one of them, which is the ordinary case for a Silicon. Ask for `--org` only when
+/// the choice is genuinely ambiguous.
+async fn sole_organization(client: &Client, bearer: &Secret) -> anyhow::Result<String> {
+    let mut organizations = client.organizations(bearer).await?;
+    match organizations.len() {
+        1 => Ok(organizations.remove(0).org_id),
+        0 => bail!(
+            "this login is not authorized for any organization; grant one through IAM, then sign in again"
+        ),
+        _ => {
+            let available: Vec<_> = organizations.iter().map(|o| o.org_id.as_str()).collect();
+            bail!(
+                "several organizations are available ({}); choose one with --org <org>",
+                available.join(", ")
+            )
+        }
+    }
+}
 async fn login_with_token(
     cli: &Cli,
     store: &mut Store,
@@ -547,9 +566,10 @@ async fn login_with_token(
         None => Mutation::new(),
     };
     let session = client.login(&token, &mutation).await?;
-    let org = cli.org.clone().or_else(|| session.org_id.clone()).context(
-        "an organization is required; use an organization-bound IAM SLT and --org <org>",
-    )?;
+    let org = match cli.org.clone().or_else(|| session.org_id.clone()) {
+        Some(org) => org,
+        None => sole_organization(client, &session.access_token).await?,
+    };
     let identity = client
         .with_session(session.access_token.clone(), org.clone())?
         .me()
