@@ -1,11 +1,14 @@
 import {
   createSignal,
+  createEffect,
   createResource,
   For,
   Show,
   onMount,
   onCleanup,
 } from "solid-js";
+import { createSpaceStationWeb } from "@teamofsilicons/space-station-web";
+import { telemetryBatch } from "./telemetry";
 import { api, request, query, date, ApiError } from "./api";
 import { Badge, Panel, Empty, Modal, type DialogSpec, type Field } from "./ui";
 import type {
@@ -65,6 +68,16 @@ export default function App() {
         (c) => c.id === active(),
       ),
     test = () => active() !== "production";
+  const [telemetryEnabled, setTelemetryEnabled] = createSignal(localStorage.getItem("remind.telemetry") !== "off");
+  createEffect(() => {
+    const environment = active();
+    if (!identity() || !telemetryEnabled()) return;
+    const sender = createSpaceStationWeb({analyticsTable:"remindtelemetry", eventsTable:"remindtelemetry", endpoint:"/ui/telemetry",
+      fetch: (input, init) => fetch(input, {...init,headers:{"Content-Type":"application/json","X-Remind-UI":"1","X-Remind-Context":environment},body:JSON.stringify(telemetryBatch(JSON.parse(String(init?.body))))}),
+    });
+    sender.track("navigation");
+    onCleanup(()=>{sender.setEnabled(false);void sender.destroy();});
+  });
   const readError = (e: unknown) =>
     e instanceof ApiError
       ? e.message + (e.requestId ? " · Request " + e.requestId : "")
@@ -78,7 +91,7 @@ export default function App() {
   const manager = (e: Environment) => {
     const i = (session.error ? undefined : session())?.productionIdentity;
     return (
-      !!i &&
+      !e.iam_control_version && !!i &&
       (i.principal_id === e.creator_id ||
         ["owner", "admin"].includes(i.org_role))
     );
@@ -167,13 +180,13 @@ export default function App() {
       description:
         "Use a short-lived token from Silicon IAm for tos>remind. Choose your organizations in IAm." +
         (test()
-          ? " The token must come from this environment’s linked IAm sandbox."
+          ? " Use an IAM-issued test SLT or the public ID of an existing active Carbon or Silicon in this sandbox."
           : ""),
       submit: "Sign in",
       fields: [
         {
           name: "slt",
-          label: "IAm short-lived token",
+          label: test() ? "Test SLT or public identity ID" : "IAm short-lived token",
           type: "password",
           required: true,
           placeholder: "Paste your short-lived token",
@@ -198,10 +211,10 @@ export default function App() {
   }
   function importEnvironment() {
     open({
-      title: "Import test environment",
+      title: "Use a test environment",
       description:
-        "A Remind test key gives access to its sandbox. Sign in with a test IAm identity to use reminders.",
-      submit: "Import environment",
+        "Enter the app_secret of the Remind application in your IAM sandbox. Its environment is discovered automatically. Sign in as a test identity afterward.",
+      submit: "Select environment",
       fields: [
         {
           name: "id",
@@ -210,7 +223,7 @@ export default function App() {
         },
         {
           name: "key",
-          label: "Remind test key",
+          label: "IAM sandbox app_secret",
           type: "password",
           required: true,
         },
@@ -679,10 +692,12 @@ export default function App() {
           </div>
         </header>
         <main id="main">
+          <Show when={session()?.authError}><p class="error" role="alert">{session()?.authError}</p></Show>
           <Show when={test()}>
             <div class="test-banner">
-              <span>◇ Test environment</span>
-              <span>Isolated from production · 100-reminder limit</span>
+              <span>◇ Test environment · {context()?.name}</span>
+              <span>{identity()?.public_id || "Not signed in"} · Test deliveries simulated unless a receiver is enabled</span>
+              <button class="secondary" onClick={() => void perform(() => switchContext("production"))}>Exit testing mode</button>
             </div>
           </Show>
           <div class="page-heading">
@@ -1374,6 +1389,14 @@ export default function App() {
               </Show>
               <Show when={view() === "settings"}>
                 <div class="settings-grid">
+                  <Panel title="Telemetry">
+                    <div class="detail-body">
+                      <label><input type="checkbox" checked={telemetryEnabled()} onChange={e=>{
+                        const enabled=e.currentTarget.checked;localStorage.setItem("remind.telemetry",enabled?"on":"off");setTelemetryEnabled(enabled);
+                      }}/> Share operational diagnostics with Space Station</label>
+                      <p class="hint">Enabled by default. Records action outcomes, timing, and browser interactions. Reminder text, tokens, URLs and input contents are excluded. Sandbox events remain inside the sandbox.</p>
+                    </div>
+                  </Panel>
                   <Panel title="Session">
                     <div class="detail-body">
                       <dl>
@@ -1472,7 +1495,7 @@ export default function App() {
                   </dd>
                 </dl>
                 <div class="actions wrap">
-                  <button class="secondary" onClick={configureIam}>
+                  <Show when={!testInfo()?.iam_control_version}><button class="secondary" onClick={configureIam}>
                     Configure IAm
                   </button>
                   <button
@@ -1532,7 +1555,7 @@ export default function App() {
                   >
                     Forget
                   </button>
-                </div>
+                </Show></div>
                 <p class="hint">
                   Inactive environments retire after 15 days, with a further 30
                   days to recover them.

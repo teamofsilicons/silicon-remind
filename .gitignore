@@ -3,3 +3,10 @@
 /.DS_Store
 *.log
 
+
+/dist/
+/release-binaries/
+__pycache__/
+
+# Generated native payloads are delivered in the Honeycomb release archive.
+/targets/

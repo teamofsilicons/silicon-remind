@@ -1,5 +1,6 @@
 //! Stateful CLI composed exclusively from the public Remind Rust client.
 mod args;
+mod daemon;
 mod state;
 use anyhow::{Context as _, bail};
 use args::{Auth, Cli, Command, Config, Environment, Login, Toggle, Webhook};
@@ -9,21 +10,112 @@ use state::{Store, StoredSession, slot};
 use std::io::{IsTerminal as _, Read as _};
 
 #[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-    if let Err(error) = run(&cli).await {
+async fn main() -> std::process::ExitCode {
+    let mut cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = error.exit_code();
+            let _ = error.print();
+            footer(None);
+            return std::process::ExitCode::from(code as u8);
+        }
+    };
+    let result = run(&mut cli).await;
+    let code = if let Err(error) = result {
         if cli.json {
             eprintln!("{}", machine_error(&error));
         } else {
             eprintln!("Error: {error}\nRun remind <command> --help for syntax and examples.");
         }
-        let code = match error.downcast_ref::<silicon_remind_client::Error>() {
+        match error.downcast_ref::<silicon_remind_client::Error>() {
             Some(silicon_remind_client::Error::Api { status: 401, .. }) => 3,
             Some(silicon_remind_client::Error::Api { status: 403, .. }) => 4,
             Some(silicon_remind_client::Error::Invalid(_)) => 2,
             _ => 1,
+        }
+    } else {
+        0
+    };
+    footer(Some(&cli));
+    std::process::ExitCode::from(code)
+}
+
+// Recover only public environment selectors when Clap rejects command syntax.
+fn failed_parse_selection() -> (Option<String>, Option<uuid::Uuid>, bool) {
+    let mut args = std::env::args().skip(1);
+    let (mut url, mut test, mut production) = (None, None, false);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" => break,
+            "--production" => production = true,
+            "--url" => url = args.next(),
+            "--test" => test = args.next().and_then(|v| v.parse().ok()),
+            _ => {
+                if let Some(value) = arg.strip_prefix("--test=") {
+                    test = value.parse().ok();
+                }
+                if let Some(value) = arg.strip_prefix("--url=") {
+                    url = Some(value.into());
+                }
+            }
+        }
+    }
+    (url, test, production)
+}
+
+fn footer(cli: Option<&Cli>) {
+    let (parse_url, parse_test, parse_production) = if cli.is_none() {
+        failed_parse_selection()
+    } else {
+        (None, None, false)
+    };
+    if Store::exists()
+        && let Ok(store) = Store::open()
+    {
+        let url = cli
+            .and_then(|c| c.url.as_deref())
+            .or(parse_url.as_deref())
+            .unwrap_or(&store.state.url)
+            .trim_end_matches('/');
+        let test = if parse_production
+            || cli.is_some_and(|c| {
+                c.production
+                    || matches!(
+                        c.command,
+                        Command::Env {
+                            command: Environment::Exit
+                        }
+                    )
+            }) {
+            None
+        } else {
+            cli.filter(|c| {
+                !matches!(
+                    c.command,
+                    Command::Env {
+                        command: Environment::Use { .. }
+                    }
+                )
+            })
+            .and_then(|c| c.test)
+            .or(parse_test)
+            .or_else(|| store.state.selected_tests.get(url).copied())
         };
-        std::process::exit(code);
+        if let Some(id) = test {
+            let key = slot(url, Some(id));
+            let name = store
+                .state
+                .test_names
+                .get(&key)
+                .map_or("unverified environment", String::as_str);
+            eprintln!("Test environment: {name} ({id}) · Exit: remind env exit");
+        }
+    } else if let Some(id) = cli
+        .and_then(|c| c.test)
+        .or(parse_test)
+        .filter(|_| !parse_production)
+    {
+        eprintln!("Test environment: {id} (local state unavailable)");
     }
 }
 
@@ -45,29 +137,46 @@ fn machine_error(error: &anyhow::Error) -> serde_json::Value {
     }
 }
 
-async fn run(cli: &Cli) -> anyhow::Result<()> {
+async fn run(cli: &mut Cli) -> anyhow::Result<()> {
+    if let Command::Daemon { command } = &cli.command {
+        return daemon::execute(command).await;
+    }
     let mut store = Store::open()?;
+    let url = cli
+        .url
+        .as_deref()
+        .unwrap_or(&store.state.url)
+        .trim_end_matches('/');
+    if cli.test.is_none() && !cli.production {
+        cli.test = store.state.selected_tests.get(url).copied();
+    }
+    let started = std::time::Instant::now();
     let result = execute(cli, &mut store).await;
+    emit_local_event(
+        &store,
+        cli.test,
+        cli.url.as_deref(),
+        "cli",
+        "command_completed",
+        result.is_ok(),
+        started.elapsed(),
+    )
+    .await;
     store.save()?;
-    let explicit = matches!(cli.command, Command::Update { .. });
-    let due = store.state.auto_update
-        && !cli.no_update
-        && updates::unix_time().saturating_sub(store.state.last_update_check) >= 3600;
-    if explicit || due {
-        // Persist attempts before networking, including failure, so registry outages
-        // cannot turn every CLI command into another network check.
+    if let Command::Update { check } = cli.command {
         store.state.last_update_check = updates::unix_time();
         store.save()?;
-        let apply = !matches!(cli.command, Command::Update { check: true });
-        // Keep the process lock until maintenance completes: two invocations must
-        // not overwrite one another's token or updater state.
-        let status =
-            updates::maintain("silicon-remind-cli", env!("CARGO_PKG_VERSION"), true, apply).await;
-        if explicit {
-            output(cli, &status)?;
-        } else if !cli.json && matches!(status, updates::UpdateStatus::Updated { .. }) {
-            eprintln!("CLI update installed. The next command uses the new version.");
-        }
+        drop(store);
+        output(
+            cli,
+            &updates::maintain(
+                "silicon-remind-cli",
+                env!("CARGO_PKG_VERSION"),
+                true,
+                !check,
+            )
+            .await,
+        )?;
     }
     result
 }
@@ -79,9 +188,21 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         .unwrap_or(&store.state.url)
         .trim_end_matches('/')
         .to_owned();
-    let mut client = Client::new(&url)?.auto_update(false);
+    let mut client = Client::new(&url)?
+        .with_telemetry(
+            store.state.telemetry
+                && std::env::var("REMIND_TELEMETRY_ENABLED").as_deref() != Ok("false"),
+        )
+        .auto_update(false);
     let session_slot = slot(&url, cli.test);
-    if let Some(id) = cli.test {
+    if let Some(id) = cli.test.filter(|_| {
+        !matches!(
+            cli.command,
+            Command::Env {
+                command: Environment::Exit | Environment::Use { .. }
+            }
+        )
+    }) {
         let key=store.state.test_keys.get(&slot(&url,Some(id))).context("test key is not saved for this server; run remind env import <id>, or remind env key <id> using your production session")?;
         client = client.with_test_environment(key.clone())?;
     }
@@ -99,7 +220,9 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
     }
     let needs_session = matches!(
         &cli.command,
-        Command::Create { .. }
+        Command::Report { .. }
+            | Command::ReportStatus { .. }
+            | Command::Create { .. }
             | Command::List { .. }
             | Command::Get { .. }
             | Command::Edit { .. }
@@ -112,7 +235,7 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
             | Command::Auth {
                 command: Auth::Whoami | Auth::Refresh | Auth::Logout
             }
-    ) || matches!(&cli.command,Command::Env{command} if !matches!(command,Environment::Import{..}|Environment::Forget{..}));
+    ) || matches!(&cli.command,Command::Env{command} if !matches!(command,Environment::Import{..}|Environment::Forget{..}|Environment::Use{..}|Environment::Exit));
     if needs_session {
         let stored=store.state.sessions.get(&session_slot).context("no session for this server and environment; run remind auth login --org <org> (with --test <id> for a sandbox)")?;
         let org = cli.org.clone().unwrap_or_else(|| stored.org.clone());
@@ -140,6 +263,52 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         None => Mutation::new(),
     };
     match &cli.command {
+        Command::Daemon { .. } => unreachable!("handled before state lock"),
+        Command::Docs { topic } => {
+            let content = match topic.as_str() {
+                "api" => include_str!("../docs/api/README.md"),
+                "client" => include_str!("../docs/client/README.md"),
+                "testing" => include_str!("../docs/testing-environments.md"),
+                "webhooks" => include_str!("../docs/webhook-delivery.md"),
+                "releases" => include_str!("../docs/releases.md"),
+                _ => include_str!("../docs/cli/README.md"),
+            };
+            if cli.json {
+                output(cli, &serde_json::json!({"topic":topic,"markdown":content}))?;
+            } else {
+                println!("{content}");
+            }
+        }
+        Command::ReportStatus { id } => output(cli, &client.report_status(*id).await?)?,
+        Command::Report { message, pr } => {
+            if message.trim().is_empty() {
+                bail!("report message cannot be empty");
+            }
+            if let Some(pr) = pr
+                && (!pr.starts_with("https://github.com/teamofsilicons/silicon-remind/pull/")
+                    || !pr
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|n| n.parse::<u64>().is_ok()))
+            {
+                bail!("--pr must be a Silicon Remind GitHub pull request URL");
+            }
+            let report = client
+                .report(
+                    &silicon_remind_client::models::BugReportRequest {
+                        message: message.clone(),
+                        pr: pr.clone(),
+                    },
+                    &mutation,
+                )
+                .await?;
+            output(cli, &report)?;
+            if pr.is_none() {
+                eprintln!(
+                    "You can also submit a fix: https://github.com/teamofsilicons/silicon-remind"
+                );
+            }
+        }
         Command::Iam => output(cli, &client.iam().await?)?,
         Command::Login { slt, .. } => {
             let slt = slt
@@ -345,6 +514,34 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
             }
         },
         Command::Env { command } => match command {
+            Environment::Use { secret_stdin } => {
+                let secret = read_secret("IAM test application app_secret: ", *secret_stdin)?;
+                let environment = Client::new(&url)?
+                    .with_telemetry(
+                        store.state.telemetry
+                            && std::env::var("REMIND_TELEMETRY_ENABLED").as_deref() != Ok("false"),
+                    )
+                    .auto_update(false)
+                    .with_test_environment(secret.clone())?
+                    .current_environment()
+                    .await?;
+                let key = slot(&url, Some(environment.id));
+                store.state.test_keys.insert(key.clone(), secret);
+                store.state.test_names.insert(key, environment.name.clone());
+                store
+                    .state
+                    .selected_tests
+                    .insert(url.clone(), environment.id);
+                output(cli, &environment)?;
+                suggest(
+                    cli,
+                    "Sandbox selected. Sign in with remind login <test-public-id-or-SLT>.",
+                );
+            }
+            Environment::Exit => {
+                store.state.selected_tests.remove(&url);
+                output(cli, &serde_json::json!({"environment":"production"}))?;
+            }
             Environment::Create {
                 name,
                 description,
@@ -414,6 +611,10 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
             }
             Environment::Delete { id } => {
                 client.delete_environment(*id).await?;
+                if store.state.selected_tests.get(&url) == Some(id) {
+                    store.state.selected_tests.remove(&url);
+                }
+                store.state.test_names.remove(&slot(&url, Some(*id)));
                 store.state.test_keys.remove(&slot(&url, Some(*id)));
                 store.state.sessions.remove(&slot(&url, Some(*id)));
                 store.save()?;
@@ -439,6 +640,10 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 output(cli, &environment)?;
             }
             Environment::Forget { id } => {
+                if store.state.selected_tests.get(&url) == Some(id) {
+                    store.state.selected_tests.remove(&url);
+                }
+                store.state.test_names.remove(&slot(&url, Some(*id)));
                 store.state.test_keys.remove(&slot(&url, Some(*id)));
                 store.state.sessions.remove(&slot(&url, Some(*id)));
                 store.save()?;
@@ -475,7 +680,7 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
         Command::Config { command } => match command {
             Config::Show => output(
                 cli,
-                &serde_json::json!({"url":store.state.url,"home":store.home_dir().display().to_string(),"auto_update":store.state.auto_update,"session_count":store.state.sessions.len(),"saved_test_environment_count":store.state.test_keys.len()}),
+                &serde_json::json!({"url":store.state.url,"home":store.home_dir().display().to_string(),"auto_update":false,"update_manager":"honeycomb","telemetry":store.state.telemetry,"session_count":store.state.sessions.len(),"saved_test_environment_count":store.state.test_keys.len()}),
             )?,
             Config::SetUrl { service_url } => {
                 Client::new(service_url)?;
@@ -487,12 +692,25 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 Store::configure_home(location)?;
                 output(cli, &serde_json::json!({"home": location}))?;
             }
-            Config::AutoUpdate { value } => {
-                store.state.auto_update = matches!(value, Toggle::On);
+            Config::Telemetry { value } => {
+                store.state.telemetry = matches!(value, Toggle::On);
                 store.save()?;
                 output(
                     cli,
-                    &serde_json::json!({"auto_update":store.state.auto_update}),
+                    &serde_json::json!({"telemetry": store.state.telemetry}),
+                )?;
+            }
+            Config::AutoUpdate { value } => {
+                if matches!(value, Toggle::On) {
+                    bail!(
+                        "Honeycomb manages Remind updates. Configure updates in Honeycomb and run `honeycomb update 'tos>remind'`."
+                    );
+                }
+                store.state.auto_update = false;
+                store.save()?;
+                output(
+                    cli,
+                    &serde_json::json!({"auto_update":false,"update_manager":"honeycomb"}),
                 )?;
             }
         },
@@ -697,4 +915,54 @@ fn suggest(cli: &Cli, text: &str) {
             eprintln!("{text}");
         }
     }
+}
+
+async fn emit_local_event(
+    store: &Store,
+    test: Option<uuid::Uuid>,
+    url: Option<&str>,
+    source: &str,
+    event: &str,
+    success: bool,
+    duration: std::time::Duration,
+) {
+    if !store.state.telemetry || std::env::var("REMIND_TELEMETRY_ENABLED").as_deref() == Ok("false")
+    {
+        return;
+    }
+    let url = url.unwrap_or(&store.state.url);
+    let key = slot(url, test);
+    let Some(session) = store.state.sessions.get(&key) else {
+        return;
+    };
+    let Ok(mut client) = Client::new(url) else {
+        return;
+    };
+    if test.is_some() {
+        let Some(secret) = store.state.test_keys.get(&key) else {
+            return;
+        };
+        let Ok(scoped) = client.with_test_environment(secret.clone()) else {
+            return;
+        };
+        client = scoped;
+    }
+    let Ok(client) = client.with_session(session.session.access_token.clone(), &session.org) else {
+        return;
+    };
+    client
+        .track(&models::TelemetryEvent {
+            source: source.into(),
+            event: event.into(),
+            step: if source == "daemon" {
+                "maintenance"
+            } else {
+                "command"
+            }
+            .into(),
+            success,
+            duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
+            status_code: None,
+        })
+        .await;
 }

@@ -7,6 +7,7 @@ export interface Identity {
   can_manage_reminders: boolean;
 }
 export interface Environment {
+  iam_control_version?: number | null;
   id: string;
   name: string;
   description: string | null;
@@ -27,6 +28,7 @@ export interface Context {
   identity: Identity | null;
 }
 export interface Session {
+  authError?: string;
   active: string;
   contexts: Context[];
   identity: Identity | null;

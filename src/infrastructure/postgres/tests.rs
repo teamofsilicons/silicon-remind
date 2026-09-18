@@ -2619,3 +2619,27 @@ async fn insert_idempotency_response(
     .await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn contract_sunset_requires_seven_idle_days_and_never_retires_current() -> anyhow::Result<()>
+{
+    let database = test_database().await?;
+    sqlx::query("INSERT INTO api_contract_versions(version,status,deprecated_at,last_requested_at) VALUES(2,'deprecated',clock_timestamp()-interval '8 days',NULL),(3,'deprecated',clock_timestamp()-interval '8 days',clock_timestamp()-interval '6 days'),(4,'deprecated',clock_timestamp()-interval '6 days',NULL)")
+        .execute(&database.pool).await?;
+    sqlx::query("UPDATE api_contract_versions SET status='deprecated',deprecated_at=clock_timestamp()-interval '30 days' WHERE version=1").execute(&database.pool).await?;
+    crate::api::contracts::sweep(&database.pool).await?;
+    let states: Vec<(i32, String)> =
+        sqlx::query_as("SELECT version,status FROM api_contract_versions ORDER BY version")
+            .fetch_all(&database.pool)
+            .await?;
+    assert_eq!(
+        states,
+        vec![
+            (1, "deprecated".into()),
+            (2, "sunset".into()),
+            (3, "deprecated".into()),
+            (4, "deprecated".into())
+        ]
+    );
+    Ok(())
+}

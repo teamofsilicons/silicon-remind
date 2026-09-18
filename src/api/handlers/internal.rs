@@ -166,6 +166,19 @@ pub async fn accept_iam_event(
                         return Err(AppError::Unauthenticated);
                     }
                 }
+                let timestamp = verified.event().occurred_at;
+                let occurred_at = chrono::DateTime::from_timestamp(
+                    timestamp.unix_timestamp(),
+                    timestamp.nanosecond(),
+                )
+                .ok_or(AppError::Validation)?;
+                if !tests.webhook_is_current(id, occurred_at).await? {
+                    // Acknowledge an obsolete authenticated event without repopulating
+                    // the cleared sandbox with its receipt or projection.
+                    receipt_id = Some(verified.event().event_id);
+                    lease.finish(false).await?;
+                    continue;
+                }
                 let repository =
                     crate::infrastructure::postgres::PostgresRepository::new(lease.pool.clone());
                 receipt_id = Some(apply_verified_event(&repository, &verified, received_at).await?);

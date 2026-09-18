@@ -166,7 +166,7 @@ The deletion ledger is backend-internal and is not exposed by the client or CLI.
 ## Environment lifecycle
 
 See the [dedicated sandbox guide](../testing-environments.md) for setup and
-permissions. Public control operations are:
+permissions. For new sandboxes send the IAM application `app_secret` in `X-Remind-Test-Key`; `GET /testing-environment` discovers its metadata automatically. Ordinary operations require a sandbox user bearer and its actual permissions. IAM owns cleanup and retirement. The following management operations are retained for **legacy manually paired sandboxes**:
 
 | Method and path | Result |
 | --- | --- |
@@ -177,7 +177,7 @@ permissions. Public control operations are:
 | `POST /test-environments/{id}/key-rotations` | New key; previous key revoked |
 | `DELETE /test-environments/{id}` | `204`; retires for 30-day recovery |
 | `POST /test-environments/{id}/restorations` | Fresh key and restored environment |
-| `GET /testing-environment` | Root-key-only selected sandbox metadata |
+| `GET /testing-environment` | Selected sandbox metadata (app_secret or legacy key) |
 | `POST /testing-environment/cleanings` | Root-key-only atomic clear; `204` |
 
 ## Errors and operational endpoints
@@ -186,7 +186,7 @@ permissions. Public control operations are:
 recognized actor lacks the action's permission. `404` also hides resources in
 other organizations. `409` reports lifecycle/idempotency conflicts, absent
 webhook configuration, duplicate active environment names, or the sandbox's
-100-reminder limit. `422` reports invalid data. `429` may include `Retry-After`.
+legacy 100-reminder limit. `422` reports invalid data. `429` may include `Retry-After`.
 `503` means an authority or storage dependency could not answer safely.
 
 Origin-relative `/health/live` reports process liveness. `/health/ready` verifies
@@ -195,8 +195,18 @@ restricted by deployment networking. The IAM receiver is the origin-relative
 `POST /webhook/`; it verifies signed raw bodies and is not the user configuration
 route `/api/v1/webhook`.
 
-Sandbox creation accepts an optional `iam_app_secret`. If omitted, root metadata,
+Legacy manual sandbox creation accepts an optional `iam_app_secret`. If omitted, root metadata,
 cleaning and configuration are available immediately; authenticated actions wait
 for `PUT /testing-environment/iam` with `{"iam_app_secret":"<test-only-secret>"}`
 and the Remind root header. That route returns 204 and requires no actor bearer.
 See [the sandbox setup guide](../testing-environments.md).
+
+## Wire version negotiation
+
+`GET /api/versions` is relative to the server origin and advertises supported protocols and lifecycle state. Send `X-Remind-API-Version: 1` with `/api/v1` requests; unsupported or conflicting selections return 406 before execution. The selected version appears on responses. See [version policy](../version-policy.md) for the compatibility matrix and seven-day idle sunset rule.
+
+## Reports and operational telemetry
+
+`POST /api/v1/reports` accepts `{ "message": "reproduction details", "pr": null }` with bearer, organization, and `Idempotency-Key` headers. Maximum message length is 16384 UTF-8 bytes and the rate limit is 10 new reports per actor per hour. An optional PR must point to this repository's pull request. Returns HTTP 202 with `{id,status,failure_reason}`; replaying the same key/body returns HTTP 200 with the same receipt, and changing the body returns 409. `GET /api/v1/reports/{id}` is visible only to the submitting actor in the same organization/environment. Missing production Postmark configuration returns 503. Test reports immediately return `simulated`.
+
+`POST /api/v1/telemetry/events` accepts only the bounded `TelemetryEvent` schema in OpenAPI and requires the same normal IAM session. `X-Remind-Telemetry: off` disables observations for any request. Production uses Space Station; testing writes only its own `telemetry_events` table. Telemetry submission itself is excluded from request observations to prevent recursion. [Diagnostics and operator setup](../diagnostics.md).

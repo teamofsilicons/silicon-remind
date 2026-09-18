@@ -133,14 +133,13 @@ use silicon_remind_client::{Client, Secret, Mutation, models};
 
 async fn example() -> silicon_remind_client::Result<()> {
     let base = Client::new("http://127.0.0.1:8086")?.auto_update(false);
-    let key = Secret::new(std::env::var("REMIND_TEST_KEY")?);
+    let key = Secret::new(std::env::var("REMIND_TEST_APP_SECRET")?);
     let sandbox = base.with_test_environment(key)?;
     let environment = sandbox.current_environment().await?;
     let session = sandbox.login(&Secret::new("slt_from_test_IAM"), &Mutation::new()).await?;
     let signed_in = sandbox.with_session(session.access_token, "test-org")?;
     let reminders = signed_in.reminders(&models::ListSchedules::default()).await?;
     println!("{}: {} reminders", environment.name, reminders.items.len());
-    sandbox.clean_environment().await?;
     Ok(())
 }
 ```
@@ -148,8 +147,9 @@ async fn example() -> silicon_remind_client::Result<()> {
 `with_test_environment` clears any previously attached bearer and organization,
 preventing accidental production credentials from being carried into a sandbox.
 Attach the test session afterward. Environment IDs are selectors for your state
-store; only the 32-character root key authenticates environment access.
-Management methods require a production org session and reject a test-scoped
+store; the IAM application app_secret selects its sandbox without a root key.
+Legacy 32-character Remind keys remain accepted.
+Legacy management methods require a production org session and reject a test-scoped
 client locally. `current_environment` and `clean_environment` reject a client
 without a test key locally. All ordinary reminder methods use the same paths.
 
@@ -158,7 +158,7 @@ without a test key locally. All ordinary reminder methods use the same paths.
 Match `Error::Api { status, code, request_id, retry_after, .. }` for server failures.
 `401` is missing/expired/mismatched authority; `403` is a permission denial; `404`
 also hides other organizations' resources; `409` describes a state or idempotency
-conflict. `test_reminder_limit` applies only in sandboxes. `Invalid` is local input
+conflict. `test_reminder_limit` applies only to legacy manually paired sandboxes. `Invalid` is local input
 validation, `Transport` means no usable HTTP exchange, `Decode` means an
 incompatible response, and `ResponseTooLarge` bounds memory consumption.
 
@@ -166,20 +166,16 @@ For an ambiguous create/update response, repeat the exact request with the same
 `Mutation`. Do not retry validation errors unchanged. For backpressure, honor
 `retry_after` when supplied and choose a bounded retry policy.
 
-## Automatic dependency maintenance
+## Dependency updates
 
-By default, after an API call finishes, the package may check crates.io if its
-process-local last attempt is at least an hour old. Concurrent calls share a
-single check. A discovered update runs `cargo update -p silicon-remind-client
---precise <version>` against the enclosing Cargo project. This changes the
-lockfile; compiled code changes only after the next build. Idle clients do not
-run a timer or daemon. A restart resets the package's in-memory hourly throttle.
+The Rust client is a normal, stateless project dependency. Update it explicitly through your project's Cargo manifest and lockfile, then rebuild. API calls never run Cargo, query the package registry, or modify the consuming project. `.auto_update(...)` remains a compatibility no-op. Honeycomb manages the CLI independently.
 
-Disable maintenance with `.auto_update(false)` or
-`SILICON_REMIND_CLIENT_AUTO_UPDATE=false`. Set
-`SILICON_REMIND_CLIENT_MANIFEST=/absolute/path/Cargo.toml` when the process working
-directory does not identify the intended consuming project. Missing manifests,
-unpublished crates, registry failures and Cargo failures do not change API
-results. An explicit `updates::maintain` call returns an `UpdateStatus` if a host
-application wants to display maintenance progress. The CLI disables package
-maintenance and manages its own executable update after each command instead.
+## Contract discovery and application-selected sandboxes
+
+`client.versions().await?` reads `/api/versions`. Every API request offers wire version 1. `with_test_environment(Secret::new(app_secret))` accepts the IAM sandbox application secret and clears existing bearer authority; call `current_environment()` to discover its ID/name, then login with a test SLT or public identity ID. Ordinary operations enforce that identity’s permissions. See [testing](../testing-environments.md) and [version policy](../version-policy.md).
+
+## Bug reports and telemetry
+
+`client.report(&BugReportRequest { message, pr }, &Mutation::new()).await?` returns a durable receipt. `client.report_status(id).await?` reads your own receipt's current state. Both Carbons and Silicons may report; report limits and normal IAM organization isolation apply.
+
+Telemetry is on by default. Use `client.with_telemetry(false)` to disable SDK and associated server request telemetry. The client stays stateless: events pass through the authenticated Remind API, and the backend uses the official Space Station Rust package. No Space Station key is distributed to consumers. `client.track(&TelemetryEvent { ... }).await` is available to CLI/daemon integrations; it is a bounded best-effort call and never makes the application operation fail. See [diagnostics](../diagnostics.md).

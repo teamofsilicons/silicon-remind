@@ -48,7 +48,25 @@ pub async fn observe(State(state): State<ApiState>, request: Request, next: Next
         .get::<MatchedPath>()
         .map_or_else(|| "unmatched".to_owned(), |path| path.as_str().to_owned());
     let method = request.method().as_str().to_owned();
+    let scoped = state.scoped(request.extensions());
+    let enabled = request
+        .headers()
+        .get("x-remind-telemetry")
+        .is_none_or(|v| v != "off");
+    let started = std::time::Instant::now();
     let response = next.run(request).await;
+    if enabled
+        && !route.contains("/telemetry/")
+        && !route.starts_with("/health/")
+        && route != "/metrics"
+    {
+        scoped.telemetry.record(scoped.repository.pool(), scoped.is_test, serde_json::json!({
+            "source":"backend", "event":"request_completed", "step":"http_response", "progress":1.0,
+            "route":route,"method":method,"status_code":response.status().as_u16(),
+            "duration_ms":u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "request_id":crate::request_context::current_request_id()
+        })).await;
+    }
     let status_class = format!("{}xx", response.status().as_u16() / 100);
     state
         .metrics
