@@ -122,6 +122,10 @@ impl Store {
             file.write_all(&serde_json::to_vec_pretty(&self.state)?)?;
             file.sync_all()?;
             std::fs::rename(&path, self.dir.join("state.json"))?;
+            // Sync the directory so the rename itself is durable. Windows cannot open a
+            // directory as a file - CreateFileW without backup semantics fails with
+            // ERROR_ACCESS_DENIED - and MoveFileEx is already durable there, so Unix only.
+            #[cfg(unix)]
             File::open(&self.dir)?.sync_all()?;
             Ok(())
         })();
