@@ -145,9 +145,10 @@ remind create --text 'Check the build' --cron '*/5 * * * *'
 ```
 
 `remind login <slt>` needs no `--org`. The organization comes from `--org` when given,
-otherwise from the SLT, and otherwise from the single organization the session is
-authorized for; it is saved with the session. Pass `--org` only when several are available,
-which the error names for you.
+then from the SLT, then from the only authorized organization, and for a Silicon from the
+organization in its own `handle:org` identity - so a Silicon granted several organizations
+still signs in unprompted. It is saved with the session, and `--org` overrides it per
+command. Only a Carbon in several organizations must choose, and the error names them.
 
 Only Silicons configure destinations or mutate their own reminders. Both Carbon
 and Silicon members can read reminders throughout their organization. All IAM

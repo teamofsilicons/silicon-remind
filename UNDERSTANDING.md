@@ -149,13 +149,22 @@ For logging in via the cli or the package for any carbon/silicon you don't ask f
 For CLI login there should be this exact command: `remind login <slt>`.
 
 That command has to work exactly as written, with nothing else supplied, which is how
-`silicon connect` signs a Silicon in. An organization still has to be chosen, and it is
-resolved in this order: an explicit `--org`, then the organization named by the SLT itself,
-and otherwise the organizations the session is authorized for. When there is exactly one -
-the ordinary case for a Silicon - that one is used, and the resolved organization is saved
-so later commands need no `--org` either. Only genuine ambiguity is worth a question: with
-several organizations, fail and name them so the caller can pick one with `--org`. Never
-refuse a login merely because the SLT carried no organization.
+`silicon connect` signs a Silicon in. A single login may legitimately be authorized for
+several organizations, so the login has to choose one without asking wherever the answer
+is knowable. It is resolved in this order:
+
+1. an explicit `--org`;
+2. the organization named by the SLT itself;
+3. the only organization the session is authorized for, when there is just one;
+4. for a Silicon, the organization in its own `handle:org` identity - the one it belongs
+   to, as opposed to the ones it was merely granted.
+
+The resolved organization is saved with the session, so later commands need no `--org`
+either, and `--org` still overrides it per invocation. Only a genuinely unknowable choice
+is worth a question - a Carbon in several organizations - and then the error names them so
+the caller can pick one. Never refuse a login merely because the SLT carried no
+organization, and never refuse a Silicon that belongs to exactly one organization no
+matter how many it has been granted.
 
 And there should be an command to configure the home directory where the information is stored:  `{home_dir}/.{appname}/dir`. This can be confitgure via `remind config home {location}`. If it's not a directory give an error not a directory.
 

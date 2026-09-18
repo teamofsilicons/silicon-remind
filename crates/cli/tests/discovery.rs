@@ -349,13 +349,15 @@ async fn login_without_org_uses_the_only_authorized_organization() -> Result<()>
     Ok(())
 }
 
-/// Ambiguity is the only case worth a question, and the answer must name the options.
+/// A login may cover several organizations. A Silicon still belongs to exactly one of
+/// them, named in its `handle:org` identity, so `silicon connect` must not be asked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn login_without_org_asks_only_when_several_are_available() -> Result<()> {
+async fn login_without_org_prefers_the_silicons_own_organization() -> Result<()> {
     let home = TempDir::new()?;
     let server = MockServer::start().await;
-    let mut second = identity("silicon");
-    second["org_id"] = json!("bricks");
+    // Granted a second organization, but `fixture:tos` belongs to tos.
+    let mut granted = identity("silicon");
+    granted["org_id"] = json!("bricks");
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/login"))
         .respond_with(ResponseTemplate::new(200).set_body_json(session_without_org()))
@@ -365,14 +367,50 @@ async fn login_without_org_asks_only_when_several_are_available() -> Result<()> 
         .and(path("/api/v1/auth/organizations"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(json!({"items":[identity("silicon"), second]})),
+                .set_body_json(json!({"items":[granted, identity("silicon")]})),
         )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/me"))
+        .and(header("x-org-id", "tos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = success(
+        cli(home.path())
+            .args(["--url", &server.uri(), "login", "slt-fixture", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(result["org_id"], json!("tos"));
+    Ok(())
+}
+
+/// A Carbon's identity names no organization, so several of them is a real question -
+/// and the answer must name the options rather than just demand a flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_without_org_asks_when_the_organization_is_unknowable() -> Result<()> {
+    let home = TempDir::new()?;
+    let server = MockServer::start().await;
+    let mut first = identity("carbon");
+    first["public_id"] = json!("fixture");
+    let mut second = first.clone();
+    second["org_id"] = json!("bricks");
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session_without_org()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/organizations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[first, second]})))
         .mount(&server)
         .await;
     let output = cli(home.path())
         .args(["--url", &server.uri(), "login", "slt-fixture"])
         .output()?;
-    assert!(!output.status.success(), "an ambiguous login must fail");
+    assert!(!output.status.success(), "an unknowable choice must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--org"), "{stderr}");
     assert!(
