@@ -35,3 +35,7 @@ The root key is excluded from persisted normalized envelopes. Current member
 and organization revocations are committed with the receipt. Background cleanup
 archives inaccessible resources and cancels unaccepted executions. IAM logout
 also takes effect through live introspection on the next authenticated request.
+
+## Honeycomb lifecycle
+
+Shared test environment control uses a separate service credential and durable operation receipts. See the [Honeycomb lifecycle contract](honeycomb-lifecycle.md). These endpoints do not require an active test session and are not exposed by the public client or CLI.

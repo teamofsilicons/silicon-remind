@@ -21,18 +21,30 @@ pub struct StoredSession {
 pub struct State {
     pub url: String,
     pub auto_update: bool,
+    #[serde(default = "default_telemetry")]
+    pub telemetry: bool,
     pub last_update_check: u64,
     pub sessions: BTreeMap<String, StoredSession>,
     pub test_keys: BTreeMap<String, Secret>,
+    #[serde(default)]
+    pub selected_tests: BTreeMap<String, uuid::Uuid>,
+    #[serde(default)]
+    pub test_names: BTreeMap<String, String>,
+}
+fn default_telemetry() -> bool {
+    true
 }
 impl Default for State {
     fn default() -> Self {
         Self {
             url: "https://backend.remind.teamofsilicons.com".into(),
-            auto_update: true,
+            auto_update: false,
+            telemetry: true,
             last_update_check: 0,
             sessions: BTreeMap::new(),
             test_keys: BTreeMap::new(),
+            selected_tests: BTreeMap::new(),
+            test_names: BTreeMap::new(),
         }
     }
 }
@@ -44,6 +56,9 @@ pub struct Store {
 impl Store {
     pub fn home_dir(&self) -> &std::path::Path {
         self.dir.parent().unwrap_or(self.dir.as_path())
+    }
+    pub fn exists() -> bool {
+        configured_home().is_ok_and(|p| p.join(".remind/state.json").is_file())
     }
     pub fn open() -> anyhow::Result<Self> {
         let home = configured_home()?;

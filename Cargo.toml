@@ -47,11 +47,12 @@ http-body-util = "0.1.3"
 prometheus-client = "0.25.0"
 rand = "0.9.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "http2", "json", "rustls"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
-silicon-iam-client = "1.8.0"
+silicon-iam-client = "1.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-native-roots", "uuid"] }
 subtle = "2.6.1"
 thiserror = "2.0.17"
@@ -90,3 +91,6 @@ pedantic = { level = "warn", priority = -1 }
 todo = "deny"
 unimplemented = "deny"
 unwrap_used = "deny"
+
+[target."cfg(unix)".dependencies]
+space-station = "0.1.1"

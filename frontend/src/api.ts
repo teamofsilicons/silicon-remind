@@ -27,6 +27,7 @@ export async function request<T>(
       headers: {
         "Content-Type": "application/json",
         "X-Remind-UI": "1",
+        "X-Remind-Telemetry": localStorage.getItem("remind.telemetry") === "off" ? "off" : "on",
         ...(mutation ? { "Idempotency-Key": mutation } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),

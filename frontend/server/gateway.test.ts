@@ -234,3 +234,58 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("app_secret discovery keeps testing and production sessions separate and fails closed", async () => {
+  const environment = "11111111-1111-4111-8111-111111111112";
+  const secret = "ask_" + "t".repeat(43);
+  let revoked = false;
+  const upstream = createServer(async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const testing = req.headers["x-remind-test-key"] === secret;
+    if (req.headers["x-remind-test-key"] && (!testing || revoked)) {
+      res.writeHead(401); res.end(JSON.stringify({error:{code:"unauthorized",message:"Invalid sandbox"}})); return;
+    }
+    if (req.url === "/api/v1/testing-environment") {
+      assert.ok(testing); res.end(JSON.stringify({id:environment,name:"Sandbox",iam_control_version:1}));
+    } else if (req.url === "/api/v1/auth/login") {
+      let body = ""; for await (const chunk of req) body += chunk;
+      assert.equal(JSON.parse(body).slt, testing ? "test-person" : "production-slt");
+      res.end(JSON.stringify({access_token:testing?"test-access":"production-access",refresh_token:"private-refresh",expires_in:3600}));
+    } else if (req.url === "/api/v1/auth/organizations") {
+      assert.equal(req.headers.authorization, "Bearer " + (testing?"test-access":"production-access"));
+      res.end(JSON.stringify({items:[{org_id:"tos"}]}));
+    } else if (req.url === "/api/v1/auth/me") {
+      res.end(JSON.stringify({public_id:testing?"test-person":"production-person",org_id:"tos",actor_type:"carbon",can_manage_reminders:false}));
+    } else { res.writeHead(404); res.end("{}"); }
+  });
+  const upstreamUrl = await listen(upstream);
+  const directory = await mkdtemp(join(tmpdir(),"remind-sandbox-"));
+  let gateway: ReturnType<typeof createGateway>;
+  const server = createServer((req,res)=>{void gateway(req,res);});
+  const origin = await listen(server);
+  gateway=createGateway({origin,upstream:upstreamUrl,key:randomBytes(32).toString("base64url"),directory});
+  let cookie="";
+  const call=async (path:string,body?:unknown)=>{
+    const response=await fetch(origin+"/ui/"+path,{method:body?"POST":"GET",headers:{Cookie:cookie,Origin:origin,"X-Remind-UI":"1","Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
+    if(response.headers.getSetCookie().length) cookie=cookies(response);
+    return response;
+  };
+  try {
+    assert.equal((await call("login",{slt:"production-slt"})).status,200);
+    const selected=await call("context",{action:"import",key:secret});
+    const selectedText=await selected.text();
+    assert.equal(JSON.parse(selectedText).active,environment);
+    assert.ok(!selectedText.includes(secret));
+    assert.equal((await call("login",{slt:"test-person"})).status,200);
+    assert.equal((await (await call("session")).json()).identity.public_id,"test-person");
+    revoked=true;
+    const failed=await (await call("session")).json();
+    assert.equal(failed.active,environment);
+    assert.equal(failed.identity,null);
+    assert.ok(failed.authError);
+    assert.equal((await call("context",{action:"import",key:"ask_"+"x".repeat(43)})).status,401);
+    assert.equal((await (await call("session")).json()).active,environment);
+    assert.equal((await call("context",{id:"production"})).status,200);
+    assert.equal((await (await call("session")).json()).identity.public_id,"production-person");
+  } finally { await close(server); await close(upstream); await rm(directory,{recursive:true,force:true}); }
+});

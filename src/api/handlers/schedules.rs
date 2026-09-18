@@ -179,7 +179,7 @@ pub async fn list_executions(
     Ok(Json(models::PageResponse { items, next_cursor }))
 }
 
-fn idempotency_key(headers: &HeaderMap) -> Result<String, AppError> {
+pub(crate) fn idempotency_key(headers: &HeaderMap) -> Result<String, AppError> {
     let mut values = headers.get_all(IDEMPOTENCY_HEADER).iter();
     let value = values.next().ok_or(AppError::Validation)?;
     if values.next().is_some() {

@@ -7,7 +7,7 @@ use uuid::Uuid;
     version,
     about = "Create and manage Silicon reminders through Silicon IAM.",
     long_about = "Silicon Remind schedules one-time or recurring reminders using five-field Linux cron. Silicons manage their own reminders; Carbons and Silicons can read their organization's reminders.\n\nStart with: remind login <slt>\nOptionally subscribe a receiver: remind webhook subscribe <url>\nCreate a reminder: remind create --text 'Check the build' --cron '*/5 * * * *'\nUse any command in a saved sandbox: remind --test <test_id> <command>.",
-    after_help = "Authentication:\n  remind iam --json                 Discover the IAM app_id before obtaining an SLT\n  remind login <slt>                Exchange your IAM short-lived token\n  remind login status --json        Verify the saved Carbon or Silicon identity\n\nLocal state defaults to $SILICON_HOME/.remind when SILICON_HOME is set, otherwise ~/.remind. Use remind config home <directory> to select an existing directory.\n\nRun remind <command> --help for command-specific options and examples.",
+    after_help = "Authentication:\n  remind iam --json                 Discover the IAM app_id before obtaining an SLT\n  remind login <slt>                Exchange your IAM short-lived token\n  remind login status --json        Verify the saved Carbon or Silicon identity\n\nLocal state defaults to $SILICON_HOME/.remind when SILICON_HOME is set, otherwise ~/.remind. Use remind config home <directory> to select an existing directory.\n\nRun remind <command> --help for command-specific options and examples.\nManuals: remind docs <topic>\nDocs: https://docs.remind.teamofsilicons.com\nSource: https://github.com/teamofsilicons/silicon-remind\nRust: https://crates.io/crates/silicon-remind-client",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -21,6 +21,9 @@ pub struct Cli {
     /// Run the same command in a saved test environment, using its isolated session.
     #[arg(long, global = true)]
     pub test: Option<Uuid>,
+    /// Use production for this command without changing the saved sandbox selection.
+    #[arg(long, global = true, conflicts_with = "test")]
+    pub production: bool,
     /// Print machine-readable JSON; suggestions go to stderr only in human mode.
     #[arg(long, global = true)]
     pub json: bool,
@@ -35,6 +38,30 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Read the complete bundled usage and development manuals offline.
+    #[command(
+        after_help = "Examples: remind docs cli; remind docs testing; remind docs api. Online: https://docs.remind.teamofsilicons.com"
+    )]
+    Docs {
+        #[arg(default_value = "cli", value_parser = ["cli", "api", "client", "testing", "webhooks", "releases"])]
+        topic: String,
+    },
+    /// Submit a bug report by email through Remind; optionally link a pull request.
+    #[command(
+        after_help = "Example: remind report 'Steps, expected result, actual result' --pr https://github.com/teamofsilicons/silicon-remind/pull/123\nUses your Remind session to queue a Postmark email. Sandbox reports simulate delivery. Do not include secrets."
+    )]
+    Report {
+        message: String,
+        #[arg(long)]
+        pr: Option<String>,
+    },
+    /// Check whether your queued bug report was sent, failed, or simulated.
+    ReportStatus { id: uuid::Uuid },
+    /// Inspect or remove the retired updater service; updates are managed by Honeycomb.
+    Daemon {
+        #[command(subcommand)]
+        command: Daemon,
+    },
     /// Log in with an IAM short-lived token, or inspect live authentication status.
     #[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
     Login {
@@ -141,7 +168,7 @@ pub enum Command {
         #[command(subcommand)]
         command: Config,
     },
-    /// Check crates.io or explicitly update this CLI after the command completes.
+    /// Show Honeycomb update instructions. Never replaces this executable.
     Update {
         #[arg(long)]
         check: bool,
@@ -204,6 +231,16 @@ pub enum Webhook {
 }
 #[derive(Subcommand)]
 pub enum Environment {
+    /// Select a sandbox with its IAM app_secret. Environment and name are discovered automatically.
+    #[command(
+        after_help = "Example: remind env use --secret-stdin < /private/app-secret\nThen: remind login <test-public-id>; remind list --json. Exit with remind env exit."
+    )]
+    Use {
+        #[arg(long)]
+        secret_stdin: bool,
+    },
+    /// Return to the separately saved production session.
+    Exit,
     /// Create an empty Remind environment bound to an existing IAM test environment.
     Create {
         name: String,
@@ -253,6 +290,11 @@ pub enum Config {
     Home {
         #[arg(value_name = "DIRECTORY")]
         location: std::path::PathBuf,
+    },
+    /// Enable or disable operational telemetry for CLI and daemon requests.
+    Telemetry {
+        #[arg(value_enum)]
+        value: Toggle,
     },
     AutoUpdate {
         #[arg(value_enum)]
@@ -306,4 +348,16 @@ impl From<Status> for silicon_remind_client::models::ScheduleStatus {
             Status::Completed => Self::Completed,
         }
     }
+}
+
+#[derive(Subcommand)]
+pub enum Daemon {
+    /// Retired: use Honeycomb to manage updates.
+    Install,
+    /// Stop and remove the installed user service.
+    Uninstall,
+    /// Inspect the operating system service state.
+    Status,
+    /// Retired: use `honeycomb update 'tos>remind'`.
+    Run,
 }

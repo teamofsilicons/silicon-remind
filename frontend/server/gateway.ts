@@ -13,6 +13,7 @@ interface Context {
   refresh?: string;
   expires?: number;
   pending?: string;
+  telemetryEnabled?: boolean;
 }
 interface State {
   active: string;
@@ -108,6 +109,7 @@ export function createGateway(config: {
   ) {
     const headers: Record<string, string> = { Accept: "application/json" };
     if (ctx.org) headers["X-Org-ID"] = ctx.org;
+    if (ctx.telemetryEnabled === false) headers["X-Remind-Telemetry"] = "off";
     if (ctx.key) headers["X-Remind-Test-Key"] = ctx.key;
     if (bearer && ctx.token) headers.Authorization = "Bearer " + ctx.token;
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -222,6 +224,7 @@ export function createGateway(config: {
         }
       const state = await load(id);
       state.touched = Date.now();
+      for (const context of Object.values(state.contexts)) context.telemetryEnabled = req.headers["x-remind-telemetry"] !== "off";
       let ctx = state.contexts[state.active],
         data: any;
       async function authenticated(c: Context) {
@@ -334,12 +337,26 @@ export function createGateway(config: {
           loginCookie(`${id}.${nonce}`),
         ]);
         data = { url: destination.href };
-      } else if (url.pathname === "/ui/session" && req.method === "GET") {
-        if (ctx.token) {
+      } else if (url.pathname === "/ui/telemetry" && req.method === "POST") {
+        if (req.headers["x-remind-context"] !== state.active) throw Object.assign(Error("Telemetry environment changed"), {status:409});
+        if (ctx.telemetryEnabled === false) { data = {accepted:0}; }
+        else {
           await authenticated(ctx);
-          await selectOrganization(ctx);
+          const codes = new Set(["request_completed","page_view","navigation","interaction","error","performance"]);
+          if (body?.table !== "remindtelemetry" || !Array.isArray(body.events) || body.events.length > 40) throw Object.assign(Error("Invalid telemetry batch"), {status:400});
+          for (const event of body.events) {
+            if (!codes.has(event.event) || event.source !== "web" || event.step !== "browser" || typeof event.success !== "boolean" || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || event.duration_ms > 86400000 || (event.status_code != null && (!Number.isInteger(event.status_code) || event.status_code<100 || event.status_code>599)) || Object.keys(event).some(k=>!["source","event","step","success","duration_ms","status_code"].includes(k))) throw Object.assign(Error("Invalid telemetry event"), {status:400});
+          }
+          for (const event of body.events) await remote("/api/v1/telemetry/events",ctx,"POST",event);
+          data={accepted:body.events.length};
         }
-        data = summary(state);
+      } else if (url.pathname === "/ui/session" && req.method === "GET") {
+        let authError: string | undefined;
+        if (ctx.token) {
+          try { await authenticated(ctx); await selectOrganization(ctx); }
+          catch { delete ctx.identity; authError = "This session could not be verified. Sign in again in the selected environment."; }
+        }
+        data = { ...summary(state), authError };
       } else if (url.pathname === "/ui/organization" && req.method === "POST") {
         if (typeof body.org !== "string" || !body.org)
           throw Object.assign(Error("Select an authorized organization"), { status: 422 });
@@ -399,10 +416,10 @@ export function createGateway(config: {
         if (body.action === "import") {
           if (
             typeof body.key !== "string" ||
-            !/^[a-zA-Z0-9]{32}$/.test(body.key)
+            !/^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$/.test(body.key)
           )
             throw Object.assign(
-              Error("Enter the 32-character Remind test key"),
+              Error("Enter the IAM sandbox application app_secret (ask_...)"),
               { status: 422 },
             );
           const candidate: Context = {
