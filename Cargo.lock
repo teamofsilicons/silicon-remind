@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-remind-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-remind-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "reqwest",
