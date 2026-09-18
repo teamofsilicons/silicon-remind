@@ -287,6 +287,15 @@ impl Client {
         self.json(self.request(Method::GET, "/api/v1/auth/me")?)
             .await
     }
+    /// Lists the organizations this bearer may act in. Takes the token directly because it
+    /// answers before an organization has been selected, which `with_session` requires.
+    pub async fn organizations(&self, bearer: &Secret) -> Result<Vec<models::Identity>> {
+        let request = self
+            .request(Method::GET, "/api/v1/auth/organizations")?
+            .bearer_auth(bearer.expose());
+        let organizations: models::Organizations = self.json(request).await?;
+        Ok(organizations.items)
+    }
     pub async fn create_reminder(
         &self,
         input: &models::CreateScheduleRequest,

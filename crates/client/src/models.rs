@@ -188,6 +188,11 @@ pub struct Identity {
     pub authorization_epoch: u64,
     pub can_manage_reminders: bool,
 }
+/// Organizations a session may act in, as returned before one has been selected.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Organizations {
+    pub items: Vec<Identity>,
+}
 /// Outbound webhook destination, configured by its owner.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Destination {
