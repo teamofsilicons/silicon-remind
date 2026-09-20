@@ -82,7 +82,11 @@ impl IamClient {
         iam.client = iam
             .client
             .with_testing_application(&settings.app_id, secret.expose_secret())
-            .map_err(classify)?;
+            .map_err(classify)?
+            .with_credential(Credential::application(
+                &settings.app_id,
+                secret.expose_secret(),
+            ));
         let context = iam
             .client
             .applications()
@@ -317,7 +321,75 @@ fn classify(error: silicon_iam_client::Error) -> IamError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    #[tokio::test]
+    async fn discovery_and_subsequent_requests_use_only_the_test_application_credential()
+    -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let id = Uuid::now_v7();
+        let app_id = "tos>remind";
+        let secret = format!("ask_{}", "t".repeat(43));
+        let authorization = format!("Basic {}", STANDARD.encode(format!("{app_id}:{secret}")));
+        Mock::given(method("GET"))
+            .and(path("/api/v1/application/testing-context"))
+            .and(header("authorization", authorization.as_str()))
+            .and(header("x-testing-application", authorization.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "environment_id": id,
+                "application": {
+                    "app_id": app_id, "base_url": server.uri(),
+                    "app_scope": {"iam": [], "external": []},
+                    "webhook_scope": [], "testing_idle_days": 15,
+                },
+                "environment": {
+                    "environment_id": id, "org_id": "tos", "name": "Timezone test",
+                    "version": 1, "key_generation": 1,
+                    "created_at": "2026-09-20T00:00:00Z",
+                    "creator_type": "carbon", "creator_id": "tester",
+                },
+                "webhook_key_digest": "test-root-digest",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oauth/introspect"))
+            .and(header("authorization", authorization.as_str()))
+            .and(header("x-testing-application", authorization.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": false})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let settings = IamSettings {
+            base_url: url::Url::parse(&server.uri())?,
+            app_id: app_id.into(),
+            app_secret: SecretString::from(format!("ask_{}", "p".repeat(43))),
+            request_timeout: std::time::Duration::from_secs(5),
+            webhook_keys: std::collections::BTreeMap::new(),
+        };
+        let (client, context) = IamClient::discover(&settings, &SecretString::from(secret)).await?;
+        assert_eq!(context.environment_id, id);
+        assert_eq!(client.testing_environment_id, Some(id));
+        let introspection = client
+            .client
+            .oauth()
+            .introspect(
+                &models::TokenIntrospectionRequest {
+                    token: "oat_test_probe".into(),
+                    token_type_hint: None,
+                },
+                None,
+            )
+            .await?;
+        assert!(!introspection.active);
+        Ok(())
+    }
 
     #[test]
     fn public_info_exposes_configuration_and_plane_without_secrets() -> anyhow::Result<()> {
