@@ -11,6 +11,7 @@ use crate::{
         CreateScheduleCommand, ExecutionStatus, PatchScheduleCommand, PatchValue, ScheduleKind,
         ScheduleSection, ScheduleStatus,
     },
+    error::AppError,
     infrastructure::postgres::{ExecutionRow, ScheduleRow},
 };
 
@@ -22,25 +23,26 @@ pub struct CreateScheduleRequest {
     pub text: String,
     /// One-time or recurring materialization behavior.
     pub kind: ScheduleKind,
-    /// IANA timezone identifier; omitted values use UTC.
-    #[serde(default = "default_timezone")]
-    pub timezone: String,
+    /// Required IANA timezone identifier, checked when building the command.
+    pub timezone: Option<String>,
     /// Five-field Linux cron expression.
     pub cron: String,
 }
 
-fn default_timezone() -> String {
-    crate::domain::DEFAULT_TIMEZONE.to_owned()
-}
+impl TryFrom<CreateScheduleRequest> for CreateScheduleCommand {
+    type Error = AppError;
 
-impl From<CreateScheduleRequest> for CreateScheduleCommand {
-    fn from(request: CreateScheduleRequest) -> Self {
-        Self {
+    fn try_from(request: CreateScheduleRequest) -> Result<Self, Self::Error> {
+        let timezone = request
+            .timezone
+            .filter(|timezone| !timezone.trim().is_empty())
+            .ok_or(AppError::TimezoneRequired)?;
+        Ok(Self {
             text: request.text,
-            timezone: request.timezone,
+            timezone,
             kind: request.kind,
             cron: request.cron,
-        }
+        })
     }
 }
 
@@ -449,7 +451,10 @@ mod tests {
         BulkScheduleStatusRequest, CreateScheduleRequest, IamWebhookEvent, IamWebhookEventType,
         ListSchedulesQuery, NullablePatch, PatchScheduleRequest,
     };
-    use crate::domain::ScheduleSection;
+    use crate::{
+        domain::{CreateScheduleCommand, PatchScheduleCommand, ScheduleSection},
+        error::AppError,
+    };
 
     #[test]
     fn patch_distinguishes_omission_null_and_value() -> anyhow::Result<()> {
@@ -492,19 +497,49 @@ mod tests {
     }
 
     #[test]
-    fn omitted_create_timezone_canonicalizes_to_utc() -> anyhow::Result<()> {
-        let omitted = serde_json::from_str::<CreateScheduleRequest>(
-            r#"{"text":"report","kind":"one_time","cron":"0 9 * * *"}"#,
-        )?;
-        let explicit = serde_json::from_str::<CreateScheduleRequest>(
-            r#"{"text":"report","kind":"one_time","cron":"0 9 * * *","timezone":"UTC"}"#,
-        )?;
+    fn create_requires_an_explicit_nonempty_timezone() -> anyhow::Result<()> {
+        for timezone in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(" \t\n")),
+        ] {
+            let mut body = serde_json::json!({
+                "text": "report",
+                "kind": "one_time",
+                "cron": "0 9 * * *"
+            });
+            if let Some(timezone) = timezone {
+                body["timezone"] = timezone;
+            }
+            let request = serde_json::from_value::<CreateScheduleRequest>(body)?;
+            assert!(matches!(
+                CreateScheduleCommand::try_from(request),
+                Err(AppError::TimezoneRequired)
+            ));
+        }
+        Ok(())
+    }
 
-        assert_eq!(omitted.timezone, "UTC");
-        assert_eq!(
-            serde_json::to_value(omitted)?,
-            serde_json::to_value(explicit)?
-        );
+    #[test]
+    fn create_preserves_an_explicit_timezone() -> anyhow::Result<()> {
+        for timezone in ["UTC", "Asia/Kolkata"] {
+            let request = serde_json::from_value::<CreateScheduleRequest>(serde_json::json!({
+                "text": "report",
+                "kind": "one_time",
+                "cron": "0 9 * * *",
+                "timezone": timezone
+            }))?;
+            assert_eq!(CreateScheduleCommand::try_from(request)?.timezone, timezone);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn patch_can_omit_timezone() -> anyhow::Result<()> {
+        let request: PatchScheduleRequest = serde_json::from_str(r#"{"text":"new"}"#)?;
+        let command = PatchScheduleCommand::from(request);
+        assert!(command.timezone.is_none());
         Ok(())
     }
 

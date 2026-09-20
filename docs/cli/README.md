@@ -98,7 +98,7 @@ stateless and does not read or create these CLI state files.
 
 ```sh
 remind webhook subscribe 'https://example.com/reminders'
-remind create --text 'Review the build' --cron '*/15 * * * *'
+remind create --text 'Review the build' --cron '*/15 * * * *' --timezone Asia/Kolkata
 remind list
 remind get <reminder-id>
 remind edit <reminder-id> --text 'Review the release build'
@@ -119,8 +119,12 @@ subscribe`, `webhook list`, and `webhook unsubscribe`. A reminder may be created
 before any receiver is configured.
 
 For a one-time reminder, add `--kind one-time`. It fires at the first future cron
-match and enters the archive automatically. For a local wall-clock schedule, use
-`--timezone Asia/Kolkata` or another IANA identifier. UTC is the default.
+match and enters the archive automatically. Every creation requires an IANA
+timezone: provide `--timezone Asia/Kolkata` or another IANA identifier. To schedule
+in UTC, provide `--timezone UTC` explicitly. Omitting the flag or passing a blank
+timezone returns an error explaining how to supply it. Invalid IANA identifiers
+are also rejected. Editing an existing reminder may omit `--timezone` to retain
+its stored timezone.
 
 `pause` and `resume` accept up to 100 UUIDs and are atomic. A Carbon cannot create
 or mutate reminders; it can use `silicons`, `list`, `get`, and `executions` for any
@@ -137,7 +141,7 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 | `auth whoami` | Live IAM identity and permissions |
 | `auth refresh` | Rotate current refresh token |
 | `auth logout` | Revoke and forget this session |
-| `create` | Required `--text`, `--cron`; `--kind`, `--timezone` |
+| `create` | Required `--text`, `--cron`, `--timezone`; optional `--kind` |
 | `list` | `--silicon`, `--archived`, `--status`, `--cursor`, `--limit` |
 | `get <id>` | Full reminder details |
 | `edit <id>` | At least one of `--text`, `--cron`, `--timezone`, `--kind` |

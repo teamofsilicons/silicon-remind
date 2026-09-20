@@ -89,7 +89,7 @@ receiver and will begin fan-out delivery when subscriptions are added.
 
 | Method and path | Required input | Result |
 | --- | --- | --- |
-| `POST /schedules` | `text`, `kind`, `cron`; `Idempotency-Key` | `201` reminder |
+| `POST /schedules` | `text`, `kind`, `cron`, `timezone`; `Idempotency-Key` | `201` reminder |
 | `GET /schedules` | Optional filters below | Page of reminders |
 | `GET /schedules/{id}` | Reminder UUID | Visible reminder |
 | `PATCH /schedules/{id}` | Changed fields; `Idempotency-Key` | Updated reminder |
@@ -110,8 +110,13 @@ Creation example:
 
 `kind` is `recurring` or `one_time`. Both use five-field Linux cron in the order
 minute, hour, day of month, month, day of week. One-time means the first future
-matching occurrence, not a separate timestamp format. Omitted timezone means UTC.
-Use an IANA identifier such as `Asia/Kolkata`, not a display name or fixed offset.
+matching occurrence, not a separate timestamp format. An IANA timezone is
+mandatory on creation: provide `"timezone": "Asia/Kolkata"` or another IANA
+identifier in the JSON body. To schedule in UTC, provide `"timezone": "UTC"`
+explicitly. Missing, null, or blank timezones return `422 timezone_required` with
+guidance to supply the `timezone` JSON field. Invalid identifiers are also
+rejected; Remind does not choose a default. Display names and fixed offsets are
+not IANA identifiers.
 
 Cron supports Linux/Vixie lists, ranges, steps and named months/weekdays. Sunday
 is 0 or 7. When both day-of-month and day-of-week are restricted, either may

@@ -51,6 +51,11 @@ Webhook subscriptions are optional; use `configure_webhook` or
 `subscribe_webhook` when a receiver should receive deliveries. A Carbon may log
 in and read reminders but cannot create one.
 
+`CreateScheduleRequest.timezone` is mandatory. Set it to an IANA identifier such
+as `"Asia/Kolkata".to_owned()` or `"UTC".to_owned()` explicitly; there is no default.
+Blank or invalid identifiers return an input error. `PatchScheduleRequest` may
+omit the timezone to retain the reminder's existing value.
+
 Use `anonymous.iam().await?` before login to discover the server's `app_id` for
 obtaining an IAM SLT. `client.login_status().await?` verifies the attached session
 and returns `LoginStatus { authenticated: true, identity: Some(identity) }` on

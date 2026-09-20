@@ -13,6 +13,9 @@ pub enum AppError {
     /// Request input is syntactically valid but violates domain validation.
     #[error("request validation failed")]
     Validation,
+    /// Reminder creation omitted its mandatory IANA timezone.
+    #[error("providing an IANA timezone is mandatory")]
+    TimezoneRequired,
     /// Credential is absent, malformed, inactive, expired, or revoked.
     #[error("authentication is required")]
     Unauthenticated,
@@ -106,7 +109,7 @@ impl AppError {
     #[must_use]
     pub const fn status_code(&self) -> StatusCode {
         match self {
-            Self::Validation => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Validation | Self::TimezoneRequired => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
@@ -126,6 +129,7 @@ impl AppError {
     pub fn code(&self) -> Cow<'static, str> {
         match self {
             Self::Validation => Cow::Borrowed("validation_failed"),
+            Self::TimezoneRequired => Cow::Borrowed("timezone_required"),
             Self::Unauthenticated => Cow::Borrowed("unauthenticated"),
             Self::Forbidden => Cow::Borrowed("forbidden"),
             Self::NotFound => Cow::Borrowed("not_found"),
@@ -144,6 +148,9 @@ impl AppError {
     fn public_message(&self) -> &'static str {
         match self {
             Self::Validation => "The request contains invalid data.",
+            Self::TimezoneRequired => {
+                "Providing a timezone is mandatory. Set the `timezone` JSON field to an IANA timezone identifier, for example \"timezone\": \"Asia/Kolkata\"."
+            }
             Self::Unauthenticated => "Authentication is required.",
             Self::Forbidden => "The actor is not authorized for this action.",
             Self::NotFound => "The requested resource was not found.",

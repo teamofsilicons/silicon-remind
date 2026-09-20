@@ -8,7 +8,7 @@ Create or import the `tos>remind` application in an [IAM test environment](https
 remind env use --secret-stdin < /private/remind-app-secret
 remind login '<existing-test-public-id-or-test-SLT>'
 remind login status --json
-remind create --text 'Sandbox check' --cron '*/5 * * * *'
+remind create --text 'Sandbox check' --cron '*/5 * * * *' --timezone Asia/Kolkata
 remind list --json
 remind env exit
 ```

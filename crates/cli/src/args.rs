@@ -1,12 +1,46 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 
+const TIMEZONE_GUIDANCE: &str = "Timezone is mandatory when creating a reminder. Provide an IANA timezone identifier, for example --timezone Asia/Kolkata or --timezone UTC.";
+
+fn nonblank_timezone(value: &str) -> Result<String, &'static str> {
+    if value.trim().is_empty() {
+        Err(TIMEZONE_GUIDANCE)
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+pub fn with_timezone_guidance(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+
+    if matches!(
+        error.kind(),
+        ErrorKind::MissingRequiredArgument | ErrorKind::InvalidValue
+    ) {
+        let timezone_missing = match error.get(ContextKind::InvalidArg) {
+            Some(ContextValue::String(arg)) => arg == "--timezone <IANA_TIMEZONE>",
+            Some(ContextValue::Strings(args)) => {
+                args.iter().any(|arg| arg == "--timezone <IANA_TIMEZONE>")
+            }
+            _ => false,
+        };
+        if timezone_missing {
+            error.insert(
+                ContextKind::Suggested,
+                ContextValue::StyledStrs(vec![TIMEZONE_GUIDANCE.into()]),
+            );
+        }
+    }
+    error
+}
+
 #[derive(Parser)]
 #[command(
     name = "remind",
     version,
     about = "Create and manage Silicon reminders through Silicon IAM.",
-    long_about = "Silicon Remind schedules one-time or recurring reminders using five-field Linux cron. Silicons manage their own reminders; Carbons and Silicons can read their organization's reminders.\n\nStart with: remind login <slt>\nOptionally subscribe a receiver: remind webhook subscribe <url>\nCreate a reminder: remind create --text 'Check the build' --cron '*/5 * * * *'\nUse any command in a saved sandbox: remind --test <test_id> <command>.",
+    long_about = "Silicon Remind schedules one-time or recurring reminders using five-field Linux cron. Silicons manage their own reminders; Carbons and Silicons can read their organization's reminders.\n\nStart with: remind login <slt>\nOptionally subscribe a receiver: remind webhook subscribe <url>\nCreate a reminder: remind create --text 'Check the build' --cron '*/5 * * * *' --timezone Asia/Kolkata\nUse any command in a saved sandbox: remind --test <test_id> <command>.",
     after_help = "Authentication:\n  remind iam --json                 Discover the IAM app_id before obtaining an SLT\n  remind login <slt>                Exchange your IAM short-lived token\n  remind login status --json        Verify the saved Carbon or Silicon identity\n\nLocal state defaults to $SILICON_HOME/.remind when SILICON_HOME is set, otherwise ~/.remind. Use remind config home <directory> to select an existing directory.\n\nRun remind <command> --help for command-specific options and examples.\nManuals: remind docs <topic>\nDocs: https://docs.remind.teamofsilicons.com\nSource: https://github.com/teamofsilicons/silicon-remind\nRust: https://crates.io/crates/silicon-remind-client",
     subcommand_required = true,
     arg_required_else_help = true
@@ -79,14 +113,15 @@ pub enum Command {
     },
     /// Create a reminder owned by the signed-in Silicon.
     #[command(
-        after_help = "Examples:\n  remind create --text 'Daily standup' --cron '0 9 * * MON-FRI' --timezone Asia/Kolkata\n  remind create --text 'One reminder' --cron '30 16 * * *' --kind one-time\n\nAdd optional receivers with remind webhook subscribe <url>."
+        after_help = "Examples:\n  remind create --text 'Daily standup' --cron '0 9 * * MON-FRI' --timezone Asia/Kolkata\n  remind create --text 'One reminder' --cron '30 16 * * *' --kind one-time --timezone UTC\n\nTimezone is mandatory for both recurring and one-time reminders. Use an IANA timezone identifier, such as Asia/Kolkata or UTC.\nAdd optional receivers with remind webhook subscribe <url>."
     )]
     Create {
         #[arg(long)]
         text: String,
         #[arg(long)]
         cron: String,
-        #[arg(long, default_value = "UTC")]
+        /// Mandatory IANA timezone identifier, for example Asia/Kolkata or UTC.
+        #[arg(long, value_name = "IANA_TIMEZONE", value_parser = nonblank_timezone)]
         timezone: String,
         #[arg(long, value_enum, default_value = "recurring")]
         kind: Kind,
@@ -360,4 +395,83 @@ pub enum Daemon {
     Status,
     /// Retired: use `honeycomb update 'tos>remind'`.
     Run,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command, with_timezone_guidance};
+    use clap::Parser as _;
+
+    #[test]
+    fn create_rejects_missing_or_blank_timezone_with_actionable_guidance() {
+        for kind in ["recurring", "one-time"] {
+            for timezone_args in [
+                vec![],
+                vec!["--timezone"],
+                vec!["--timezone", ""],
+                vec!["--timezone", "   "],
+            ] {
+                let mut args = vec![
+                    "remind",
+                    "create",
+                    "--text",
+                    "Check the build",
+                    "--cron",
+                    "0 9 * * *",
+                    "--kind",
+                    kind,
+                ];
+                args.extend(timezone_args);
+                let Err(error) = Cli::try_parse_from(args).map_err(with_timezone_guidance) else {
+                    panic!("create must reject a missing or blank timezone");
+                };
+                assert_eq!(error.exit_code(), 2);
+                let message = error.to_string();
+                assert!(message.contains("Timezone is mandatory"), "{message}");
+                assert!(message.contains("IANA timezone identifier"), "{message}");
+                assert!(message.contains("--timezone Asia/Kolkata"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn create_preserves_explicit_timezone_for_both_schedule_kinds() -> anyhow::Result<()> {
+        for kind in ["recurring", "one-time"] {
+            for supplied_timezone in ["Asia/Kolkata", "UTC"] {
+                let cli = Cli::try_parse_from([
+                    "remind",
+                    "create",
+                    "--text",
+                    "Check the build",
+                    "--cron",
+                    "0 9 * * *",
+                    "--kind",
+                    kind,
+                    "--timezone",
+                    supplied_timezone,
+                ])?;
+                let Command::Create { timezone, .. } = cli.command else {
+                    panic!("expected create command");
+                };
+                assert_eq!(timezone, supplied_timezone);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn edit_without_timezone_leaves_it_unchanged() -> anyhow::Result<()> {
+        let cli = Cli::try_parse_from([
+            "remind",
+            "edit",
+            "00000000-0000-4000-8000-000000000001",
+            "--text",
+            "Updated reminder",
+        ])?;
+        let Command::Edit { timezone, .. } = cli.command else {
+            panic!("expected edit command");
+        };
+        assert!(timezone.is_none());
+        Ok(())
+    }
 }

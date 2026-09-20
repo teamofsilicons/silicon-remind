@@ -17,9 +17,6 @@ pub const MAX_SCHEDULE_STATUS_BATCH_SIZE: usize = 100;
 /// Number of days for which archived schedules are retained.
 pub const ARCHIVE_RETENTION_DAYS: i64 = 45;
 
-/// Canonical timezone used when a client omits one.
-pub const DEFAULT_TIMEZONE: &str = "UTC";
-
 /// Whether a cron expression materializes one occurrence or repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -35,6 +35,7 @@ export interface Field {
   value?: string;
   placeholder?: string;
   required?: boolean;
+  requiredMessage?: string;
   hint?: string;
   options?: { value: string; label: string }[];
 }
@@ -107,6 +108,14 @@ export function Modal(p: {
                           type={f.type || "text"}
                           value={f.value || ""}
                           required={f.required}
+                          onInvalid={(e) => {
+                            if (
+                              f.requiredMessage &&
+                              e.currentTarget.validity.valueMissing
+                            )
+                              e.currentTarget.setCustomValidity(f.requiredMessage);
+                          }}
+                          onInput={(e) => e.currentTarget.setCustomValidity("")}
                           placeholder={f.placeholder}
                           autocomplete={
                             f.type === "password" ? "off" : undefined

@@ -8,9 +8,10 @@ and execution state in PostgreSQL, and submits signed events with stable executi
 configured webhook receiver when occurrences become due.
 
 Both reminder kinds use five-field Linux cron syntax. Clients select
-`one_time` or `recurring` explicitly and may omit the IANA timezone, in which
-case Remind canonicalizes it to UTC before calculating and storing the next
-occurrence.
+`one_time` or `recurring` explicitly and must provide an IANA timezone such as
+`Asia/Kolkata` or `UTC` when creating a reminder. Remind rejects a missing or
+blank timezone; it has no default timezone. The next occurrence is calculated
+in that timezone and stored in UTC.
 
 An owner Silicon can pause or resume one reminder through its individual PATCH
 operation, or atomically apply the same status to a batch of up to 100 owned
@@ -143,7 +144,7 @@ Build the public client and CLI with `cargo build --workspace`. The executable i
 ```sh
 remind login <slt>
 remind webhook subscribe https://example.com/reminders --secret-stdin < /private/webhook-secret
-remind create --text 'Check the build' --cron '*/5 * * * *'
+remind create --text 'Check the build' --cron '*/5 * * * *' --timezone Asia/Kolkata
 ```
 
 `remind login <slt>` needs no `--org`. The organization comes from `--org` when given,

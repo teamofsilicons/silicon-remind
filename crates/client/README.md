@@ -17,6 +17,10 @@ The production origin is `https://backend.remind.teamofsilicons.com`.
 The client does not persist sessions. The companion `silicon-remind-cli` manages
 permission-restricted local state and automatic refresh.
 
+Creating a reminder requires an explicit IANA timezone in
+`CreateScheduleRequest.timezone`, such as `Asia/Kolkata` or `UTC`. There is no
+default timezone.
+
 The package includes complete API, client, CLI, IAM, webhook and testing guides in
 `docs/`. Start with the [client guide](https://docs.remind.teamofsilicons.com/client/)
 or the [API reference](https://docs.rs/silicon-remind-client).

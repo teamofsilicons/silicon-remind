@@ -64,10 +64,11 @@ pub async fn create(
 ) -> Result<Response, AppError> {
     let Json(request) = body.map_err(|error| map_json_rejection(&error))?;
     let hash = request_hash(&request)?;
+    let command = request.try_into()?;
     let idempotency_key = idempotency_key(&headers)?;
     let mutation = state
         .schedules
-        .create(&actor, request.into(), idempotency_key, hash)
+        .create(&actor, command, idempotency_key, hash)
         .await?;
     mutation_response(mutation.status_code, mutation.body)
 }
@@ -207,9 +208,53 @@ fn map_json_rejection(rejection: &rejection::JsonRejection) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use http::{HeaderMap, HeaderValue};
+    use axum::{Json, body::Body, extract::FromRequest as _, response::IntoResponse as _};
+    use http::{HeaderMap, HeaderValue, Request, StatusCode};
+    use http_body_util::BodyExt as _;
 
-    use super::idempotency_key;
+    use super::{idempotency_key, map_json_rejection};
+    use crate::{api::models::CreateScheduleRequest, domain::CreateScheduleCommand};
+
+    #[tokio::test]
+    async fn create_without_timezone_returns_actionable_json_error() -> anyhow::Result<()> {
+        for timezone in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(" \t\n")),
+        ] {
+            let mut body = serde_json::json!({
+                "text": "report",
+                "kind": "one_time",
+                "cron": "0 9 * * *"
+            });
+            if let Some(timezone) = timezone {
+                body["timezone"] = timezone;
+            }
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/schedules")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))?;
+            let Json(request) = Json::<CreateScheduleRequest>::from_request(request, &())
+                .await
+                .map_err(|error| map_json_rejection(&error))?;
+            let Err(error) = CreateScheduleCommand::try_from(request) else {
+                anyhow::bail!("creation accepted a missing timezone");
+            };
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = response.into_body().collect().await?.to_bytes();
+            let envelope: serde_json::Value = serde_json::from_slice(&body)?;
+            assert_eq!(envelope["error"]["code"], "timezone_required");
+            assert_eq!(
+                envelope["error"]["message"],
+                "Providing a timezone is mandatory. Set the `timezone` JSON field to an IANA timezone identifier, for example \"timezone\": \"Asia/Kolkata\"."
+            );
+            assert!(envelope["error"]["request_id"].is_string());
+        }
+        Ok(())
+    }
 
     #[test]
     fn duplicate_idempotency_headers_are_rejected() {

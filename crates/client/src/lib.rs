@@ -286,6 +286,9 @@ impl Client {
         input: &models::CreateScheduleRequest,
         mutation: &Mutation,
     ) -> Result<models::ScheduleResponse> {
+        if input.timezone.trim().is_empty() {
+            return Err(Error::Invalid(models::TIMEZONE_REQUIRED_MESSAGE.into()));
+        }
         self.json(
             self.mutation(Method::POST, "/api/v1/schedules", mutation)?
                 .json(input),
@@ -579,4 +582,29 @@ fn valid_test_secret(value: &str) -> bool {
             && value[4..]
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Client, Error, Mutation, models};
+
+    #[tokio::test]
+    async fn blank_create_timezone_is_rejected_before_network_access() {
+        let client = Client::new("http://127.0.0.1:1").expect("valid loopback origin");
+        for timezone in ["", "  "] {
+            let input = models::CreateScheduleRequest {
+                text: "Check the build".into(),
+                kind: models::ScheduleKind::Recurring,
+                timezone: timezone.into(),
+                cron: "0 9 * * *".into(),
+            };
+            let error = client
+                .create_reminder(&input, &Mutation::new())
+                .await
+                .expect_err("blank timezone must fail locally");
+            assert!(
+                matches!(error, Error::Invalid(ref message) if message == models::TIMEZONE_REQUIRED_MESSAGE)
+            );
+        }
+    }
 }

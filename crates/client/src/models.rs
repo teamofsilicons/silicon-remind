@@ -29,22 +29,45 @@ pub enum ScheduleSection {
 }
 /// Forward-compatible delivery status.
 pub type ExecutionStatus = String;
-fn default_timezone() -> String {
-    "UTC".to_owned()
-}
+pub(crate) const TIMEZONE_REQUIRED_MESSAGE: &str = "Providing a timezone is mandatory. Set CreateScheduleRequest.timezone to an IANA timezone identifier, for example \"Asia/Kolkata\" (the `timezone` field when using JSON).";
 
 /// Public CreateScheduleRequest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "CreateScheduleInput")]
 pub struct CreateScheduleRequest {
     /// Reminder content.
     pub text: String,
     /// One-time or recurring materialization behavior.
     pub kind: ScheduleKind,
-    /// IANA timezone identifier; omitted values use UTC.
-    #[serde(default = "default_timezone")]
+    /// Required IANA timezone identifier, for example `Asia/Kolkata` or `UTC`.
     pub timezone: String,
     /// Five-field Linux cron expression.
     pub cron: String,
+}
+
+#[derive(Deserialize)]
+struct CreateScheduleInput {
+    text: String,
+    kind: ScheduleKind,
+    timezone: Option<String>,
+    cron: String,
+}
+
+impl TryFrom<CreateScheduleInput> for CreateScheduleRequest {
+    type Error = &'static str;
+
+    fn try_from(input: CreateScheduleInput) -> std::result::Result<Self, Self::Error> {
+        let timezone = input
+            .timezone
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(TIMEZONE_REQUIRED_MESSAGE)?;
+        Ok(Self {
+            text: input.text,
+            kind: input.kind,
+            timezone,
+            cron: input.cron,
+        })
+    }
 }
 
 /// Public ScheduleResponse.
@@ -321,4 +344,49 @@ pub struct TelemetryEvent {
     pub success: bool,
     pub duration_ms: u64,
     pub status_code: Option<u16>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateScheduleRequest, PatchScheduleRequest, TIMEZONE_REQUIRED_MESSAGE};
+
+    #[test]
+    fn create_requires_an_explicit_timezone() {
+        let base = serde_json::json!({
+            "text": "Check the build",
+            "kind": "recurring",
+            "cron": "0 9 * * *"
+        });
+        for timezone in [
+            None,
+            Some(serde_json::Value::Null),
+            Some("".into()),
+            Some("  ".into()),
+        ] {
+            let mut input = base.clone();
+            if let Some(timezone) = timezone {
+                input["timezone"] = timezone;
+            }
+            let error = serde_json::from_value::<CreateScheduleRequest>(input)
+                .expect_err("creation without a timezone must fail");
+            assert!(error.to_string().contains(TIMEZONE_REQUIRED_MESSAGE));
+        }
+        for timezone in ["Asia/Kolkata", "UTC"] {
+            let mut input = base.clone();
+            input["timezone"] = timezone.into();
+            let request = serde_json::from_value::<CreateScheduleRequest>(input)
+                .expect("explicit timezone must be preserved");
+            assert_eq!(request.timezone, timezone);
+        }
+    }
+
+    #[test]
+    fn editing_text_does_not_replace_timezone() {
+        let request: PatchScheduleRequest =
+            serde_json::from_value(serde_json::json!({"text": "Updated reminder"}))
+                .expect("text-only edits remain valid");
+        assert!(request.timezone.is_none());
+        let encoded = serde_json::to_value(request).expect("patch serializes");
+        assert!(encoded.get("timezone").is_none());
+    }
 }

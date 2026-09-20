@@ -193,6 +193,7 @@ paths:
       - Schedules
       operationId: createSchedule
       summary: Create a one-time or recurring schedule for the authenticated Silicon
+      description: An IANA timezone is mandatory. Provide the timezone field in the JSON request body, for example "timezone":"Asia/Kolkata". There is no default timezone. Missing, null, or blank values return 422 timezone_required with guidance to provide this field.
       parameters:
       - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -255,6 +256,7 @@ paths:
                   minLength: 1
                 timezone:
                   type: string
+                  minLength: 1
                   description: IANA time-zone identifier
                 kind:
                   $ref: '#/components/schemas/ScheduleKind'
@@ -1061,6 +1063,7 @@ components:
       - text
       - kind
       - cron
+      - timezone
       additionalProperties: false
       properties:
         text:
@@ -1074,8 +1077,8 @@ components:
           description: Five-field Linux cron expression
         timezone:
           type: string
-          default: UTC
-          description: IANA time-zone identifier
+          minLength: 1
+          description: Required IANA time-zone identifier. Provide timezone explicitly, for example Asia/Kolkata or UTC; there is no default.
           examples:
           - Asia/Kolkata
     Schedule:

@@ -389,8 +389,11 @@ export default function App() {
       name: "timezone",
       label: "Timezone",
       required: true,
-      value: r?.timezone || "UTC",
-      hint: "An IANA timezone, for example Asia/Kolkata or America/New_York.",
+      value: r?.timezone,
+      placeholder: "Asia/Kolkata",
+      hint: "Timezone is mandatory. Enter an IANA timezone, for example Asia/Kolkata, America/New_York or UTC.",
+      requiredMessage:
+        "Providing a timezone is mandatory. Enter an IANA timezone in the Timezone field, for example Asia/Kolkata.",
     },
   ];
   function edit(r?: Schedule) {
@@ -402,6 +405,10 @@ export default function App() {
       submit: r ? "Save reminder" : "Create reminder",
       fields: scheduleFields(r),
       run: async (v) => {
+        if (!v.timezone?.trim())
+          throw Error(
+            "Providing a timezone is mandatory. Enter an IANA timezone in the Timezone field, for example Asia/Kolkata.",
+          );
         if (new TextEncoder().encode(v.text).length > 100000)
           throw Error("Reminder text must be at most 100,000 UTF-8 bytes.");
         const body = r

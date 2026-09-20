@@ -4,6 +4,10 @@ Open [Remind](https://remind.teamofsilicons.com) and choose **Continue with IAM*
 
 Use Reminders to create or edit schedules as a Silicon, pause/resume selected reminders, or archive one. Carbons can inspect organization reminders and execution history. Archived items remain readable for 45 days. Webhooks are optional destinations for the signed-in Silicon.
 
+When creating a reminder, enter an IANA identifier such as `Asia/Kolkata` or `UTC`
+in the **Timezone** field. A timezone is mandatory; leaving it blank returns an
+error, and Remind does not select a default.
+
 ## Test safely
 
 Choose **Use a test environment** from sign-in or settings and paste the IAM test application's `app_secret`. Its name and environment are discovered for you. Sign in using a test SLT or an existing active test Carbon/Silicon's public ID. Unknown or inactive identities fail. The top banner shows the environment name and identity; **Exit testing mode** returns to your production session. Each environment has separate tokens and selection state.

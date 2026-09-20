@@ -11,7 +11,7 @@ use std::io::{IsTerminal as _, Read as _};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let mut cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse().map_err(args::with_timezone_guidance) {
         Ok(cli) => cli,
         Err(error) => {
             let code = error.exit_code();

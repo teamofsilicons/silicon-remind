@@ -386,8 +386,13 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
                 .get("required")
                 .context("ScheduleCreate.required is missing")?,
             "ScheduleCreate.required",
-        )? == BTreeSet::from(["cron".to_owned(), "kind".to_owned(), "text".to_owned()]),
-        "ScheduleCreate must require text, kind, and cron"
+        )? == BTreeSet::from([
+            "cron".to_owned(),
+            "kind".to_owned(),
+            "text".to_owned(),
+            "timezone".to_owned(),
+        ]),
+        "ScheduleCreate must require text, kind, cron, and timezone"
     );
     ensure!(
         create.get("oneOf").is_none(),
@@ -404,8 +409,13 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
                 ))
             && document.pointer("/components/schemas/ScheduleCreate/properties/cron/type")
                 == Some(&Value::String("string".to_owned()))
-            && document.pointer("/components/schemas/ScheduleCreate/properties/timezone/default")
-                == Some(&Value::String("UTC".to_owned()))
+            && document.pointer("/components/schemas/ScheduleCreate/properties/timezone/type")
+                == Some(&Value::String("string".to_owned()))
+            && document.pointer("/components/schemas/ScheduleCreate/properties/timezone/minLength")
+                == Some(&json!(1))
+            && document
+                .pointer("/components/schemas/ScheduleCreate/properties/timezone/default")
+                .is_none()
             && document
                 .pointer("/components/schemas/ScheduleCreate/properties/run_at")
                 .is_none(),
@@ -658,8 +668,9 @@ fn assert_archive_contract(document: &Value) -> Result<()> {
 }
 
 fn assert_patch_uses_cron_timing(document: &Value) -> Result<()> {
-    let base = "/paths/~1schedules~1{schedule_id}/patch/requestBody/content/\
-                application~1json/schema/properties";
+    let schema = "/paths/~1schedules~1{schedule_id}/patch/requestBody/content/\
+                  application~1json/schema";
+    let base = format!("{schema}/properties");
     ensure!(
         document.pointer(&format!("{base}/kind/$ref"))
             == Some(&Value::String(
@@ -667,8 +678,15 @@ fn assert_patch_uses_cron_timing(document: &Value) -> Result<()> {
             ))
             && document.pointer(&format!("{base}/cron/type"))
                 == Some(&Value::String("string".to_owned()))
+            && document.pointer(&format!("{base}/timezone/type"))
+                == Some(&Value::String("string".to_owned()))
+            && document.pointer(&format!("{base}/timezone/minLength")) == Some(&json!(1))
+            && document.pointer(&format!("{schema}/required")).is_none()
+            && document
+                .pointer(&format!("{base}/timezone/default"))
+                .is_none()
             && document.pointer(&format!("{base}/run_at")).is_none(),
-        "PATCH must expose kind plus cron without run_at"
+        "PATCH must preserve optional timezone and kind plus cron without defaults or run_at"
     );
     Ok(())
 }

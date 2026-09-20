@@ -15,6 +15,9 @@ add one with `remind webhook subscribe <url>` when outbound delivery is wanted.
 Carbons and other Silicons can view reminders throughout their organization;
 only the owning Silicon can mutate them.
 
+Every `remind create` requires `--timezone` with an IANA identifier, such as
+`--timezone Asia/Kolkata` or `--timezone UTC`. There is no default timezone.
+
 The default origin is `https://backend.remind.teamofsilicons.com`. Preferences,
 rotating sessions and sandbox keys are stored under `{home}/.remind/` with restrictive
 permissions. Use `--test <id>` before ordinary commands for an isolated sandbox.
