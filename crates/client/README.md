@@ -29,6 +29,6 @@ The Rust client is a normal project dependency. Update it explicitly with Cargo 
 
 Licensed under Apache-2.0. Backend service source is separately licensed.
 
-This source is version 0.2.0; registry examples must use a version that has actually
+This source is version 0.3.0; registry examples must use a version that has actually
 been published. The source bundle includes sandbox discovery, bug-report receipts,
 and opt-out operational telemetry (`client.with_telemetry(false)`).

@@ -4,17 +4,21 @@
 
 Remind's current wire contract is **v1**. Request paths begin with `/api/v1`; clients may explicitly send `X-Remind-API-Version: 1`. The server rejects an unsupported or contradictory selection with HTTP 406 before running the handler. Responses identify the selected version with the same header. `GET /api/versions` advertises the implemented protocols, lifecycle states, and current version; the Rust client's `versions()` method exposes this catalog.
 
-The protocol is HTTPS with JSON. Use the published [OpenAPI document](../openapi.yaml) to generate consumers. Package versions and wire versions are independent: the new CLI/client source release is 0.2.0 while the HTTP API remains v1.
+The protocol is HTTPS with JSON. Use the published [OpenAPI document](../openapi.yaml) to generate consumers. Package versions and wire versions are independent: the current CLI/client release is 0.3.0 while the HTTP API remains v1.
 
 ## Compatibility matrix
 
 | Consumer | HTTP contract | Sandbox selection | Background updates |
 | --- | --- | --- | --- |
 | CLI/client 0.1.2 | v1 | Legacy Remind key | Usage-triggered CLI check |
-| CLI/client 0.2.0 source release | v1 | IAM app_secret or legacy key | OS-supervised CLI daemon |
+| CLI/client 0.3.0 | v1 | IAM app_secret or legacy key | Honeycomb-managed CLI; explicit Cargo update for client |
 | Current website | v1 | IAM app_secret or legacy key | Deployed by operator |
 
 Old optional-header consumers remain accepted. Existing paths, status codes, reminder semantics, and legacy keys remain supported. Additive response fields must be ignored by consumers. Changing required inputs, removing fields or endpoints, or changing permission semantics requires a new major wire contract and a documented migration path. Sandbox-only public-ID login never changes production authentication rules.
+
+## Timezone migration in 0.3.0
+
+Reminder creation now requires an explicit IANA timezone across the existing v1 API and all interfaces. Requests that previously relied on the UTC default must send `"timezone": "UTC"`, or the intended IANA identifier. CLI callers must add `--timezone UTC` (or another IANA identifier). Missing, null, empty, or whitespace-only API timezone values return HTTP 422 with code `timezone_required`. Existing reminders and text-only edits retain their saved timezone. This is an intentional tightening of the v1 create contract; the 0.3.0 package version signals the compatibility change.
 
 ## Deprecation and sunset
 
