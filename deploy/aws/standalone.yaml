@@ -180,6 +180,7 @@ Resources:
                 'REMIND_DATABASE_MAX_CONNECTIONS', 'REMIND_LOG_FILTER', 'REMIND_REQUEST_TIMEOUT_SECONDS',
                 'REMIND_WEBHOOK_CONNECT_TIMEOUT_MS', 'REMIND_WEBHOOK_REQUEST_TIMEOUT_MS',
                 'REMIND_WEBHOOK_MAX_RESPONSE_BYTES', 'REMIND_WORKER_MAX_DELIVERY_CONCURRENCY',
+                'REMIND_HONEYCOMB_BASE_URL', 'REMIND_HONEYCOMB_SERVICE_TOKEN',
             }
             values = {k: source[k] for k in allow if k in source}
             values.update({
@@ -207,7 +208,7 @@ Resources:
             }
             ${HostName} {
               encode gzip
-              @public path /health/* /api/* /webhook /webhook/
+              @public path /health/* /api/* /webhook /webhook/ /internal/honeycomb/organizations/*
               handle @public {
                 reverse_proxy remind-api:8080
               }

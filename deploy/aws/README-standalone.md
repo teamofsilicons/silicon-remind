@@ -14,6 +14,12 @@ security group. The runtime secret must contain these non-empty values:
 `REMIND_ENCRYPTION_KEYRING`, `REMIND_INTERNAL_API_TOKEN`,
 `REMIND_DATABASE_URL`, and `REMIND_TEST_DATABASE_URL`.
 
+Honeycomb shared testing additionally needs `REMIND_HONEYCOMB_BASE_URL` and a
+dedicated `REMIND_HONEYCOMB_SERVICE_TOKEN` in that secret. Configure the matching
+token and Remind participant in Honeycomb before enabling imports. Caddy exposes
+only `/internal/honeycomb/organizations/*` from the internal namespace; those
+handlers require the dedicated service token independently of user sessions.
+
 Build the ARM64 base image, then wrap it with `deploy/aws/Dockerfile.runtime`
 before pushing. The wrapper installs the AWS RDS CA bundle required by the
 production database URLs; the base image alone cannot connect to RDS.
@@ -97,5 +103,4 @@ curl --fail --show-error https://remind.teamofsilicons.com/ui/api/health/ready
 
 See [the initial frontend deployment record](frontend-2026-09-08.md).
 
-Current backend release: [0.1.2 IAM discovery and login status](../../docs/RELEASE_0.1.2.md).
-Current frontend release: [unscoped IAM sign-in](unscoped-login-2026-09-08.md).
+Current deployment: [0.3.0 explicit timezones](timezone-2026-09-20.md).
