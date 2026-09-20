@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     application::ports::{Clock, SystemClock},
-    config::Settings,
+    config::{RuntimeEnvironment, Settings},
     infrastructure::{
         crypto::SecretCipherKeyring,
         postgres::{self, PostgresRepository},
@@ -67,6 +67,7 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         webhook_client,
         encryption.clone(),
         delivery::DeliveryProcessorConfig {
+            production: settings.environment == RuntimeEnvironment::Production,
             worker_id: worker_id.clone(),
             lease_duration: settings.worker.lease_duration,
             max_concurrency: delivery_concurrency,

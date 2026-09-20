@@ -34,6 +34,7 @@ pub struct DeliveryProcessor {
     retry: RetrySettings,
     clock: Arc<dyn Clock>,
     metrics: Metrics,
+    production: bool,
     testing: bool,
     test_admission: Option<(
         crate::infrastructure::testing::TestEnvironments,
@@ -44,6 +45,7 @@ pub struct DeliveryProcessor {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeliveryProcessorConfig {
+    pub(crate) production: bool,
     pub(crate) worker_id: String,
     pub(crate) lease_duration: Duration,
     pub(crate) max_concurrency: u32,
@@ -71,6 +73,7 @@ impl DeliveryProcessor {
             retry: config.retry,
             clock,
             metrics,
+            production: config.production,
             testing: false,
             test_admission: None,
             test_webhook_urls: Vec::new(),
@@ -262,7 +265,7 @@ impl DeliveryProcessor {
             .map_err(|_| retryable("Webhook signing credential could not be decrypted"))?;
         let endpoint_url = Url::parse(endpoint_url.expose_secret())
             .map_err(|_| terminal("Webhook destination URL is malformed"))?;
-        if !destination_url_is_allowed(&endpoint_url, !self.testing) {
+        if !destination_url_is_allowed(&endpoint_url, self.production && !self.testing) {
             return Err(terminal("Webhook destination URL is not allowed"));
         }
         Ok(WebhookDestination {
@@ -343,11 +346,92 @@ fn terminal(reason: &'static str) -> WebhookDeliveryError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-    use crate::config::RetrySettings;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use chrono::Utc;
+    use secrecy::SecretString;
+    use uuid::Uuid;
 
-    use super::retry_delay;
+    use crate::{
+        application::ports::SystemClock,
+        config::RetrySettings,
+        infrastructure::{
+            crypto::{SecretCipherKeyring, destination_field_associated_data},
+            postgres::{HookDestinationRow, PostgresRepository},
+            webhook::{WebhookClient, WebhookDeliveryError},
+        },
+        metrics::Metrics,
+    };
+
+    use super::{DeliveryProcessor, DeliveryProcessorConfig, retry_delay};
+
+    #[tokio::test]
+    async fn decrypted_destination_respects_development_production_and_sandbox_policy()
+    -> anyhow::Result<()> {
+        let encryption = SecretCipherKeyring::from_base64url(
+            1,
+            &BTreeMap::from([(1, SecretString::from(URL_SAFE_NO_PAD.encode([7; 32])))]),
+        )?;
+        let repository = PostgresRepository::new(
+            sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://localhost/unused")?,
+        );
+        let mut processor = DeliveryProcessor::new(
+            repository,
+            WebhookClient::new(Duration::from_secs(1), Duration::from_secs(1), 1024)?,
+            encryption.clone(),
+            DeliveryProcessorConfig {
+                production: false,
+                worker_id: "policy-test".into(),
+                lease_duration: Duration::from_secs(60),
+                max_concurrency: 1,
+                retry: policy(),
+            },
+            Arc::new(SystemClock),
+            Metrics::new(),
+        );
+        for scheme in ["http", "https"] {
+            let endpoint = format!("{scheme}://127.0.0.1:8787/reminders");
+            let url = encryption.encrypt(
+                &SecretString::from(endpoint.clone()),
+                &destination_field_associated_data("test", "clock:test", "endpoint_url"),
+            )?;
+            let secret = encryption.encrypt(
+                &SecretString::from("fixture-signing-secret"),
+                &destination_field_associated_data("test", "clock:test", "signing_secret"),
+            )?;
+            let now = Utc::now();
+            let row = HookDestinationRow {
+                id: Uuid::nil(),
+                org_id: "test".into(),
+                owner_principal_id: Uuid::nil(),
+                silicon_id: "clock:test".into(),
+                endpoint_url_ciphertext: url.ciphertext,
+                endpoint_url_nonce: url.nonce,
+                signing_secret_ciphertext: secret.ciphertext,
+                signing_secret_nonce: secret.nonce,
+                encryption_key_version: 1,
+                version: 1,
+                disabled_at: None,
+                purge_after: None,
+                created_at: now,
+                updated_at: now,
+            };
+            for production in [false, true] {
+                for testing in [false, true] {
+                    processor.production = production;
+                    processor.testing = testing;
+                    let result = processor.decrypt_destination(&row);
+                    if production && !testing && scheme == "http" {
+                        assert!(matches!(result, Err(WebhookDeliveryError::Terminal { .. })));
+                    } else {
+                        assert_eq!(result?.endpoint_url.as_str(), endpoint);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     fn policy() -> RetrySettings {
         RetrySettings {
