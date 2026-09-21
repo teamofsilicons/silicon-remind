@@ -11,6 +11,8 @@ use std::{
 
 #[derive(Serialize, Deserialize)]
 pub struct StoredSession {
+    #[serde(default)]
+    pub refresh_started_at: Option<i64>,
     pub session: Session,
     pub expires_at: i64,
     pub org: String,

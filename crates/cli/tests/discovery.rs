@@ -268,6 +268,52 @@ async fn status_refreshes_expired_sandbox_session_in_the_same_context() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_and_legacy_refresh_replays_are_renewed_before_status() -> Result<()> {
+    for started in [Value::Null, json!(1)] {
+        let home = TempDir::new()?;
+        let server = MockServer::start().await;
+        save(home.path(), &server.uri(), true, None)?;
+        let state_path = home.path().join(".remind/state.json");
+        let key = format!("{}#production", server.uri());
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+        state["sessions"][&key]["pending_refresh_key"] = json!("original-refresh-attempt");
+        state["sessions"][&key]["refresh_started_at"] = started;
+        fs::write(&state_path, state.to_string())?;
+        for (old, new) in [("refresh-fixture", "replayed"), ("replayed", "fresh")] {
+            let mut tokens = session();
+            tokens["access_token"] = json!(format!("access-{new}"));
+            tokens["refresh_token"] = json!(new);
+            Mock::given(method("POST"))
+                .and(path("/api/v1/auth/refresh"))
+                .and(wiremock::matchers::body_json(json!({"refresh_token":old})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/v1/auth/me"))
+            .and(header("authorization", "Bearer access-fresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            success(
+                cli(home.path())
+                    .args(["login", "status", "--json"])
+                    .output()?
+            )?["authenticated"],
+            true
+        );
+        let state: Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+        assert_eq!(state["sessions"][&key]["session"]["refresh_token"], "fresh");
+        assert!(state["sessions"][&key]["refresh_started_at"].is_null());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_distinguishes_rejected_authority_from_service_failures() -> Result<()> {
     for expired in [false, true] {
         for code in [401, 403, 503] {

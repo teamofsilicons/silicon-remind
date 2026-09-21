@@ -827,21 +827,37 @@ async fn refresh_session(
     client: &Client,
     requested: Option<&Mutation>,
 ) -> anyhow::Result<()> {
-    let stored = store
-        .state
-        .sessions
-        .get_mut(key)
-        .context("no saved session")?;
-    let mutation = match &stored.pending_refresh_key {
-        Some(pending) => Mutation::with_key(pending.clone())?,
-        None => requested.cloned().unwrap_or_default(),
-    };
-    stored.pending_refresh_key = Some(mutation.key().into());
-    let token = stored.session.refresh_token.clone();
-    let org = stored.org.clone();
-    store.save()?;
-    let session = client.refresh(&token, &mutation).await?;
-    save_session(store, key, session, org)
+    let mut requested = requested.cloned();
+    for _ in 0..2 {
+        let stored = store
+            .state
+            .sessions
+            .get_mut(key)
+            .context("no saved session")?;
+        let started_at = stored.refresh_started_at.unwrap_or_else(|| {
+            if stored.pending_refresh_key.is_some() {
+                0
+            } else {
+                chrono::Utc::now().timestamp()
+            }
+        });
+        stored.refresh_started_at = Some(started_at);
+        let mutation = match &stored.pending_refresh_key {
+            Some(pending) => Mutation::with_key(pending.clone())?,
+            None => requested.take().unwrap_or_default(),
+        };
+        stored.pending_refresh_key = Some(mutation.key().into());
+        let token = stored.session.refresh_token.clone();
+        let org = stored.org.clone();
+        store.save()?;
+        let session = client.refresh(&token, &mutation).await?;
+        let expires_at = started_at.saturating_add(session.expires_in.max(0));
+        save_session_at(store, key, session, org, expires_at)?;
+        if expires_at > chrono::Utc::now().timestamp() + 30 {
+            return Ok(());
+        }
+    }
+    bail!("refreshed access token has no usable lifetime; retry the command")
 }
 
 fn save_session(
@@ -854,6 +870,16 @@ fn save_session(
         .timestamp()
         .checked_add(session.expires_in)
         .context("invalid session expiry")?;
+    save_session_at(store, key, session, org, expires_at)
+}
+
+fn save_session_at(
+    store: &mut Store,
+    key: &str,
+    session: models::Session,
+    org: String,
+    expires_at: i64,
+) -> anyhow::Result<()> {
     store.state.sessions.insert(
         key.into(),
         StoredSession {
@@ -861,6 +887,7 @@ fn save_session(
             org,
             expires_at,
             pending_refresh_key: None,
+            refresh_started_at: None,
         },
     );
     store.save()
