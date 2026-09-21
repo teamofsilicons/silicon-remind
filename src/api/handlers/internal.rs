@@ -571,6 +571,20 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn canonical_identity_aggregate_is_recorded_without_uuid_conversion() -> anyhow::Result<()> {
+        let payload = json!({
+            "spec_version":"1.0", "event_id":uuid::Uuid::now_v7(),
+            "event_type":"carbon.updated.v1", "occurred_at":"2026-09-21T00:00:00Z",
+            "aggregate":{"type":"carbon","id":"person","version":1},
+            "data":{"org_id":"alpha"}
+        });
+        let event: IamWebhookEvent = serde_json::from_value(payload.clone())?;
+        assert_eq!(event.aggregate.id, "person");
+        assert!(!prepare_iam_event(&event, payload, [0; 32], received_at())?.1);
+        Ok(())
+    }
+
     fn received_at() -> chrono::DateTime<Utc> {
         match Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).single() {
             Some(value) => value,

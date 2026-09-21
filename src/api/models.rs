@@ -427,13 +427,24 @@ fn is_versioned_iam_event_name(value: &str) -> bool {
 /// Aggregate metadata carried by each IAM webhook event.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct IamWebhookAggregate {
-    /// IAM aggregate UUID.
-    pub id: Uuid,
+    /// Bounded IAM aggregate key: a resource UUID or canonical identity ID.
+    #[serde(deserialize_with = "deserialize_aggregate_id")]
+    pub id: String,
     /// Stable aggregate type.
     #[serde(rename = "type")]
     pub aggregate_type: String,
     /// Positive aggregate-local ordering version.
     pub version: i64,
+}
+
+fn deserialize_aggregate_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let id = String::deserialize(deserializer)?;
+    if id.is_empty() || id.len() > 255 || id.trim() != id {
+        return Err(serde::de::Error::custom("invalid IAM aggregate key"));
+    }
+    Ok(id)
 }
 
 /// Durable internal-event acceptance response.
