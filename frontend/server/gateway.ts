@@ -272,23 +272,22 @@ export function createGateway(config: {
           }
         }
       }
-      async function authorizedRemote(path: string, c: Context, method = "GET", body?: unknown, mutation?: string) {
-        try { return await remote(path, c, method, body, mutation); }
+      async function authorizedRemote(path: string, c: Context, method = "GET", body?: unknown, mutation?: string, unscoped = false) {
+        const send = () => remote(path, unscoped ? { ...c, org: "" } : c, method, body, mutation);
+        try { return await send(); }
         catch (error: any) {
           // Uncommitted sign-in/organization candidates must not rotate credentials
           // that are not yet part of the persisted session. Failed discovery
           // leaves the existing signed-in context intact.
           if (error.status !== 401 || !c.refresh || !Object.values(state.contexts).includes(c)) throw error;
           await authenticated(c, true);
-          return remote(path, c, method, body, mutation);
+          return send();
         }
       }
       async function selectOrganization(c: Context, requested?: string) {
-        const organization = c.org;
-        c.org = "";
-        let result;
-        try { result = await authorizedRemote("/api/v1/auth/organizations", c); }
-        finally { c.org = organization; }
+        // Discovery omits organization routing without changing the saved selection.
+        // A failed refresh must retain that selection across restart as well.
+        const result = await authorizedRemote("/api/v1/auth/organizations", c, "GET", undefined, undefined, true);
         const organizations: string[] = result.items.map((item: any) => item.org_id);
         if (requested !== undefined && !organizations.includes(requested))
           throw Object.assign(Error("This organization has not been authorized in IAm"), { status: 403 });

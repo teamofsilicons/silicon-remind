@@ -253,7 +253,7 @@ test("app_secret discovery keeps testing and production sessions separate and fa
       res.end(JSON.stringify({access_token:testing?"test-access":"production-access",refresh_token:"private-refresh",expires_in:3600}));
     } else if (req.url === "/api/v1/auth/organizations") {
       assert.equal(req.headers.authorization, "Bearer " + (testing?"test-access":"production-access"));
-      res.end(JSON.stringify({items:[{org_id:"tos"}]}));
+      res.end(JSON.stringify({items:[{org_id:"tos"},{org_id:"beta"}]}));
     } else if (req.url === "/api/v1/auth/me") {
       res.end(JSON.stringify({public_id:testing?"test-person":"production-person",org_id:"tos",actor_type:"carbon",can_manage_reminders:false}));
     } else { res.writeHead(404); res.end("{}"); }
@@ -304,9 +304,9 @@ test("refresh outage survives restart with its original retry identity and sessi
     } else if (rejectAccess && req.headers.authorization === "Bearer old-access") {
       res.statusCode=401;res.end(JSON.stringify({error:{code:"unauthenticated"}}));
     } else if (req.url === "/api/v1/auth/organizations") {
-      res.end(JSON.stringify({items:[{org_id:"tos"}]}));
+      res.end(JSON.stringify({items:[{org_id:"tos"},{org_id:"beta"}]}));
     } else if (req.url === "/api/v1/auth/me") {
-      res.end(JSON.stringify({public_id:"actor",org_id:"tos",actor_type:"carbon"}));
+      res.end(JSON.stringify({public_id:"actor",org_id:req.headers["x-org-id"],actor_type:"carbon"}));
     } else { res.statusCode=404;res.end("{}"); }
   });
   const upstreamUrl = await listen(upstream), directory = await mkdtemp(join(tmpdir(), "remind-refresh-"));
@@ -321,6 +321,7 @@ test("refresh outage survives restart with its original retry identity and sessi
   };
   try {
     assert.equal((await call("/ui/login",{slt:"example-login"})).status,200);
+    assert.equal((await call("/ui/organization",{org:"beta"})).status,200);
     rejectAccess=true;
     const outage=await call("/ui/session");assert.equal(outage.status,503);
     assert.ok(cookie.includes("remind_session="));
@@ -328,7 +329,9 @@ test("refresh outage survives restart with its original retry identity and sessi
     handler=createGateway(config);
     refreshStatus=200;
     const recovered=await call("/ui/session");assert.equal(recovered.status,200);
-    assert.equal((await recovered.json()).identity.public_id,"actor");
+    const restored=await recovered.json();
+    assert.equal(restored.identity.public_id,"actor");
+    assert.equal(restored.identity.org_id,"beta");
     assert.equal(refreshes,2);assert.equal(keys[0],keys[1]);
     assert.ok(recovered.headers.get("set-cookie")?.includes("Max-Age=604800"));
   } finally {await close(server);await close(upstream);await rm(directory,{recursive:true,force:true});}
