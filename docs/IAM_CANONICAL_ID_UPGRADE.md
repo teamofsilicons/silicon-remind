@@ -18,3 +18,5 @@ The import fails rather than overwriting an existing canonical/local-key disagre
 Signed retained webhook deliveries may contain old UUID references. New membership-removal tombstones resolve `resource.membership_id`, or the retained membership UUID map, to the same local owner key. This legacy notification support does not permit UUID authentication.
 
 For retained testing worlds, `--testing-environment-id` always selects the upstream IAM environment in the trusted export. When the Remind world ID differs, also pass `--local-environment-id REMIND_WORLD_UUID`; this selects `remind_test_<local UUID without hyphens>`. The importer verifies the exact `(id, iam_environment_id)` pair in `public.testing_environments` under a transaction lock before applying any migration or binding. Omission means the IDs are equal and still requires that registered pair. A mismatched or missing pair fails closed.
+
+The importer uses an inline JSON recordset inside the same transaction, so a schema owner does not need database `TEMP` privileges. It rejects conflicting imported public or local keys before writing.

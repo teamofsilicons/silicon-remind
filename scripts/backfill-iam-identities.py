@@ -6,8 +6,6 @@ The default is a rollback-only completeness check. Use --apply before IAM cutove
 Every test world must be imported separately; production is never a fallback.
 """
 import argparse
-import csv
-import io
 import hashlib
 import json
 import os
@@ -66,8 +64,13 @@ VALUES(8,'canonical iam identity bindings',true,decode('{digest}','hex'),0);
 
 
 def statement(rows, schema, apply, migrate=False, environment=None, local_environment=None):
-    data = io.StringIO()
-    csv.writer(data, lineterminator="\n").writerows(rows)
+    public_keys = {(kind, public) for kind, public, _ in rows}
+    local_keys = {(kind, local) for kind, _, local in rows}
+    if len(public_keys) != len(rows) or len(local_keys) != len(rows):
+        raise ValueError("trusted export contains conflicting identity bindings")
+    payload = json.dumps([dict(identity_kind=kind, public_id=public, local_id=local)
+        for kind, public, local in rows], separators=(",", ":")).replace("'", "''")
+    relation = f"SELECT * FROM jsonb_to_recordset('{payload}'::jsonb) AS imported(identity_kind text,public_id text,local_id uuid)"
     binding = ""
     if environment:
         # Control metadata lives in the same shared test database. Validate the
@@ -86,27 +89,26 @@ END $binding$;
     elif schema != "public":
         raise ValueError("testing schema requires an explicit IAM environment")
     return f'''BEGIN;
+SET LOCAL standard_conforming_strings = on;
 {binding}
 SET LOCAL search_path TO "{schema}";
 DO $$ BEGIN IF current_schema() IS DISTINCT FROM '{schema}' THEN
  RAISE EXCEPTION 'selected schema does not exist'; END IF; END $$;
 {schema_upgrade() if migrate else ''}
 LOCK TABLE iam_identity_bindings IN EXCLUSIVE MODE;
-CREATE TEMP TABLE identity_import (identity_kind text,public_id text,local_id uuid,
- PRIMARY KEY(identity_kind,public_id), UNIQUE(identity_kind,local_id)) ON COMMIT DROP;
-COPY identity_import FROM STDIN WITH (FORMAT csv);
-{data.getvalue()}\\.
 DO $$ BEGIN
- IF EXISTS(SELECT 1 FROM identity_import i JOIN iam_identity_bindings b
+ IF EXISTS(WITH identity_import AS ({relation})
+ SELECT 1 FROM identity_import i JOIN iam_identity_bindings b
  ON b.identity_kind=i.identity_kind AND (b.public_id=i.public_id OR b.local_id=i.local_id)
  WHERE b.public_id<>i.public_id OR b.local_id<>i.local_id) THEN
  RAISE EXCEPTION 'existing identity binding conflicts with trusted export'; END IF;
 END $$;
+WITH identity_import AS ({relation})
 INSERT INTO iam_identity_bindings SELECT * FROM identity_import
  ON CONFLICT(identity_kind,public_id) DO NOTHING;
 DO $$ BEGIN IF EXISTS(SELECT 1 FROM iam_unmapped_identity_keys()) THEN
  RAISE EXCEPTION 'retained identity references are absent from trusted export'; END IF; END $$;
-SELECT count(*) AS verified_bindings FROM identity_import;
+SELECT {len(rows)} AS verified_bindings;
 {'COMMIT' if apply else 'ROLLBACK'};
 '''
 
