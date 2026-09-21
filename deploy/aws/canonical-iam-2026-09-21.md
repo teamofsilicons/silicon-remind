@@ -109,5 +109,16 @@ SSM evidence:
 | Runtime owner, all schemas, container health | `cc12710c-eb53-4a7c-bc11-6357ea41b99c` |
 | Host credential cleanup | `696425e5-cd6f-432f-8771-ee28b9cbd7e9` |
 
-This record covers the compatible consumer rollout while IAM still served its
-previous contract. The coordinated IAM cutover has separate post-cutover checks.
+## Live verification after IAM cutover
+
+After IAM 3.0.0 (`deea75e3d8f9b331bf9ef25e5d39c6546ed5a9fd`) went live,
+Maharaj's existing pre-cutover session authenticated and refreshed normally
+through the installed CLI, without another login. The actor remained
+`chef:bricks` in `bricks`, and backend readiness returned 200.
+
+The immediate pre-pause baseline contained six active and eight archived
+reminders. All 14 remained accessible with the same resource IDs, ownership,
+content, timezone and scheduling/status fields after cutover. There were no
+missing or newly added rows during this comparison. The checks only read
+reminders and used normal saved-session refresh; no reminder mutation was made.
+The testing-environment verification scope remains as described above.
