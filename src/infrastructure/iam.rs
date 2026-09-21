@@ -386,10 +386,17 @@ impl IamClient {
 fn classify(error: silicon_iam_client::Error) -> IamError {
     match &error {
         silicon_iam_client::Error::Api(api)
-            if matches!(api.status, 400 | 401 | 403 | 404 | 422) =>
+            if matches!(api.status, 400 | 401)
+                && matches!(
+                    api.code.as_str(),
+                    "invalid_grant" | "refresh_token_reuse" | "unauthenticated" | "invalid_token"
+                ) =>
         {
             IamError::Unauthenticated
         }
+        // IAM authenticates Remind itself using deployment-owned app credentials.
+        // An invalid_client or other unknown 4xx is not proof that the user's
+        // refresh family is invalid. Returning 401 would make clients erase it.
         _ => IamError::Unavailable(error.into()),
     }
 }
@@ -403,6 +410,48 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
     };
+
+    #[test]
+    fn provider_failures_do_not_invalidate_a_saved_user_session() {
+        for (status, code) in [
+            (401, "invalid_client"),
+            (400, "invalid_request"),
+            (401, "unknown_auth_failure"),
+            (403, "forbidden"),
+            (404, "not_found"),
+            (422, "validation_error"),
+            (503, "service_unavailable"),
+        ] {
+            let error = silicon_iam_client::ApiError {
+                status,
+                code: code.to_owned(),
+                message: "provider response".to_owned(),
+                details: None,
+                request_id: None,
+            };
+            assert!(matches!(classify(error.into()), IamError::Unavailable(_)));
+        }
+    }
+
+    #[test]
+    fn explicit_expiry_or_reuse_still_ends_the_user_session() {
+        for (status, code) in [
+            (400, "invalid_grant"),
+            (401, "invalid_grant"),
+            (400, "refresh_token_reuse"),
+            (401, "unauthenticated"),
+            (401, "invalid_token"),
+        ] {
+            let error = silicon_iam_client::ApiError {
+                status,
+                code: code.to_owned(),
+                message: "credential rejected".to_owned(),
+                details: None,
+                request_id: None,
+            };
+            assert!(matches!(classify(error.into()), IamError::Unauthenticated));
+        }
+    }
 
     #[tokio::test]
     async fn discovery_and_subsequent_requests_use_only_the_test_application_credential()
