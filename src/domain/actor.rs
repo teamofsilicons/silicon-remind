@@ -64,11 +64,11 @@ impl ReminderReadScope {
 pub struct Actor {
     /// Whether the principal is a Carbon or Silicon.
     pub kind: ActorKind,
-    /// The globally unique IAM principal identifier.
+    /// The Remind-owned storage key bound to the canonical IAM public identity.
     pub id: String,
     /// The organization selected for the current request.
     pub org_id: String,
-    /// Stable IAM membership UUID for the selected organization.
+    /// Remind-owned membership key for the selected organization.
     pub membership_id: Uuid,
     /// IAM authorization revision used to build this request's projection.
     pub authorization_epoch: u64,

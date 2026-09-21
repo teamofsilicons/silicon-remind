@@ -107,7 +107,7 @@ pub async fn authenticate(
             .ok_or(AppError::Validation)?;
         let actor = state
             .iam
-            .authenticate(&token, org_id, Utc::now())
+            .authenticate(&token, org_id, Utc::now(), state.repository.pool())
             .await
             .map_err(|error| map_iam_error(&error))?;
         if let Some(organization_id) = actor.organization_iam_id {

@@ -238,12 +238,9 @@ async fn apply_verified_event(
                         || member["authorization"].as_str() == Some("removed")
                         || member.pointer("/membership/status").and_then(Value::as_str)
                             == Some("removed"))
+                    && let Some(id) =
+                        removed_silicon_key(repository.pool(), member, org_id.as_deref()).await?
                 {
-                    let id = resource["principal_id"]
-                        .as_str()
-                        .ok_or(AppError::Validation)?
-                        .parse()
-                        .map_err(|_| AppError::Validation)?;
                     principals.push(id);
                 }
             }
@@ -286,6 +283,59 @@ async fn apply_verified_event(
             .id
     };
     Ok(receipt_id)
+}
+
+/// Notification identities are resolved only after signature and testing-plane
+/// verification. Retained v1 deliveries may still contain private UUID keys.
+async fn removed_silicon_key(
+    pool: &sqlx::PgPool,
+    member: &Value,
+    org_id: Option<&str>,
+) -> Result<Option<Uuid>, AppError> {
+    let resource = &member["resource"];
+    if let Some(id) = resource["principal_id"]
+        .as_str()
+        .and_then(|id| id.parse::<Uuid>().ok())
+    {
+        return Ok(Some(id));
+    }
+    let membership = match resource["membership_id"].as_str().or_else(|| resource["id"].as_str()) {
+        Some(id) => match id.parse::<Uuid>() {
+            Ok(id) => sqlx::query_scalar::<_, String>(
+                "SELECT public_id FROM iam_identity_bindings WHERE identity_kind='membership' AND local_id=$1",
+            ).bind(id).fetch_optional(pool).await?,
+            Err(_) => Some(id.to_owned()),
+        },
+        None => None,
+    };
+    let membership_actor = membership
+        .as_deref()
+        .and_then(|id| org_id.and_then(|org| id.strip_suffix(&format!("[{org}]"))));
+    let public_id = member
+        .pointer("/principal/public_id")
+        .and_then(Value::as_str)
+        .or_else(|| resource["silicon_id"].as_str())
+        .or(membership_actor);
+    let Some(public_id) = public_id else {
+        // An undisclosed tombstone is safe to ignore only for an organization
+        // with no retained Remind binding. Known organizations must be backfilled.
+        return if org_id.is_none() {
+            Ok(None)
+        } else {
+            Err(AppError::Validation)
+        };
+    };
+    if !crate::domain::is_valid_global_silicon_id(public_id)
+        || membership_actor.is_some_and(|actor| actor != public_id)
+    {
+        return Err(AppError::Validation);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT local_id FROM iam_identity_bindings WHERE identity_kind='silicon' AND public_id=$1",
+    )
+    .bind(public_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 fn validate_hook_destination(
@@ -468,6 +518,58 @@ mod tests {
     };
 
     use super::{prepare_iam_event, validate_global_silicon_id, validate_iam_org_id};
+
+    #[tokio::test]
+    async fn removed_tombstones_resolve_canonical_and_retained_memberships() -> anyhow::Result<()> {
+        use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!(
+                "postgres://postgres:postgres@{}:{}/postgres",
+                container.get_host().await?,
+                container.get_host_port_ipv4(5432).await?,
+            ))
+            .await?;
+        crate::infrastructure::postgres::migrate(&pool).await?;
+        let actor = uuid::Uuid::now_v7();
+        let member = uuid::Uuid::now_v7();
+        sqlx::query("INSERT INTO iam_identity_bindings VALUES('silicon','agent:alpha',$1),('membership','agent:alpha[alpha]',$2)")
+            .bind(actor).bind(member).execute(&pool).await?;
+        for resource in [
+            json!({"id": member,"membership_id":"agent:alpha[alpha]"}),
+            json!({"id": member}),
+            json!({"principal_id": actor}),
+        ] {
+            assert_eq!(
+                super::removed_silicon_key(&pool, &json!({"resource":resource}), Some("alpha"))
+                    .await?,
+                Some(actor)
+            );
+        }
+        assert!(
+            super::removed_silicon_key(&pool, &json!({"resource":{"id":member}}), Some("other"))
+                .await
+                .is_err()
+        );
+        assert!(
+            super::removed_silicon_key(
+                &pool,
+                &json!({
+                    "resource":{"membership_id":"agent:alpha[alpha]"},
+                    "principal":{"public_id":"other:alpha"}
+                }),
+                Some("alpha")
+            )
+            .await
+            .is_err()
+        );
+        pool.close().await;
+        Ok(())
+    }
 
     fn received_at() -> chrono::DateTime<Utc> {
         match Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).single() {

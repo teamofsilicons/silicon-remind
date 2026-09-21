@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret as _, SecretString};
 use silicon_iam_client::{Client, Credential, EnvironmentKey, Mutation, models};
+use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -29,6 +30,42 @@ pub struct IamClient {
     app_id: String,
     base_url: url::Url,
     testing_environment_id: Option<Uuid>,
+}
+
+struct CanonicalActor {
+    kind: ActorKind,
+    public_id: String,
+    org_id: String,
+    membership_id: String,
+    authorization_epoch: u64,
+    organization_iam_id: Uuid,
+    org_role: Option<String>,
+}
+
+impl CanonicalActor {
+    async fn resolve(self, pool: &PgPool) -> Result<Actor, IamError> {
+        let kind = match self.kind {
+            ActorKind::Carbon => "carbon",
+            ActorKind::Silicon => "silicon",
+        };
+        let id = super::identity_keys::resolve(pool, kind, &self.public_id)
+            .await
+            .map_err(|error| IamError::Unavailable(error.into()))?;
+        let membership_id = super::identity_keys::resolve(pool, "membership", &self.membership_id)
+            .await
+            .map_err(|error| IamError::Unavailable(error.into()))?;
+        Ok(Actor {
+            kind: self.kind,
+            id: id.to_string(),
+            org_id: self.org_id,
+            membership_id,
+            authorization_epoch: self.authorization_epoch,
+            organization_iam_id: Some(self.organization_iam_id),
+            public_id: Some(self.public_id),
+            org_role: self.org_role,
+            read_scope: ReminderReadScope::organization(),
+        })
+    }
 }
 
 impl IamClient {
@@ -186,6 +223,7 @@ impl IamClient {
         token: &SecretString,
         org_id: &str,
         now: DateTime<Utc>,
+        pool: &PgPool,
     ) -> Result<Actor, IamError> {
         let inspected = self.inspect(token, Some(org_id), now).await?;
         let snapshot = inspected
@@ -195,7 +233,7 @@ impl IamClient {
         if inspected.authorizations.is_some() || snapshot.org_id != org_id {
             return Err(IamError::Unauthenticated);
         }
-        self.actor(&inspected, snapshot)
+        self.actor(&inspected, snapshot)?.resolve(pool).await
     }
 
     /// Returns only organizations currently authorized through IAM for this token.
@@ -206,6 +244,7 @@ impl IamClient {
         &self,
         token: &SecretString,
         now: DateTime<Utc>,
+        pool: &PgPool,
     ) -> Result<Vec<Actor>, IamError> {
         let inspected = self.inspect(token, None, now).await?;
         let snapshots = match (&inspected.authorization, &inspected.authorizations) {
@@ -214,15 +253,25 @@ impl IamClient {
             _ => return Err(IamError::Unauthenticated),
         };
         let mut seen = std::collections::HashSet::new();
-        snapshots
-            .iter()
-            .map(|snapshot| {
-                if !seen.insert(&snapshot.org_id) {
-                    return Err(IamError::Unauthenticated);
-                }
-                self.actor(&inspected, snapshot)
-            })
-            .collect()
+        let mut actors = Vec::with_capacity(snapshots.len());
+        let mut identity = None;
+        for snapshot in snapshots {
+            if !seen.insert(&snapshot.org_id) {
+                return Err(IamError::Unauthenticated);
+            }
+            let actor = self.actor(&inspected, snapshot)?;
+            let current = (actor.kind, actor.public_id.clone());
+            if identity.as_ref().is_some_and(|prior| prior != &current) {
+                return Err(IamError::Unauthenticated);
+            }
+            identity = Some(current);
+            actors.push(actor);
+        }
+        let mut resolved = Vec::with_capacity(actors.len());
+        for actor in actors {
+            resolved.push(actor.resolve(pool).await?);
+        }
+        Ok(resolved)
     }
 
     async fn inspect(
@@ -254,7 +303,10 @@ impl IamClient {
                 .expires_at
                 .is_none_or(|expiry| expiry <= now.timestamp())
             || inspected.client_id.as_deref() != Some(&self.app_id)
-            || inspected.principal_id.is_none()
+            || inspected
+                .audience
+                .as_deref()
+                .is_some_and(|audience| audience != self.app_id)
         {
             return Err(IamError::Unauthenticated);
         }
@@ -265,17 +317,28 @@ impl IamClient {
         &self,
         inspected: &models::TokenIntrospection,
         snapshot: &models::ApplicationAuthorization,
-    ) -> Result<Actor, IamError> {
+    ) -> Result<CanonicalActor, IamError> {
         if snapshot.audience != self.app_id
             || inspected
                 .org_id
                 .as_deref()
                 .is_some_and(|org| org != snapshot.org_id)
-            || inspected.principal_id != Some(snapshot.principal_id)
+            || inspected
+                .public_id
+                .as_ref()
+                .is_some_and(|id| Some(id) != snapshot.public_id.as_ref())
             || inspected
                 .membership_id
-                .is_some_and(|id| id != snapshot.membership_id)
+                .as_ref()
+                .is_some_and(|id| id != &snapshot.membership_id)
+            || inspected
+                .authorization_epoch
+                .is_some_and(|epoch| epoch != snapshot.authorization_epoch)
             || snapshot.testing_environment_id != self.testing_environment_id
+            || snapshot.organization_id.is_nil()
+            || snapshot.membership_version < 1
+            || snapshot.authorization_epoch < 1
+            || !crate::domain::is_valid_iam_label(&snapshot.org_id)
         {
             return Err(IamError::Unauthenticated);
         }
@@ -288,21 +351,34 @@ impl IamClient {
         };
         let epoch =
             u64::try_from(snapshot.authorization_epoch).map_err(|_| IamError::Unauthenticated)?;
-        Ok(Actor {
+        let public_id = snapshot
+            .public_id
+            .as_ref()
+            .ok_or(IamError::Unauthenticated)?;
+        let valid = match kind {
+            ActorKind::Carbon => crate::domain::is_valid_iam_label(public_id),
+            ActorKind::Silicon => crate::domain::is_valid_global_silicon_id(public_id),
+        };
+        let inspected_kind = match inspected.actor_type.as_ref() {
+            Some(models::TokenIntrospectionActorType::Carbon) => Some(ActorKind::Carbon),
+            Some(models::TokenIntrospectionActorType::Silicon) => Some(ActorKind::Silicon),
+            Some(_) => return Err(IamError::Unauthenticated),
+            None => None,
+        };
+        if !valid
+            || inspected_kind.is_some_and(|value| value != kind)
+            || snapshot.membership_id != format!("{public_id}[{}]", snapshot.org_id)
+        {
+            return Err(IamError::Unauthenticated);
+        }
+        Ok(CanonicalActor {
             kind,
-            id: snapshot.principal_id.to_string(),
+            public_id: public_id.clone(),
             org_id: snapshot.org_id.clone(),
-            membership_id: snapshot.membership_id,
+            membership_id: snapshot.membership_id.clone(),
             authorization_epoch: epoch,
-            organization_iam_id: Some(snapshot.organization_id),
-            public_id: Some(
-                snapshot
-                    .public_id
-                    .clone()
-                    .ok_or(IamError::Unauthenticated)?,
-            ),
+            organization_iam_id: snapshot.organization_id,
             org_role: snapshot.org_role.clone(),
-            read_scope: ReminderReadScope::organization(),
         })
     }
 }
@@ -425,9 +501,9 @@ mod tests {
             testing_environment_id: None,
         };
         let principal = Uuid::now_v7();
-        let membership = Uuid::now_v7();
+        let membership = "person[alpha]".to_owned();
         let inspected: models::TokenIntrospection = serde_json::from_value(json!({
-            "active": true, "principal_id": principal, "client_id": "tos>remind",
+            "active": true, "public_id": "person", "actor_type": "carbon", "principal_id": principal, "client_id": "tos>remind",
             "org_id": null, "membership_id": null,
         }))?;
         let snapshot: models::ApplicationAuthorization = serde_json::from_value(json!({
@@ -437,9 +513,20 @@ mod tests {
             "testing_environment_id": null, "scopes": [], "org_role": "member", "tags": null,
         }))?;
         assert_eq!(client.actor(&inspected, &snapshot)?.org_id, "alpha");
+        // Deployed IAM may omit the top-level public ID; its scoped snapshot
+        // still supplies the canonical identity. Private UUID fields are ignored.
+        let mut legacy = inspected.clone();
+        legacy.public_id = None;
+        assert_eq!(client.actor(&legacy, &snapshot)?.public_id, "person");
+        let mut missing = snapshot.clone();
+        missing.public_id = None;
+        assert!(matches!(
+            client.actor(&legacy, &missing),
+            Err(IamError::Unauthenticated)
+        ));
         let mut scoped = inspected.clone();
         scoped.org_id = Some("alpha".to_owned());
-        scoped.membership_id = Some(membership);
+        scoped.membership_id = Some(membership.clone());
         assert!(client.actor(&scoped, &snapshot).is_ok());
         scoped.org_id = Some("other".to_owned());
         assert!(matches!(
@@ -447,7 +534,7 @@ mod tests {
             Err(IamError::Unauthenticated)
         ));
         scoped.org_id = None;
-        scoped.membership_id = Some(Uuid::now_v7());
+        scoped.membership_id = Some("other[alpha]".to_owned());
         assert!(matches!(
             client.actor(&scoped, &snapshot),
             Err(IamError::Unauthenticated)
@@ -455,7 +542,7 @@ mod tests {
         for change in ["principal", "audience", "plane", "epoch"] {
             let mut invalid = snapshot.clone();
             match change {
-                "principal" => invalid.principal_id = Uuid::now_v7(),
+                "principal" => invalid.public_id = Some("other".to_owned()),
                 "audience" => invalid.audience = "tos>other".to_owned(),
                 "plane" => invalid.testing_environment_id = Some(Uuid::now_v7()),
                 _ => invalid.authorization_epoch = -1,

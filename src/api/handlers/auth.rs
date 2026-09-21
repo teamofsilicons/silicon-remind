@@ -113,7 +113,7 @@ pub async fn organizations(
     let token = crate::api::middleware::bearer_token(&headers)?;
     let actors = state
         .iam
-        .organizations(&token, chrono::Utc::now())
+        .organizations(&token, chrono::Utc::now(), state.repository.pool())
         .await
         .map_err(|error| map_error(&error))?;
     let items: Vec<_> = actors.iter().map(identity).collect();
