@@ -332,6 +332,15 @@ async fn status_distinguishes_rejected_authority_from_service_failures() -> Resu
             .expect(1)
             .mount(&server)
             .await;
+            if !expired && code == 401 {
+                Mock::given(path("/api/v1/auth/refresh"))
+                    .respond_with(ResponseTemplate::new(401).set_body_json(
+                        json!({"error":{"code":"invalid_token", "message":"family revoked"}}),
+                    ))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
             let result = cli(home.path())
                 .args(["login", "status", "--json"])
                 .output()?;
@@ -345,6 +354,63 @@ async fn status_distinguishes_rejected_authority_from_service_failures() -> Resu
             }
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn early_rejection_refreshes_once_and_persists_for_the_next_process() -> Result<()> {
+    let home = TempDir::new()?;
+    let server = MockServer::start().await;
+    save(home.path(), &server.uri(), false, None)?;
+    Mock::given(path("/api/v1/auth/me"))
+        .and(header("authorization", "Bearer access-fixture"))
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(
+                json!({"error":{"code":"invalid_token", "message":"access inactive"}}),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut refreshed = session();
+    refreshed["access_token"] = json!("successor-access");
+    refreshed["refresh_token"] = json!("successor-refresh");
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .and(wiremock::matchers::body_json(
+            json!({"refresh_token":"refresh-fixture"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(refreshed))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/api/v1/auth/me"))
+        .and(header("authorization", "Bearer successor-access"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/schedules"))
+        .and(header("authorization", "Bearer successor-access"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items":[], "next_cursor":null})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = success(cli(home.path()).args(["list", "--json"]).output()?)?;
+    assert_eq!(result["items"], json!([]));
+    let status = success(
+        cli(home.path())
+            .args(["login", "status", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(status["authenticated"], true);
+    let state: Value = serde_json::from_slice(&fs::read(home.path().join(".remind/state.json"))?)?;
+    let stored = &state["sessions"][format!("{}#production", server.uri())];
+    assert_eq!(stored["session"]["refresh_token"], "successor-refresh");
+    assert!(stored["pending_refresh_key"].is_null());
     Ok(())
 }
 

@@ -239,17 +239,17 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
     if needs_session {
         let stored=store.state.sessions.get(&session_slot).context("no session for this server and environment; run remind auth login --org <org> (with --test <id> for a sandbox)")?;
         let org = cli.org.clone().unwrap_or_else(|| stored.org.clone());
-        let refresh_due = stored.pending_refresh_key.is_some()
-            || stored.expires_at <= chrono::Utc::now().timestamp() + 30;
-        if refresh_due
-            && !matches!(
-                cli.command,
-                Command::Auth {
-                    command: Auth::Logout | Auth::Refresh
-                }
-            )
-        {
-            refresh_session(store, &session_slot, &client, None).await?;
+        if !matches!(
+            cli.command,
+            Command::Auth {
+                command: Auth::Logout | Auth::Refresh
+            }
+        ) {
+            let status = login_status(cli, store, &client, &session_slot).await?;
+            anyhow::ensure!(
+                status.authenticated,
+                "Session is no longer valid; sign in again with remind login"
+            );
         }
         let stored = store
             .state
@@ -742,15 +742,31 @@ async fn login_status(
         }
         return Err(error);
     }
-    let stored = store
-        .state
-        .sessions
-        .get(session_slot)
-        .context("session disappeared")?;
-    Ok(client
-        .with_session(stored.session.access_token.clone(), org)?
-        .login_status()
-        .await?)
+    for attempt in 0..2 {
+        let stored = store
+            .state
+            .sessions
+            .get(session_slot)
+            .context("session disappeared")?;
+        let status = client
+            .with_session(stored.session.access_token.clone(), org.clone())?
+            .login_status()
+            .await?;
+        if status.authenticated || attempt == 1 {
+            return Ok(status);
+        }
+        // A still-active refresh family may outlive an early-invalidated access token.
+        if let Err(error) = refresh_session(store, session_slot, client, None).await {
+            if matches!(
+                error.downcast_ref::<silicon_remind_client::Error>(),
+                Some(silicon_remind_client::Error::Api { status: 401, .. })
+            ) {
+                return Ok(models::LoginStatus::default());
+            }
+            return Err(error);
+        }
+    }
+    unreachable!("the second identity check returns directly")
 }
 
 /// Choose the organization for a session whose SLT named none. One authorized

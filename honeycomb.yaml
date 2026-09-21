@@ -2,7 +2,7 @@
 format_version: 1
 
 app_id: "tos>remind"
-version: "0.3.1"
+version: "0.3.2"
 
 bin:
   remind: "app"
