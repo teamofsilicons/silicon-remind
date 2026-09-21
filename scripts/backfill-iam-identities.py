@@ -65,10 +65,28 @@ VALUES(8,'canonical iam identity bindings',true,decode('{digest}','hex'),0);
 """
 
 
-def statement(rows, schema, apply, migrate=False):
+def statement(rows, schema, apply, migrate=False, environment=None, local_environment=None):
     data = io.StringIO()
     csv.writer(data, lineterminator="\n").writerows(rows)
+    binding = ""
+    if environment:
+        # Control metadata lives in the same shared test database. Validate the
+        # registered local/upstream pair under a lock before selecting its schema.
+        local = str(uuid.UUID(local_environment or environment))
+        upstream = str(uuid.UUID(environment))
+        if schema != f"remind_test_{uuid.UUID(local).hex}":
+            raise ValueError("schema does not match selected local environment")
+        binding = f"""LOCK TABLE public.testing_environments IN SHARE MODE;
+DO $binding$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM public.testing_environments
+ WHERE id='{local}' AND iam_environment_id='{upstream}') THEN
+ RAISE EXCEPTION 'local testing environment is not bound to selected IAM environment'; END IF;
+END $binding$;
+"""
+    elif schema != "public":
+        raise ValueError("testing schema requires an explicit IAM environment")
     return f'''BEGIN;
+{binding}
 SET LOCAL search_path TO "{schema}";
 DO $$ BEGIN IF current_schema() IS DISTINCT FROM '{schema}' THEN
  RAISE EXCEPTION 'selected schema does not exist'; END IF; END $$;
@@ -124,19 +142,25 @@ def main():
     plane = parser.add_mutually_exclusive_group(required=True)
     plane.add_argument("--production", action="store_true")
     plane.add_argument("--testing-environment-id", type=uuid.UUID)
+    parser.add_argument("--local-environment-id", type=uuid.UUID,
+        help="retained Remind world ID when it differs from the selected IAM environment; the registered pair is verified")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--migrate-retained-schema", action="store_true",
         help="apply only migration 0008 in an existing testing schema, verifying all earlier checksums")
     args = parser.parse_args()
     environment = str(args.testing_environment_id) if args.testing_environment_id else None
-    schema = f"remind_test_{args.testing_environment_id.hex}" if environment else "public"
+    if args.local_environment_id and not environment:
+        parser.error("--local-environment-id requires --testing-environment-id")
+    local = args.local_environment_id or args.testing_environment_id
+    schema = f"remind_test_{local.hex}" if environment else "public"
     if args.migrate_retained_schema and not environment:
         parser.error("--migrate-retained-schema requires --testing-environment-id")
     rows = mapping_rows(json.loads(args.mapping.read_text()), environment)
     # Database connection is read from the process environment, never printed.
     env = database_environment()
     result = subprocess.run(["psql", "-X", "--set", "ON_ERROR_STOP=1", "--quiet"],
-        input=statement(rows, schema, args.apply, args.migrate_retained_schema), text=True, env=env, capture_output=True)
+        input=statement(rows, schema, args.apply, args.migrate_retained_schema,
+            environment, str(local) if local else None), text=True, env=env, capture_output=True)
     if result.returncode:
         # psql COPY errors may contain imported identifiers; do not echo them.
         raise SystemExit("Identity binding validation failed; transaction rolled back. Check schema, export completeness, and existing binding conflicts.")
