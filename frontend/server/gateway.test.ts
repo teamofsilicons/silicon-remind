@@ -289,3 +289,47 @@ test("app_secret discovery keeps testing and production sessions separate and fa
     assert.equal((await (await call("session")).json()).identity.public_id,"production-person");
   } finally { await close(server); await close(upstream); await rm(directory,{recursive:true,force:true}); }
 });
+
+test("refresh outage survives restart with its original retry identity and session checks retain login", async () => {
+  let rejectAccess = false, refreshStatus = 503, refreshes = 0;
+  const keys: string[] = [];
+  const upstream = createServer(async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (req.url === "/api/v1/auth/login") {
+      res.end(JSON.stringify({access_token:"old-access",refresh_token:"old-refresh",expires_in:3600}));
+    } else if (req.url === "/api/v1/auth/refresh") {
+      refreshes++; keys.push(String(req.headers["idempotency-key"]));
+      res.statusCode = refreshStatus;
+      res.end(JSON.stringify(refreshStatus === 200 ? {access_token:"new-access",refresh_token:"new-refresh",expires_in:1800} : {error:{code:"upstream_unavailable"}}));
+    } else if (rejectAccess && req.headers.authorization === "Bearer old-access") {
+      res.statusCode=401;res.end(JSON.stringify({error:{code:"unauthenticated"}}));
+    } else if (req.url === "/api/v1/auth/organizations") {
+      res.end(JSON.stringify({items:[{org_id:"tos"}]}));
+    } else if (req.url === "/api/v1/auth/me") {
+      res.end(JSON.stringify({public_id:"actor",org_id:"tos",actor_type:"carbon"}));
+    } else { res.statusCode=404;res.end("{}"); }
+  });
+  const upstreamUrl = await listen(upstream), directory = await mkdtemp(join(tmpdir(), "remind-refresh-"));
+  const key = randomBytes(32).toString("base64url");
+  let handler: ReturnType<typeof createGateway>;
+  const server = createServer((req,res)=>void handler(req,res));
+  const origin = await listen(server), config = { origin, upstream:upstreamUrl, directory, key };
+  handler=createGateway(config);let cookie="";
+  const call=async(path:string,body?:unknown)=>{
+    const response=await fetch(origin+path,{method:body===undefined?"GET":"POST",headers:{Cookie:cookie,Origin:origin,"X-Remind-UI":"1","Content-Type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)});
+    cookie=cookies(response)||cookie;return response;
+  };
+  try {
+    assert.equal((await call("/ui/login",{slt:"example-login"})).status,200);
+    rejectAccess=true;
+    const outage=await call("/ui/session");assert.equal(outage.status,503);
+    assert.ok(cookie.includes("remind_session="));
+    assert.equal(refreshes,1);
+    handler=createGateway(config);
+    refreshStatus=200;
+    const recovered=await call("/ui/session");assert.equal(recovered.status,200);
+    assert.equal((await recovered.json()).identity.public_id,"actor");
+    assert.equal(refreshes,2);assert.equal(keys[0],keys[1]);
+    assert.ok(recovered.headers.get("set-cookie")?.includes("Max-Age=604800"));
+  } finally {await close(server);await close(upstream);await rm(directory,{recursive:true,force:true});}
+});

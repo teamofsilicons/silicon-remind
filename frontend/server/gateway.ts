@@ -1,5 +1,5 @@
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { mkdir, readFile, open, rename, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 interface Context {
@@ -13,6 +13,7 @@ interface Context {
   refresh?: string;
   expires?: number;
   pending?: string;
+  refreshStarted?: number;
   telemetryEnabled?: boolean;
 }
 interface State {
@@ -95,9 +96,17 @@ export function createGateway(config: {
     const iv = randomBytes(12),
       c = createCipheriv("aes-256-gcm", key, iv);
     const b = Buffer.concat([c.update(JSON.stringify(s)), c.final()]);
-    const p = resolve(directory, id + ".tmp");
-    await writeFile(p, Buffer.concat([iv, c.getAuthTag(), b]), { mode: 0o600 });
-    await rename(p, resolve(directory, id));
+    const p = resolve(directory, id + "." + randomBytes(8).toString("hex") + ".tmp");
+    try {
+      const file = await open(p, "wx", 0o600);
+      try { await file.writeFile(Buffer.concat([iv, c.getAuthTag(), b])); await file.sync(); }
+      finally { await file.close(); }
+      await rename(p, resolve(directory, id));
+      if (process.platform !== "win32") {
+        const folder = await open(directory, "r");
+        try { await folder.sync(); } finally { await folder.close(); }
+      }
+    } finally { await unlink(p).catch(() => {}); }
   }
   async function remote(
     path: string,
@@ -199,7 +208,7 @@ export function createGateway(config: {
     const id =
       (callback ? correlationMatch?.[1] : cookie) ||
       randomBytes(32).toString("hex");
-    if (!cookie && !callback) res.setHeader("Set-Cookie", sessionCookie(id));
+    if (!callback) res.setHeader("Set-Cookie", sessionCookie(id));
     const previous = locks.get(id) || Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -227,9 +236,11 @@ export function createGateway(config: {
       for (const context of Object.values(state.contexts)) context.telemetryEnabled = req.headers["x-remind-telemetry"] !== "off";
       let ctx = state.contexts[state.active],
         data: any;
-      async function authenticated(c: Context) {
-        if (c.refresh && (c.pending || (c.expires || 0) < Date.now() + 30000)) {
+      async function authenticated(c: Context, force = false) {
+        for (let attempt = 0; attempt < 2 && c.refresh && (force || c.pending || (c.expires || 0) < Date.now() + 30000); attempt++) {
+          const started = c.refreshStarted ?? (c.pending ? Date.now() - 1800000 : Date.now());
           c.pending ||= randomBytes(16).toString("hex");
+          c.refreshStarted = started;
           await save(id, state);
           try {
             const tokens = await remote(
@@ -240,10 +251,13 @@ export function createGateway(config: {
               c.pending,
               false,
             );
+            if (typeof tokens.access_token !== "string" || !tokens.access_token || typeof tokens.refresh_token !== "string" || !tokens.refresh_token || !Number.isSafeInteger(tokens.expires_in) || tokens.expires_in <= 0 || !Number.isSafeInteger(started + tokens.expires_in * 1000)) throw Error("Invalid refresh response");
             c.token = tokens.access_token;
             c.refresh = tokens.refresh_token;
-            c.expires = Date.now() + tokens.expires_in * 1000;
+            c.expires = started + tokens.expires_in * 1000;
             delete c.pending;
+            delete c.refreshStarted;
+            force = false;
             await save(id, state);
           } catch (e: any) {
             if (e.status === 401) {
@@ -251,20 +265,36 @@ export function createGateway(config: {
               delete c.refresh;
               delete c.identity;
               delete c.pending;
+              delete c.refreshStarted;
               await save(id, state);
             }
             throw e;
           }
         }
       }
+      async function authorizedRemote(path: string, c: Context, method = "GET", body?: unknown, mutation?: string) {
+        try { return await remote(path, c, method, body, mutation); }
+        catch (error: any) {
+          // Uncommitted sign-in/organization candidates must not rotate credentials
+          // that are not yet part of the persisted session. Failed discovery
+          // leaves the existing signed-in context intact.
+          if (error.status !== 401 || !c.refresh || !Object.values(state.contexts).includes(c)) throw error;
+          await authenticated(c, true);
+          return remote(path, c, method, body, mutation);
+        }
+      }
       async function selectOrganization(c: Context, requested?: string) {
-        const result = await remote("/api/v1/auth/organizations", { ...c, org: "" });
+        const organization = c.org;
+        c.org = "";
+        let result;
+        try { result = await authorizedRemote("/api/v1/auth/organizations", c); }
+        finally { c.org = organization; }
         const organizations: string[] = result.items.map((item: any) => item.org_id);
         if (requested !== undefined && !organizations.includes(requested))
           throw Object.assign(Error("This organization has not been authorized in IAm"), { status: 403 });
         c.organizations = organizations;
         c.org = requested ?? (organizations.includes(c.org) ? c.org : organizations[0] || "");
-        c.identity = c.org ? await remote("/api/v1/auth/me", c) : undefined;
+        c.identity = c.org ? await authorizedRemote("/api/v1/auth/me", c) : undefined;
       }
       if (callback) {
         const attempt = state.login;
@@ -306,6 +336,7 @@ export function createGateway(config: {
         candidate.refresh = tokens.refresh_token;
         candidate.expires = Date.now() + tokens.expires_in * 1000;
         delete candidate.pending;
+        delete candidate.refreshStarted;
         await selectOrganization(candidate);
         state.contexts[attempt.contextId] = candidate;
         await save(id, state);
@@ -354,7 +385,11 @@ export function createGateway(config: {
         let authError: string | undefined;
         if (ctx.token) {
           try { await authenticated(ctx); await selectOrganization(ctx); }
-          catch { delete ctx.identity; authError = "This session could not be verified. Sign in again in the selected environment."; }
+          catch (error: any) {
+            if (ctx.refresh) throw Object.assign(Error("This session could not be verified. Retry; your saved sign-in is retained."), { status: 503 });
+            delete ctx.identity;
+            authError = "This session is no longer valid. Sign in again in the selected environment.";
+          }
         }
         data = { ...summary(state), authError };
       } else if (url.pathname === "/ui/organization" && req.method === "POST") {
@@ -390,6 +425,7 @@ export function createGateway(config: {
         candidate.refresh = tokens.refresh_token;
         candidate.expires = Date.now() + tokens.expires_in * 1000;
         delete candidate.pending;
+        delete candidate.refreshStarted;
         await selectOrganization(candidate);
         state.contexts[state.active] = candidate;
         data = summary(state);
@@ -410,6 +446,7 @@ export function createGateway(config: {
         delete ctx.organizations;
         ctx.org = "";
         delete ctx.pending;
+        delete ctx.refreshStarted;
         data = summary(state);
       } else if (url.pathname === "/ui/context" && req.method === "POST") {
         delete state.login;
@@ -477,7 +514,7 @@ export function createGateway(config: {
         if (health) ctx = { id: "", name: "", org: "" };
         else if (!path.startsWith("/testing-environment"))
           await authenticated(ctx);
-        data = await remote(
+        data = await authorizedRemote(
           (health ? "" : "/api/v1") + path + url.search,
           ctx,
           method,
