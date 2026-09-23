@@ -33,4 +33,4 @@ Licensed under Apache-2.0. Backend service source is separately licensed.
 Use `remind env use --secret-stdin`, `remind report`, `remind report-status`,
 `remind docs`, and `remind config telemetry on|off` for sandbox discovery,
 bug reporting, offline manuals, and diagnostic preferences. This source bundle
-is version 0.3.0; use a registry version only after it has been published.
+is version 0.4.0; use a registry version only after it has been published.
