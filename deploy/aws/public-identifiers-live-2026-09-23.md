@@ -84,3 +84,7 @@ The separate six-platform CLI 0.4.0 build is workflow `35881364818`, source
 `197039b989e526ddd3bce2c4351c0fd74a47afb7`. It pins Honeycomb 0.4.0 and preserves
 the existing glibc 2.28 Linux baseline. Native/registry publication is pending
 this build's verification; runtime deployment above is complete.
+
+## Client publication
+
+GitHub v0.4.0 is public. All three release asset SHA256 values match the verified six-platform workflow 35881364818 at 197039b989e526ddd3bce2c4351c0fd74a47afb7. Honeycomb prod releaseed81b514-be14-4da7-b33b-cc6637d15b98 is accepted, package SHA256d44a4aa26a2367905e2df0dc469fe41ac342235aa0c6067896927c77feba98ce. A clean anonymous installation reports remind0.4.0. Both silicon-remind-client and silicon-remind-cli0.4.0 are published to crates.io.
