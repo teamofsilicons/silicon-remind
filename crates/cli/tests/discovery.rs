@@ -538,13 +538,12 @@ async fn login_without_org_uses_the_only_authorized_organization() -> Result<()>
     Ok(())
 }
 
-/// A login may cover several organizations. A Silicon still belongs to exactly one of
-/// them, named in its `si:handle` identity, so `silicon connect` must not be asked.
+/// A Silicon ID names no organization. Multiple grants require an explicit choice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn login_without_org_prefers_the_silicons_own_organization() -> Result<()> {
+async fn silicon_login_with_multiple_organizations_requires_explicit_choice() -> Result<()> {
     let home = TempDir::new()?;
     let server = MockServer::start().await;
-    // Granted a second organization, but `si:fixture` belongs to tos.
+    // The same actor has two organization grants; its handle cannot choose one.
     let mut granted = identity("silicon");
     granted["org_id"] = json!("bricks");
     Mock::given(method("POST"))
@@ -567,9 +566,26 @@ async fn login_without_org_prefers_the_silicons_own_organization() -> Result<()>
         .expect(1)
         .mount(&server)
         .await;
+    let output = cli(home.path())
+        .args(["--url", &server.uri(), "login", "slt-fixture", "--json"])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--org") && stderr.contains("bricks") && stderr.contains("tos"),
+        "{stderr}"
+    );
     let result = success(
         cli(home.path())
-            .args(["--url", &server.uri(), "login", "slt-fixture", "--json"])
+            .args([
+                "--url",
+                &server.uri(),
+                "--org",
+                "tos",
+                "login",
+                "slt-fixture",
+                "--json",
+            ])
             .output()?,
     )?;
     assert_eq!(result["org_id"], json!("tos"));
@@ -583,7 +599,7 @@ async fn login_without_org_asks_when_the_organization_is_unknowable() -> Result<
     let home = TempDir::new()?;
     let server = MockServer::start().await;
     let mut first = identity("carbon");
-    first["public_id"] = json!("fixture");
+    first["public_id"] = json!("c:fixture");
     let mut second = first.clone();
     second["org_id"] = json!("bricks");
     Mock::given(method("POST"))
