@@ -41,7 +41,7 @@ fn session() -> Value {
 }
 fn identity(actor: &str) -> Value {
     json!({"principal_id":"01992000-0000-7000-8000-000000000001", "actor_type":actor,
-        "public_id":"fixture:tos", "org_id":"tos", "membership_id":"01992000-0000-7000-8000-000000000002",
+        "public_id":"si:fixture", "org_id":"tos", "membership_id":"01992000-0000-7000-8000-000000000002",
         "org_role":"member", "authorization_epoch":1, "can_manage_reminders":actor == "silicon"})
 }
 fn save(home: &Path, url: &str, expired: bool, test: Option<&str>) -> Result<()> {
@@ -151,7 +151,7 @@ fn missing_session_is_machine_readable_without_contacting_server() -> Result<()>
 async fn iam_discovers_server_configuration_without_credentials() -> Result<()> {
     let home = TempDir::new()?;
     let server = MockServer::start().await;
-    let info = json!({"app_id":"custom>remind", "iam_url":"https://iam.example.test", "iam_environment_id":null});
+    let info = json!({"app_id":"custom-remind", "iam_url":"https://iam.example.test", "iam_environment_id":null});
     Mock::given(method("GET"))
         .and(path("/api/v1/auth/iam"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&info))
@@ -209,7 +209,7 @@ async fn login_status_verifies_both_actor_types_and_preserves_direct_login() -> 
         )?;
         assert_eq!(status["authenticated"], true);
         assert_eq!(status["actor_type"], actor);
-        assert_eq!(status["public_id"], "fixture:tos");
+        assert_eq!(status["public_id"], "si:fixture");
         assert!(status.get("access_token").is_none() && status.get("refresh_token").is_none());
     }
     Ok(())
@@ -471,7 +471,7 @@ fn updates_are_honeycomb_managed_and_parse_errors_keep_the_test_footer() -> Resu
     let home = TempDir::new()?;
     let result = success(cli(home.path()).args(["update", "--json"]).output()?)?;
     assert_eq!(result["status"], "managed");
-    assert_eq!(result["command"], "honeycomb update 'tos>remind'");
+    assert_eq!(result["command"], "honeycomb update 'remind'");
     let result = cli(home.path()).args(["daemon", "install"]).output()?;
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("Honeycomb manages"));
@@ -539,12 +539,12 @@ async fn login_without_org_uses_the_only_authorized_organization() -> Result<()>
 }
 
 /// A login may cover several organizations. A Silicon still belongs to exactly one of
-/// them, named in its `handle:org` identity, so `silicon connect` must not be asked.
+/// them, named in its `si:handle` identity, so `silicon connect` must not be asked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_without_org_prefers_the_silicons_own_organization() -> Result<()> {
     let home = TempDir::new()?;
     let server = MockServer::start().await;
-    // Granted a second organization, but `fixture:tos` belongs to tos.
+    // Granted a second organization, but `si:fixture` belongs to tos.
     let mut granted = identity("silicon");
     granted["org_id"] = json!("bricks");
     Mock::given(method("POST"))

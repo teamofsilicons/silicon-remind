@@ -5,7 +5,7 @@ resolver = "3"
 
 [package]
 name = "silicon-remind"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Proprietary"
@@ -52,7 +52,7 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
-silicon-iam-client = "3.0.0"
+silicon-iam-client = { version = "4.0.0", path = "vendor/silicon-iam-client" }
 sqlx = { version = "0.9.0", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-native-roots", "uuid"] }
 subtle = "2.6.1"
 thiserror = "2.0.17"

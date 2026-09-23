@@ -178,7 +178,7 @@ export default function App() {
     open({
       title: test() ? "Sign in to " + context()?.name : "Sign in to Remind",
       description:
-        "Use a short-lived token from Silicon IAm for tos>remind. Choose your organizations in IAm." +
+        "Use a short-lived token from Silicon IAm for remind. Choose your organizations in IAm." +
         (test()
           ? " Use an IAM-issued test SLT or the public ID of an existing active Carbon or Silicon in this sandbox."
           : ""),
@@ -532,7 +532,7 @@ export default function App() {
     open({
       title: "Configure test IAm app",
       description:
-        "Use the tos>remind app secret imported into this environment’s IAm sandbox. Production credentials cannot be used here.",
+        "Use the remind app secret imported into this environment’s IAm sandbox. Production credentials cannot be used here.",
       fields: [
         {
           name: "iam_app_secret",
@@ -629,7 +629,7 @@ export default function App() {
           >
             Silicon IAm ↗
           </a>
-          <div class="person">
+          <div class="c:person">
             <span class="avatar">
               {identity()?.public_id?.slice(0, 1).toUpperCase() || "S"}
             </span>

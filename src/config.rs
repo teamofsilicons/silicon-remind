@@ -600,8 +600,21 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
     validate_http_url("REMIND_PUBLIC_BASE_URL", &server.public_base_url)?;
     validate_http_url("REMIND_IAM_BASE_URL", &iam.base_url)?;
 
-    if iam.app_id.len() > 255 {
-        return Err(invalid("REMIND_IAM_APP_ID", "must be at most 255 bytes"));
+    if !(1..=80).contains(&iam.app_id.len())
+        || !iam
+            .app_id
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase())
+        || !iam
+            .app_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+    {
+        return Err(invalid(
+            "REMIND_IAM_APP_ID",
+            "must be a bare IAM application handle",
+        ));
     }
     if worker.batch_size.get() > MAX_WORKER_BATCH_SIZE {
         return Err(invalid("REMIND_WORKER_BATCH_SIZE", "must be at most 10000"));

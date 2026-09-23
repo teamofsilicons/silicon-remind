@@ -19,7 +19,7 @@ Local verification: 149 Rust tests passed across the serial workspace suite and 
   its Plex typography, pale navigation, white panels and blue actions.
   Deployed at [remind.teamofsilicons.com](https://remind.teamofsilicons.com)
   on the standalone AWS server; see the [frontend deployment verification](../deploy/aws/frontend-2026-09-08.md).
-- Official `silicon-iam-client` 1.2.1 integration for `tos>remind`: SLT exchange,
+- Official `silicon-iam-client` 1.2.1 integration for `remind`: SLT exchange,
   refresh, logout, live app/org/test authorization and signed lifecycle receiver.
 - Reminder create/list/get/edit, one-time and recurring five-field cron, IANA
   timezones with UTC default, stored next UTC occurrence, individual and atomic

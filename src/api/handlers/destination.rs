@@ -222,7 +222,7 @@ fn silicon(actor: &Actor) -> Result<&str, AppError> {
     actor
         .public_id
         .as_deref()
-        .filter(|id| crate::domain::silicon_id_belongs_to_org(id, &actor.org_id))
+        .filter(|id| crate::domain::is_valid_global_silicon_id(id))
         .ok_or(AppError::Unauthenticated)
 }
 fn audit(actor: &Actor) -> AuditContext {

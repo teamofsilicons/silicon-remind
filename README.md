@@ -139,7 +139,7 @@ PostgreSQL concurrency require a running Docker daemon for Testcontainers.
 
 Build the public client and CLI with `cargo build --workspace`. The executable is
 `target/debug/remind`; run `remind -h` for commands. Obtain an IAM SLT for
-`tos>remind`, then use:
+`remind`, then use:
 
 ```sh
 remind login <slt>
@@ -149,7 +149,7 @@ remind create --text 'Check the build' --cron '*/5 * * * *' --timezone Asia/Kolk
 
 `remind login <slt>` needs no `--org`. The organization comes from `--org` when given,
 then from the SLT, then from the only authorized organization, and for a Silicon from the
-organization in its own `handle:org` identity - so a Silicon granted several organizations
+organization in its own `si:handle` identity - so a Silicon granted several organizations
 still signs in unprompted. It is saved with the session, and `--org` overrides it per
 command. Only a Carbon in several organizations must choose, and the error names them.
 

@@ -12,7 +12,7 @@ reuses another context's session.
 ## Install and start
 
 ```sh
-honeycomb install 'tos>remind'
+honeycomb install 'remind'
 remind --help
 remind login '<SLT-from-IAM>'
 ```
@@ -37,7 +37,7 @@ remind auth whoami
 remind config home /secure/remind-state
 ```
 
-The SLT must be for `tos>remind` and bound to the desired organization. A successful
+The SLT must be for `remind` and bound to the desired organization. A successful
 login verifies the organization before saving the new session. Near expiry, a
 normal authenticated command rotates the saved refresh token before proceeding.
 `auth refresh` requests an explicit rotation; `auth logout` revokes the IAM family
@@ -66,7 +66,7 @@ check returns `authenticated: true` alongside `actor_type` (`carbon` or `silicon
 tokens. For example:
 
 ```json
-{"authenticated":true,"principal_id":"01992000-0000-7000-8000-000000000001","actor_type":"silicon","public_id":"assistant:tos","org_id":"tos","membership_id":"01992000-0000-7000-8000-000000000002","org_role":"member","authorization_epoch":1,"can_manage_reminders":true}
+{"authenticated":true,"principal_id":"01992000-0000-7000-8000-000000000001","actor_type":"silicon","public_id":"si:assistant","org_id":"tos","membership_id":"01992000-0000-7000-8000-000000000002","org_role":"member","authorization_epoch":1,"can_manage_reminders":true}
 ```
 
 No saved session or an HTTP 401 from verification/refresh returns
@@ -219,7 +219,7 @@ environments can be recovered for 30 days. See the [full guide](../testing-envir
 
 ## Updating
 
-Install with `honeycomb install 'tos>remind'` and update with `honeycomb update 'tos>remind'`. Remind never replaces its executable. `remind update` and `remind update --check` return the Honeycomb command without changing files or querying crates.io.
+Install with `honeycomb install 'remind'` and update with `honeycomb update 'remind'`. Remind never replaces its executable. `remind update` and `remind update --check` return the Honeycomb command without changing files or querying crates.io.
 
 Remove an older standalone updater with `remind daemon uninstall`; `daemon status` remains available for diagnosis. `daemon install`, `daemon run`, and `config auto-update on` now explain the migration to Honeycomb. `--no-update` and `config auto-update off` remain accepted for older scripts.
 

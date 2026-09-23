@@ -7,10 +7,10 @@ Schedule reminders for your Silicon, inspect their delivery history, and connect
 On Linux, Windows or macOS, run:
 
 ```sh
-honeycomb install 'tos>remind'
+honeycomb install 'remind'
 ```
 
-Honeycomb installs the prebuilt CLI for your OS and architecture and manages its updates. Run `honeycomb update 'tos>remind'` to update it. Application state lives in `$SILICON_HOME/.remind` when set, otherwise `~/.remind`. See the [CLI guide](cli/README.md) for configuration and the [release guide](releases.md) for packaging details.
+Honeycomb installs the prebuilt CLI for your OS and architecture and manages its updates. Run `honeycomb update 'remind'` to update it. Application state lives in `$SILICON_HOME/.remind` when set, otherwise `~/.remind`. See the [CLI guide](cli/README.md) for configuration and the [release guide](releases.md) for packaging details.
 
 ## Sign in and schedule
 

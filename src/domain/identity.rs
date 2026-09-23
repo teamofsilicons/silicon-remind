@@ -1,11 +1,11 @@
-//! Canonical validation for IAM organization and Silicon public identifiers.
+//! Syntax validation for IAM public identifiers. Organization membership is an IAM fact.
 
-/// Minimum byte length of one IAM public-label segment.
+/// Minimum byte length of an IAM handle.
 pub const IAM_LABEL_MIN_BYTES: usize = 3;
-/// Maximum byte length of one IAM public-label segment.
+/// Maximum byte length of an IAM handle.
 pub const IAM_LABEL_MAX_BYTES: usize = 50;
 
-/// Returns whether a value satisfies IAM's public organization/local-ID label.
+/// Validates an organization ID or unprefixed IAM handle.
 #[must_use]
 pub fn is_valid_iam_label(value: &str) -> bool {
     (IAM_LABEL_MIN_BYTES..=IAM_LABEL_MAX_BYTES).contains(&value.len())
@@ -14,27 +14,23 @@ pub fn is_valid_iam_label(value: &str) -> bool {
         })
 }
 
-/// Returns whether a global Silicon ID has two valid IAM label segments.
+/// Validates a canonical public Silicon ID; the prefix carries no organization.
 #[must_use]
 pub fn is_valid_global_silicon_id(value: &str) -> bool {
-    let Some((local_id, org_id)) = value.split_once(':') else {
-        return false;
-    };
-    !org_id.contains(':') && is_valid_iam_label(local_id) && is_valid_iam_label(org_id)
+    value.strip_prefix("si:").is_some_and(is_valid_iam_label)
 }
 
-/// Returns whether a global Silicon ID is valid and belongs to `org_id`.
+/// Validates a canonical public Carbon ID.
 #[must_use]
-pub fn silicon_id_belongs_to_org(value: &str, org_id: &str) -> bool {
-    is_valid_iam_label(org_id)
-        && value
-            .split_once(':')
-            .is_some_and(|(local_id, suffix)| is_valid_iam_label(local_id) && suffix == org_id)
+pub fn is_valid_carbon_id(value: &str) -> bool {
+    value
+        .strip_prefix("c:")
+        .is_some_and(|handle| handle.len() <= 30 && is_valid_iam_label(handle))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_global_silicon_id, is_valid_iam_label, silicon_id_belongs_to_org};
+    use super::*;
 
     #[test]
     fn labels_match_iam_bounds_and_alphabet() {
@@ -46,11 +42,20 @@ mod tests {
     }
 
     #[test]
-    fn global_id_requires_exactly_two_matching_valid_segments() {
-        assert!(is_valid_global_silicon_id("assistant:tos"));
-        assert!(silicon_id_belongs_to_org("assistant:tos", "tos"));
-        for invalid in ["assistant", "assistant:other", "assistant:tos:extra"] {
-            assert!(!silicon_id_belongs_to_org(invalid, "tos"));
+    fn public_ids_require_explicit_kind_and_no_organization_suffix() {
+        assert!(is_valid_global_silicon_id("si:assistant"));
+        assert!(is_valid_carbon_id("c:person"));
+        for invalid in [
+            "assistant",
+            "assistant:tos",
+            "si:assistant:tos",
+            "c:assistant",
+            "si:",
+        ] {
+            assert!(!is_valid_global_silicon_id(invalid));
+        }
+        for invalid in ["person", "si:person", "c:person:tos", "c:"] {
+            assert!(!is_valid_carbon_id(invalid));
         }
     }
 }

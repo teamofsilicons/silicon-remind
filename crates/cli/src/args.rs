@@ -393,7 +393,7 @@ pub enum Daemon {
     Uninstall,
     /// Inspect the operating system service state.
     Status,
-    /// Retired: use `honeycomb update 'tos>remind'`.
+    /// Retired: use `honeycomb update 'remind'`.
     Run,
 }
 
