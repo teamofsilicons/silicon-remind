@@ -356,7 +356,7 @@ impl IamClient {
             .as_ref()
             .ok_or(IamError::Unauthenticated)?;
         let valid = match kind {
-            ActorKind::Carbon => crate::domain::is_valid_iam_label(public_id),
+            ActorKind::Carbon => crate::domain::is_valid_carbon_id(public_id),
             ActorKind::Silicon => crate::domain::is_valid_global_silicon_id(public_id),
         };
         let inspected_kind = match inspected.actor_type.as_ref() {
@@ -458,7 +458,7 @@ mod tests {
     -> anyhow::Result<()> {
         let server = MockServer::start().await;
         let id = Uuid::now_v7();
-        let app_id = "tos>remind";
+        let app_id = "remind";
         let secret = format!("ask_{}", "t".repeat(43));
         let authorization = format!("Basic {}", STANDARD.encode(format!("{app_id}:{secret}")));
         Mock::given(method("GET"))
@@ -520,12 +520,12 @@ mod tests {
     fn public_info_exposes_configuration_and_plane_without_secrets() -> anyhow::Result<()> {
         let client = IamClient::new(&IamSettings {
             base_url: url::Url::parse("http://127.0.0.1:8080")?,
-            app_id: "custom>remind".into(),
+            app_id: "custom-remind".into(),
             app_secret: SecretString::from("private-app-secret"),
             request_timeout: std::time::Duration::from_secs(5),
             webhook_keys: std::collections::BTreeMap::new(),
         })?;
-        let mut expected = json!({"app_id":"custom>remind", "iam_url":"http://127.0.0.1:8080/", "iam_environment_id":null});
+        let mut expected = json!({"app_id":"custom-remind", "iam_url":"http://127.0.0.1:8080/", "iam_environment_id":null});
         assert_eq!(client.public_info(), expected);
         let id = Uuid::now_v7();
         let sandbox = client.in_environment(
@@ -545,20 +545,20 @@ mod tests {
             client: Client::builder("http://127.0.0.1:8080")?
                 .auto_update(false)
                 .build()?,
-            app_id: "tos>remind".to_owned(),
+            app_id: "remind".to_owned(),
             base_url: url::Url::parse("http://127.0.0.1:8080")?,
             testing_environment_id: None,
         };
         let principal = Uuid::now_v7();
-        let membership = "person[alpha]".to_owned();
+        let membership = "c:person[alpha]".to_owned();
         let inspected: models::TokenIntrospection = serde_json::from_value(json!({
-            "active": true, "public_id": "person", "actor_type": "carbon", "principal_id": principal, "client_id": "tos>remind",
+            "active": true, "public_id": "c:person", "actor_type": "carbon", "principal_id": principal, "client_id": "remind",
             "org_id": null, "membership_id": null,
         }))?;
         let snapshot: models::ApplicationAuthorization = serde_json::from_value(json!({
-            "principal_id": principal, "actor_type": "carbon", "public_id": "person",
+            "principal_id": principal, "actor_type": "carbon", "public_id": "c:person",
             "organization_id": Uuid::now_v7(), "org_id": "alpha", "membership_id": membership,
-            "membership_version": 1, "authorization_epoch": 1, "audience": "tos>remind",
+            "membership_version": 1, "authorization_epoch": 1, "audience": "remind",
             "testing_environment_id": null, "scopes": [], "org_role": "member", "tags": null,
         }))?;
         assert_eq!(client.actor(&inspected, &snapshot)?.org_id, "alpha");
@@ -566,7 +566,7 @@ mod tests {
         // still supplies the canonical identity. Private UUID fields are ignored.
         let mut legacy = inspected.clone();
         legacy.public_id = None;
-        assert_eq!(client.actor(&legacy, &snapshot)?.public_id, "person");
+        assert_eq!(client.actor(&legacy, &snapshot)?.public_id, "c:person");
         let mut missing = snapshot.clone();
         missing.public_id = None;
         assert!(matches!(
@@ -592,7 +592,7 @@ mod tests {
             let mut invalid = snapshot.clone();
             match change {
                 "principal" => invalid.public_id = Some("other".to_owned()),
-                "audience" => invalid.audience = "tos>other".to_owned(),
+                "audience" => invalid.audience = "other".to_owned(),
                 "plane" => invalid.testing_environment_id = Some(Uuid::now_v7()),
                 _ => invalid.authorization_epoch = -1,
             }

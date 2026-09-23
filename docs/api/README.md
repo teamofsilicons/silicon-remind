@@ -9,7 +9,7 @@ investigating a failed call. Bodies are bounded by the deployment's request limi
 ## Authentication and organization selection
 
 Authenticate with `Authorization: Bearer <application-access-token>` and
-`X-Org-ID: <org-handle>`. These are IAM Application tokens for `tos>remind`.
+`X-Org-ID: <org-handle>`. These are IAM Application tokens for `remind`.
 Remind introspects each request through the official `silicon-iam-client` and
 requires matching application audience, organization, principal, membership,
 expiry, and testing plane. An IAM refresh token cannot authorize reminder actions.
@@ -43,7 +43,7 @@ OTP, or a browser redirect. Pass an `Idempotency-Key` on login and refresh when 
 retry must replay the same logical exchange. It must be 16–255 visible ASCII
 characters. Session responses use `Cache-Control: no-store`.
 
-Browser sign-in sends only `app_id=tos>remind` and `redirect_uri` to IAM; it must
+Browser sign-in sends only `app_id=remind` and `redirect_uri` to IAM; it must
 not send `org_id` or `org_ids`. The user chooses the authorized organizations in
 IAM. After exchanging the resulting unscoped SLT, use `/auth/organizations` to
 discover that explicit grant list, then choose one as `X-Org-ID` for ordinary

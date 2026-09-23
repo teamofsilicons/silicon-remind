@@ -19,7 +19,7 @@ use crate::{
         Actor, ActorKind, CreateScheduleCommand, CronExpression, CursorKind,
         MAX_SCHEDULE_STATUS_BATCH_SIZE, PageCursor, PatchScheduleCommand, Schedule, ScheduleKind,
         ScheduleSection, ScheduleStatus, ScheduleTiming, ScheduleValidationError,
-        silicon_id_belongs_to_org,
+        is_valid_global_silicon_id,
     },
     error::AppError,
     infrastructure::postgres::{
@@ -143,7 +143,7 @@ impl ScheduleService {
     ) -> Result<Page<ScheduleRow>, AppError> {
         if silicon_id
             .as_deref()
-            .is_some_and(|value| !silicon_id_belongs_to_org(value, &actor.org_id))
+            .is_some_and(|value| !is_valid_global_silicon_id(value))
         {
             return Err(AppError::Validation);
         }

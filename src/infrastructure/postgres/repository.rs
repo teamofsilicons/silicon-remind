@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     ARCHIVE_RETENTION_DAYS, MAX_SCHEDULE_STATUS_BATCH_SIZE, ReminderReadScope, ScheduleSection,
-    is_valid_iam_label, silicon_id_belongs_to_org,
+    is_valid_global_silicon_id, is_valid_iam_label,
 };
 
 use super::{
@@ -3144,7 +3144,7 @@ mod tests {
             id: Uuid::now_v7(),
             org_id: "tos".to_owned(),
             owner_principal_id: Uuid::now_v7(),
-            silicon_id: "assistant:tos".to_owned(),
+            silicon_id: "si:assistant".to_owned(),
             text: "Prepare report".to_owned(),
             timezone: "Asia/Kolkata".to_owned(),
             schedule_kind: "sometimes".to_owned(),
@@ -3716,11 +3716,11 @@ fn validate_org_id(value: &str) -> Result<(), RepositoryError> {
 }
 
 fn validate_global_silicon_id(value: &str, org_id: &str) -> Result<(), RepositoryError> {
-    if silicon_id_belongs_to_org(value, org_id) {
+    if is_valid_iam_label(org_id) && is_valid_global_silicon_id(value) {
         Ok(())
     } else {
         Err(RepositoryError::InvalidInput(
-            "global Silicon ID does not match the organization",
+            "invalid Silicon ID or organization ID",
         ))
     }
 }

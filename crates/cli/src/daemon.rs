@@ -6,7 +6,7 @@ use std::{path::PathBuf, process::Command};
 pub async fn execute(command: &Daemon) -> anyhow::Result<()> {
     if matches!(command, Daemon::Run | Daemon::Install) {
         bail!(
-            "Honeycomb manages Remind updates. Run `honeycomb update 'tos>remind'`; remove the old updater with `remind daemon uninstall`."
+            "Honeycomb manages Remind updates. Run `honeycomb update 'remind'`; remove the old updater with `remind daemon uninstall`."
         );
     }
     let os_home = PathBuf::from(

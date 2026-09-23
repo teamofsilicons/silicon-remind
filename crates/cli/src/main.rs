@@ -703,7 +703,7 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
             Config::AutoUpdate { value } => {
                 if matches!(value, Toggle::On) {
                     bail!(
-                        "Honeycomb manages Remind updates. Configure updates in Honeycomb and run `honeycomb update 'tos>remind'`."
+                        "Honeycomb manages Remind updates. Configure updates in Honeycomb and run `honeycomb update 'remind'`."
                     );
                 }
                 store.state.auto_update = false;
@@ -769,10 +769,8 @@ async fn login_status(
     unreachable!("the second identity check returns directly")
 }
 
-/// Choose the organization for a session whose SLT named none. One authorized
-/// organization is not a choice, and a Silicon carries its own organization in its
-/// `handle:org` identity, so neither case is worth a question. A login may legitimately
-/// cover several organizations, so ask only when the answer is genuinely unknowable.
+/// Choose the sole IAM-authorized organization when the session names none.
+/// Public actor IDs do not encode an organization; multiple grants need --org.
 async fn resolve_organization(client: &Client, bearer: &Secret) -> anyhow::Result<String> {
     let organizations = client.organizations(bearer).await?;
     if let [only] = organizations.as_slice() {
@@ -782,19 +780,6 @@ async fn resolve_organization(client: &Client, bearer: &Secret) -> anyhow::Resul
         bail!(
             "this login is not authorized for any organization; grant one through IAM, then sign in again"
         );
-    }
-    // A Silicon's public identity is `handle:org`, naming the organization it belongs to
-    // rather than the ones it was merely granted. Carbons carry no organization there, so
-    // this selects nothing for them and the ambiguity is reported instead.
-    let mut home = organizations.iter().filter(|identity| {
-        identity
-            .public_id
-            .as_deref()
-            .and_then(|public| public.split_once(':'))
-            .is_some_and(|(_, org)| org == identity.org_id)
-    });
-    if let (Some(only), None) = (home.next(), home.next()) {
-        return Ok(only.org_id.clone());
     }
     let available: Vec<_> = organizations
         .iter()

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     api::{ApiState, models},
     config::RuntimeEnvironment,
-    domain::{is_valid_iam_label, silicon_id_belongs_to_org},
+    domain::{is_valid_global_silicon_id, is_valid_iam_label},
     error::AppError,
     infrastructure::{
         crypto::{EncryptedSecret, destination_field_associated_data},
@@ -469,7 +469,7 @@ fn validate_iam_org_id(value: &str) -> Result<(), AppError> {
 }
 
 fn validate_global_silicon_id(value: &str, org_id: &str) -> Result<(), AppError> {
-    if silicon_id_belongs_to_org(value, org_id) {
+    if is_valid_iam_label(org_id) && is_valid_global_silicon_id(value) {
         Ok(())
     } else {
         Err(AppError::Validation)
@@ -537,10 +537,10 @@ mod tests {
         crate::infrastructure::postgres::migrate(&pool).await?;
         let actor = uuid::Uuid::now_v7();
         let member = uuid::Uuid::now_v7();
-        sqlx::query("INSERT INTO iam_identity_bindings VALUES('silicon','agent:alpha',$1),('membership','agent:alpha[alpha]',$2)")
+        sqlx::query("INSERT INTO iam_identity_bindings VALUES('silicon','si:agent',$1),('membership','si:agent[alpha]',$2)")
             .bind(actor).bind(member).execute(&pool).await?;
         for resource in [
-            json!({"id": member,"membership_id":"agent:alpha[alpha]"}),
+            json!({"id": member,"membership_id":"si:agent[alpha]"}),
             json!({"id": member}),
             json!({"principal_id": actor}),
         ] {
@@ -559,8 +559,8 @@ mod tests {
             super::removed_silicon_key(
                 &pool,
                 &json!({
-                    "resource":{"membership_id":"agent:alpha[alpha]"},
-                    "principal":{"public_id":"other:alpha"}
+                    "resource":{"membership_id":"si:agent[alpha]"},
+                    "principal":{"public_id":"si:other"}
                 }),
                 Some("alpha")
             )
@@ -576,11 +576,11 @@ mod tests {
         let payload = json!({
             "spec_version":"1.0", "event_id":uuid::Uuid::now_v7(),
             "event_type":"carbon.updated.v1", "occurred_at":"2026-09-21T00:00:00Z",
-            "aggregate":{"type":"carbon","id":"person","version":1},
+            "aggregate":{"type":"carbon","id":"c:person","version":1},
             "data":{"org_id":"alpha"}
         });
         let event: IamWebhookEvent = serde_json::from_value(payload.clone())?;
-        assert_eq!(event.aggregate.id, "person");
+        assert_eq!(event.aggregate.id, "c:person");
         assert!(!prepare_iam_event(&event, payload, [0; 32], received_at())?.1);
         Ok(())
     }
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn iam_identifier_validation_matches_published_fifty_character_bounds() {
         let org_id = "o".repeat(50);
-        let silicon_id = format!("{}:{org_id}", "s".repeat(50));
+        let silicon_id = format!("si:{}", "s".repeat(50));
         assert!(validate_iam_org_id(&org_id).is_ok());
         assert!(validate_global_silicon_id(&silicon_id, &org_id).is_ok());
         assert!(validate_iam_org_id(&"o".repeat(51)).is_err());

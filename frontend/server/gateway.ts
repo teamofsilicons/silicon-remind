@@ -360,7 +360,7 @@ export function createGateway(config: {
         const redirect = new URL("/ui/auth/callback", origin);
         redirect.searchParams.set("state", nonce);
         const destination = new URL("/login", authOrigin);
-        destination.searchParams.set("app_id", "tos>remind");
+        destination.searchParams.set("app_id", "remind");
         destination.searchParams.set("redirect_uri", redirect.href);
         res.setHeader("Set-Cookie", [
           sessionCookie(id),

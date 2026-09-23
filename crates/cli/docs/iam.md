@@ -1,6 +1,6 @@
 # IAM integration
 
-Remind is the organization-qualified IAM Application `tos>remind`. Application
+Remind is the organization-qualified IAM Application `remind`. Application
 credentials stay in backend environment variables:
 
 - `REMIND_IAM_BASE_URL`: IAM service origin.

@@ -56,7 +56,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
       assert.ok(grantedOrgs.includes(req.headers["x-org-id"] as string));
       res.end(
         JSON.stringify({
-          public_id: "person",
+          public_id: "c:person",
           principal_id: "person-id",
           org_id: req.headers["x-org-id"],
           actor_type: "carbon",
@@ -114,7 +114,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
     const auth = new URL((await begin.json()).url);
     assert.equal(auth.origin, "https://auth.iam.teamofsilicons.com");
     assert.equal(auth.pathname, "/login");
-    assert.equal(auth.searchParams.get("app_id"), "tos>remind");
+    assert.equal(auth.searchParams.get("app_id"), "remind");
     assert.equal(auth.searchParams.has("org_id"), false);
     assert.equal(auth.searchParams.has("org_ids"), false);
     const redirect = new URL(auth.searchParams.get("redirect_uri")!);
@@ -165,7 +165,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
     const body = await sessionResponse.text();
     assert.ok(!body.includes("private-access"));
     assert.ok(!body.includes("private-refresh"));
-    assert.equal(JSON.parse(body).identity.public_id, "person");
+    assert.equal(JSON.parse(body).identity.public_id, "c:person");
     assert.equal(JSON.parse(body).identity.org_id, "alpha");
     assert.deepEqual(JSON.parse(body).contexts[0].organizations, ["alpha", "beta"]);
     const changeOrg = (org: string) => fetch(origin + "/ui/organization", {
@@ -204,7 +204,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
       restoredSession.contexts.find((c: { id: string }) => c.id === envId).name,
       "Restored sandbox",
     );
-    assert.equal(restoredSession.productionIdentity.public_id, "person");
+    assert.equal(restoredSession.productionIdentity.public_id, "c:person");
 
     assert.equal(
       (await callback(redirect.href, correlationOnly)).headers.get("location"),

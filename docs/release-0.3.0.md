@@ -6,4 +6,4 @@ Missing, null, empty, and whitespace-only timezone values receive actionable err
 
 Development workers now use the same HTTP webhook policy as the API. Production webhook delivery still requires HTTPS.
 
-Update the CLI with `honeycomb update 'tos>remind'`. Rust consumers should update `silicon-remind-client` to `0.3.0` and pass an explicit IANA timezone when creating reminders. See the [migration policy](version-policy.md) and [end-to-end validation record](timezone-e2e.md).
+Update the CLI with `honeycomb update 'remind'`. Rust consumers should update `silicon-remind-client` to `0.3.0` and pass an explicit IANA timezone when creating reminders. See the [migration policy](version-policy.md) and [end-to-end validation record](timezone-e2e.md).
