@@ -43,3 +43,12 @@ dialog h2 { font-size:20px; font-weight:550; letter-spacing:-.02em; }
 @media(max-width:1100px) { .topbar-account>span { display:none; } }
 @media(max-width:760px) { .topbar { height:68px; padding:0 16px; gap:10px; flex-wrap:wrap; } .topbar>span { flex:1; } .topbar .plane { display:block; border:0; padding:0; margin:3px 0 0; font-size:10px; } .topbar-account { font-size:11px; }  .sidebar { top:68px; } main { padding:28px 16px 40px; } .page-heading .actions { margin-top:18px; } .panel-head { padding:18px; } .filters { padding:16px; } .table-scroll { scrollbar-width:thin; scrollbar-color:#c5cedb transparent; } .table-scroll::after { content:'Scroll to see schedule and status →'; position:sticky; left:0; display:block; width:calc(100vw - 68px); padding:10px 16px; color:var(--muted); font-size:11px; background:#f9fafc; border-top:1px solid var(--line); } }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none !important; animation:none !important; } }
+/* Keep account actions inside the fixed mobile header for long workspace names. */
+@media(max-width:760px) {
+ .topbar { flex-wrap:nowrap; }
+ .topbar>span { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+ .topbar .plane { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+ .topbar-account { min-width:0; max-width:30%; }
+ .topbar-account strong { overflow:hidden; text-overflow:ellipsis; }
+ .topbar>.actions { flex-shrink:0; }
+}
