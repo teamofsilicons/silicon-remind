@@ -2994,7 +2994,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-remind"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3042,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-remind-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-remind-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "reqwest",
