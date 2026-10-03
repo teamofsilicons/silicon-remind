@@ -20,6 +20,12 @@ token and Remind participant in Honeycomb before enabling imports. Caddy exposes
 only `/internal/honeycomb/organizations/*` from the internal namespace; those
 handlers require the dedicated service token independently of user sessions.
 
+The restricted `remind_testing` role needs `CREATE` and `TEMPORARY` on
+`silicon_remind_test`: each isolated schema replays migrations that use temporary
+canonical-ID mapping tables. `bootstrap-task.py` grants these only to the testing
+role. Keep database privileges revoked from `PUBLIC`; production `remind_runtime`
+retains only database `CONNECT` plus its existing table/sequence grants.
+
 Build the ARM64 base image, then wrap it with `deploy/aws/Dockerfile.runtime`
 before pushing. The wrapper installs the AWS RDS CA bundle required by the
 production database URLs; the base image alone cannot connect to RDS.
