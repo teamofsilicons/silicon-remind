@@ -2,6 +2,8 @@
 """Exercise native Remind API/CLI with disposable PostgreSQL and loopback IAM.
 
 Requires PostgreSQL binaries (PG_BIN may override the Homebrew location).
+Use --bin-dir for binaries built in a shared Cargo target directory and --temp-dir
+to select the parent directory for the disposable database and CLI state.
 Use --serve to retain the fixture for browser checks; create the printed stop_file
 or interrupt this process to stop every service and remove the temporary data.
 IAM credentials and tokens below are invented fixtures, never real credentials.
@@ -30,13 +32,14 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 PG_BIN = Path(os.environ.get("PG_BIN", "/opt/homebrew/opt/postgresql@16/bin"))
 ORG = "timezone-e2e"
-APP = "timezone-e2e>remind"
-APP_SECRET = "local-timezone-e2e-application-secret"
+APP = "remind"
+APP_SECRET = "ask_" + "e" * 43
 SLT = "oac_local_timezone_e2e_only"
 ACCESS = "oat_local_timezone_e2e_only"
 REFRESH = "ort_local_timezone_e2e_only"
 PRINCIPAL = "00000000-0000-4000-8000-000000000001"
-MEMBERSHIP = "00000000-0000-4000-8000-000000000002"
+ACTOR = "si:clock"
+MEMBERSHIP = f"{ACTOR}[{ORG}]"
 ORGANIZATION = "00000000-0000-4000-8000-000000000003"
 
 
@@ -89,7 +92,7 @@ class IamFixture(BaseHTTPRequestHandler):
                 "access_token": ACCESS, "refresh_token": REFRESH,
                 "token_type": "Bearer", "expires_in": 86400, "scope": "",
                 "actor": {"type": "silicon", "principal_id": PRINCIPAL,
-                          "public_id": f"clock:{ORG}"}, "org_id": ORG,
+                          "public_id": ACTOR}, "org_id": ORG,
             })
         if self.path == "/api/v1/oauth/introspect":
             org = self.headers.get("X-Org-Id")
@@ -97,7 +100,7 @@ class IamFixture(BaseHTTPRequestHandler):
                 return self.respond(200, {"active": False})
             snapshot = {
                 "principal_id": PRINCIPAL, "actor_type": "silicon",
-                "public_id": f"clock:{ORG}", "organization_id": ORGANIZATION,
+                "public_id": ACTOR, "organization_id": ORGANIZATION,
                 "org_id": ORG, "membership_id": MEMBERSHIP,
                 "membership_version": 1, "authorization_epoch": 1,
                 "audience": APP, "testing_environment_id": None,
@@ -105,9 +108,12 @@ class IamFixture(BaseHTTPRequestHandler):
             }
             return self.respond(200, {
                 "active": True, "principal_id": PRINCIPAL, "client_id": APP,
+                "actor_type": "silicon", "public_id": ACTOR, "audience": APP,
                 "expires_at": int(time.time()) + 86400,
-                **({"authorization": snapshot, "org_id": ORG,
-                    "membership_id": MEMBERSHIP} if org else {"authorizations": [snapshot]}),
+                # IAM 5 ordinary sessions have one actor and one organization,
+                # including introspection without an organization header.
+                "authorization": snapshot, "org_id": ORG,
+                "membership_id": MEMBERSHIP, "authorization_epoch": 1,
             })
         self.respond(404, {"error": {"code": "unexpected_fixture_route"}})
 
@@ -130,18 +136,30 @@ def main():
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--worker", action="store_true", help="Also verify real next-minute webhook delivery")
+    parser.add_argument("--bin-dir", type=Path,
+                        help="Directory containing built binaries (default: CARGO_TARGET_DIR/debug or target/debug)")
+    parser.add_argument("--temp-dir", type=Path, help="Parent directory for disposable fixture data")
     args = parser.parse_args()
+    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+    if not target.is_absolute():
+        target = ROOT / target
+    bin_dir = (args.bin_dir or target / "debug").resolve()
+    if args.bin_dir and not args.skip_build:
+        parser.error("--bin-dir requires --skip-build; build those binaries before running the harness")
     build_env = dict(os.environ, DEVELOPER_DIR="/Library/Developer/CommandLineTools")
     if not args.skip_build:
         subprocess.run(["cargo", "build", "--workspace", "--bin", "remind-api",
                         "--bin", "remind-migrate", "--bin", "remind", "--bin", "remind-worker"],
                        cwd=ROOT, env=build_env, check=True)
+    for binary in ("remind-api", "remind-migrate", "remind", *(("remind-worker",) if args.worker else ())):
+        if not os.access(bin_dir / binary, os.X_OK):
+            parser.error(f"missing executable: {bin_dir / binary}")
     clean_env = {key: value for key, value in os.environ.items()
                  if key in {"PATH", "HOME", "USER", "TMPDIR", "LANG"}}
     stopped = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stopped.set())
-    with tempfile.TemporaryDirectory(prefix="remind-timezone-e2e-") as directory:
+    with tempfile.TemporaryDirectory(prefix="remind-timezone-e2e-", dir=args.temp_dir) as directory:
         scratch = Path(directory)
         database = scratch / "postgres"
         pg_port, api_port = available_port(), available_port()
@@ -194,7 +212,7 @@ def main():
             return result.stdout.strip()
 
         def cli(*arguments, success=True):
-            result = subprocess.run([str(ROOT / "target/debug/remind"), "--url", origin,
+            result = subprocess.run([str(bin_dir / "remind"), "--url", origin,
                                      "--org", ORG, "--no-update", "--json", *arguments],
                                     cwd=scratch, env=env, capture_output=True, text=True, timeout=20)
             if success:
@@ -207,8 +225,8 @@ def main():
             run([PG_BIN / "pg_ctl", "-D", database, "-l", scratch / "postgres.log",
                  "-o", f"-h 127.0.0.1 -p {pg_port} -k {scratch}", "-w", "start"])
             pg_started = True
-            run([ROOT / "target/debug/remind-migrate"])
-            api = subprocess.Popen([str(ROOT / "target/debug/remind-api")], cwd=scratch,
+            run([bin_dir / "remind-migrate"])
+            api = subprocess.Popen([str(bin_dir / "remind-api")], cwd=scratch,
                                    env=env, stdout=log, stderr=log)
             for _ in range(100):
                 if api.poll() is not None:
@@ -231,7 +249,14 @@ def main():
             assert len(IamFixture.calls) == before_iam, "CLI invalid requests reached IAM"
             print("PASS: CLI rejects 8 missing/blank timezone cases before authentication", flush=True)
             login = cli("login", SLT)
-            assert login, "CLI login returned no result"
+            assert login["public_id"] == ACTOR and login["org_id"] == ORG, login
+            status = cli("login", "status")
+            assert status["authenticated"] and status["public_id"] == ACTOR and status["org_id"] == ORG, status
+            status, organizations = request("GET", "/api/v1/auth/organizations")
+            assert status == 200 and len(organizations["items"]) == 1, (status, organizations)
+            assert organizations["items"][0]["org_id"] == ORG, organizations
+            assert organizations["items"][0]["public_id"] == ACTOR, organizations
+            print("PASS: canonical IAM 5 login/status and organization discovery retain one actor and organization", flush=True)
 
             for kind in ("recurring", "one_time"):
                 for marker in ("omitted", None, "", " \t\n"):
@@ -300,7 +325,7 @@ def main():
                     assert datetime.fromisoformat(created["next_run_at"].replace("Z", "+00:00")) == due
                     expected[created["id"]] = timezone
                 worker_env = dict(env, REMIND_WORKER_OPERATIONAL_BIND_ADDR=f"127.0.0.1:{available_port()}")
-                worker = subprocess.Popen([str(ROOT / "target/debug/remind-worker")], cwd=scratch,
+                worker = subprocess.Popen([str(bin_dir / "remind-worker")], cwd=scratch,
                                           env=worker_env, stdout=log, stderr=log)
                 print(f"WAIT: actual worker delivery due at {due.isoformat()}", flush=True)
                 deadline = due.timestamp() + 15
