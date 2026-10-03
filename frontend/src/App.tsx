@@ -1,3 +1,4 @@
+import { ArcButton, ArcInput } from './arc';
 import {
   createSignal,
   createEffect,
@@ -624,7 +625,7 @@ export default function App() {
               </select>
             </label>
           </Show>
-          <button class="text-button" onClick={login}>Add account or organization</button>
+          <ArcButton class="text-button" onClick={login}>Add account or organization</ArcButton>
         </div>
         <nav aria-label="Main navigation">
           <For each={navigation}>
@@ -649,7 +650,7 @@ export default function App() {
           >
             Silicon IAm ↗
           </a>
-          <div class="c:person">
+          <div class="person">
             <span class="avatar">
               {identity()?.public_id?.slice(0, 1).toUpperCase() || "S"}
             </span>
@@ -666,7 +667,7 @@ export default function App() {
       </aside>
       <div class="workspace">
         <header class="topbar">
-          <button
+          <ArcButton
             class="icon-button mobile-menu"
             aria-label="Toggle navigation"
             aria-expanded={mobile()}
@@ -674,18 +675,19 @@ export default function App() {
             onClick={() => setMobile(!mobile())}
           >
             ☰
-          </button>
+          </ArcButton>
           <span>
             Silicon / Remind{" "}
             <span class={"plane " + (test() ? "testing" : "")}>
               {test() ? context()?.name : "Production"}
             </span>
           </span>
+          <Show when={identity()}><div class="topbar-account" title={identity()!.public_id + ' · ' + identity()!.org_id}><span>{identity()!.public_id}</span><strong>{identity()!.org_id}</strong></div></Show>
           <div class="actions">
             <Show
               when={identity()}
               fallback={
-                <button
+                <ArcButton
                   class="text-button"
                   disabled={signingIn()}
                   onClick={login}
@@ -695,10 +697,10 @@ export default function App() {
                     : signingIn()
                       ? "Opening IAm…"
                       : "Continue with IAm"}
-                </button>
+                </ArcButton>
               }
             >
-              <button
+              <ArcButton
                 class="text-button"
                 onClick={() =>
                   confirm(
@@ -714,7 +716,7 @@ export default function App() {
                 }
               >
                 Sign out
-              </button>
+              </ArcButton>
             </Show>
           </div>
         </header>
@@ -724,7 +726,7 @@ export default function App() {
             <div class="test-banner">
               <span>◇ Test environment · {context()?.name}</span>
               <span>{identity()?.public_id || "Not signed in"} · Test deliveries simulated unless a receiver is enabled</span>
-              <button class="secondary" onClick={() => void perform(() => switchContext("production"))}>Exit testing mode</button>
+              <ArcButton class="secondary" onClick={() => void perform(() => switchContext("production"))}>Exit testing mode</ArcButton>
             </div>
           </Show>
           <div class="page-heading">
@@ -750,22 +752,22 @@ export default function App() {
                   view() === "reminders" && identity()?.can_manage_reminders
                 }
               >
-                <button class="primary" onClick={() => edit()}>
+                <ArcButton class="primary" onClick={() => edit()}>
                   ＋ New reminder
-                </button>
+                </ArcButton>
               </Show>
               <Show when={view() === "testing"}>
-                <button class="secondary" onClick={importEnvironment}>
+                <ArcButton class="secondary" onClick={importEnvironment}>
                   Import environment
-                </button>
+                </ArcButton>
                 <Show
                   when={
                     (session.error ? undefined : session())?.productionIdentity
                   }
                 >
-                  <button class="primary" onClick={newEnvironment}>
+                  <ArcButton class="primary" onClick={newEnvironment}>
                     ＋ Create environment
-                  </button>
+                  </ArcButton>
                 </Show>
               </Show>
             </div>
@@ -773,13 +775,13 @@ export default function App() {
           <Show when={notice()}>
             <div class="notice" role="status">
               {notice()}
-              <button
+              <ArcButton
                 class="icon-button"
                 aria-label="Dismiss notification"
                 onClick={() => setNotice("")}
               >
                 ×
-              </button>
+              </ArcButton>
             </div>
           </Show>
           <Show when={globalError() || session.error}>
@@ -818,7 +820,7 @@ export default function App() {
                           ? "Use an IAm test token from this sandbox’s linked environment."
                           : "Continue with your Silicon IAm account to open your workspace. You’ll return here automatically after signing in."}
                     </p>
-                    <button
+                    <ArcButton
                       class="primary"
                       onClick={() =>
                         void perform(async () => {
@@ -833,10 +835,10 @@ export default function App() {
                         : signingIn()
                           ? "Opening IAm…"
                           : "Continue with IAm"}
-                    </button>
-                    <button class="text-button" onClick={importEnvironment}>
+                    </ArcButton>
+                    <ArcButton class="text-button" onClick={importEnvironment}>
                       Use a test environment
-                    </button>
+                    </ArcButton>
                   </div>
                 </Panel>
               }
@@ -869,20 +871,20 @@ export default function App() {
                           : "Your organization’s reminders"
                   }
                   action={
-                    <button
+                    <ArcButton
                       class="text-button"
                       onClick={invalidate}
                       disabled={rows.loading}
                     >
                       Refresh
-                    </button>
+                    </ArcButton>
                   }
                 >
                   <Show when={["reminders", "archive"].includes(view())}>
                     <div class="filters">
                       <label>
                         Silicon
-                        <input
+                        <ArcInput
                           placeholder="All Silicons"
                           value={silicon()}
                           onChange={(e) => {
@@ -922,20 +924,20 @@ export default function App() {
                       >
                         <label>
                           Find by ID
-                          <input
+                          <ArcInput
                             name="id"
                             placeholder="Reminder UUID"
                             required
                           />
                         </label>
-                        <button class="secondary">Open</button>
+                        <ArcButton class="secondary">Open</ArcButton>
                       </form>
                     </div>
                   </Show>
                   <Show when={view() === "testing"}>
                     <div class="filters">
                       <label class="check">
-                        <input
+                        <ArcInput
                           type="checkbox"
                           checked={includeDeleted()}
                           onChange={(e) => {
@@ -958,7 +960,7 @@ export default function App() {
                   <Show when={selected().length}>
                     <div class="bulk">
                       <strong>{selected().length} selected</strong>
-                      <button
+                      <ArcButton
                         class="secondary"
                         onClick={() =>
                           confirm(
@@ -970,8 +972,8 @@ export default function App() {
                         }
                       >
                         Pause
-                      </button>
-                      <button
+                      </ArcButton>
+                      <ArcButton
                         class="secondary"
                         onClick={() =>
                           confirm(
@@ -983,13 +985,13 @@ export default function App() {
                         }
                       >
                         Resume
-                      </button>
-                      <button
+                      </ArcButton>
+                      <ArcButton
                         class="text-button"
                         onClick={() => setSelected([])}
                       >
                         Clear
-                      </button>
+                      </ArcButton>
                     </div>
                   </Show>
                   <Show
@@ -1005,7 +1007,7 @@ export default function App() {
                       fallback={
                         <div class="error" role="alert">
                           {readError(rows.error)}{" "}
-                          <button onClick={invalidate}>Retry</button>
+                          <ArcButton onClick={invalidate}>Retry</ArcButton>
                         </div>
                       }
                     >
@@ -1050,7 +1052,7 @@ export default function App() {
                                         identity()?.can_manage_reminders
                                       }
                                     >
-                                      <input
+                                      <ArcInput
                                         type="checkbox"
                                         aria-label="Select all owned reminders on this page"
                                         checked={
@@ -1104,7 +1106,7 @@ export default function App() {
                                     <tr>
                                       <td class="check-cell">
                                         <Show when={owner(r)}>
-                                          <input
+                                          <ArcInput
                                             type="checkbox"
                                             aria-label={
                                               "Select " + r.text.slice(0, 60)
@@ -1123,12 +1125,12 @@ export default function App() {
                                         </Show>
                                       </td>
                                       <td>
-                                        <button
+                                        <ArcButton
                                           class="row-link reminder-text"
                                           onClick={() => selectDetail(r.id)}
                                         >
                                           {r.text}
-                                        </button>
+                                        </ArcButton>
                                         <small>
                                           {r.kind === "one_time"
                                             ? "One time"
@@ -1167,7 +1169,7 @@ export default function App() {
                                       </td>
                                       <td>{s.reminder_count}</td>
                                       <td>
-                                        <button
+                                        <ArcButton
                                           class="text-button"
                                           onClick={() => {
                                             setSilicon(s.silicon_id);
@@ -1175,7 +1177,7 @@ export default function App() {
                                           }}
                                         >
                                           View reminders →
-                                        </button>
+                                        </ArcButton>
                                       </td>
                                     </tr>
                                   )}
@@ -1214,7 +1216,7 @@ export default function App() {
                                                 (c) => c.id === e.id,
                                               )}
                                             >
-                                              <button
+                                              <ArcButton
                                                 class="text-button"
                                                 onClick={() =>
                                                   void perform(() =>
@@ -1223,10 +1225,10 @@ export default function App() {
                                                 }
                                               >
                                                 Use
-                                              </button>
+                                              </ArcButton>
                                             </Show>
                                             <Show when={manager(e)}>
-                                              <button
+                                              <ArcButton
                                                 class="text-button"
                                                 onClick={() =>
                                                   void perform(() =>
@@ -1235,8 +1237,8 @@ export default function App() {
                                                 }
                                               >
                                                 Show key
-                                              </button>
-                                              <button
+                                              </ArcButton>
+                                              <ArcButton
                                                 class="text-button"
                                                 onClick={() =>
                                                   confirm(
@@ -1252,8 +1254,8 @@ export default function App() {
                                                 }
                                               >
                                                 Rotate
-                                              </button>
-                                              <button
+                                              </ArcButton>
+                                              <ArcButton
                                                 class="text-button danger-text"
                                                 onClick={() =>
                                                   confirm(
@@ -1275,13 +1277,13 @@ export default function App() {
                                                 }
                                               >
                                                 Delete
-                                              </button>
+                                              </ArcButton>
                                             </Show>
                                           </Show>
                                           <Show
                                             when={e.deleted_at && manager(e)}
                                           >
-                                            <button
+                                            <ArcButton
                                               class="text-button"
                                               onClick={() =>
                                                 confirm(
@@ -1297,7 +1299,7 @@ export default function App() {
                                               }
                                             >
                                               Restore
-                                            </button>
+                                            </ArcButton>
                                           </Show>
                                         </div>
                                       </td>
@@ -1310,20 +1312,20 @@ export default function App() {
                         </div>
                         <div class="pagination">
                           <span>{rows()?.items.length} loaded</span>
-                          <button
+                          <ArcButton
                             class="secondary"
                             disabled={!history().length}
                             onClick={previous}
                           >
                             Previous
-                          </button>
-                          <button
+                          </ArcButton>
+                          <ArcButton
                             class="secondary"
                             disabled={!rows()?.next_cursor}
                             onClick={next}
                           >
                             Next
-                          </button>
+                          </ArcButton>
                         </div>
                       </Show>
                     </Show>
@@ -1335,9 +1337,9 @@ export default function App() {
                   title="Webhook subscriptions"
                   action={
                     <Show when={identity()?.can_manage_reminders}>
-                      <button class="primary" onClick={setWebhook}>
+                      <ArcButton class="primary" onClick={setWebhook}>
                         Add webhook
-                      </button>
+                      </ArcButton>
                     </Show>
                   }
                 >
@@ -1359,7 +1361,7 @@ export default function App() {
                         fallback={
                           <div class="error" role="alert">
                             {readError(destinations.error)}
-                            {" "}<button class="text-button" onClick={invalidate}>Retry</button>
+                            {" "}<ArcButton class="text-button" onClick={invalidate}>Retry</ArcButton>
                           </div>
                         }
                       >
@@ -1382,7 +1384,7 @@ export default function App() {
                                       <small class="mono break">{d.id}</small>
                                       <small>Added {date(d.updated_at)}</small>
                                     </div>
-                                    <button
+                                    <ArcButton
                                       class="secondary danger-text"
                                       onClick={() =>
                                         confirm(
@@ -1398,7 +1400,7 @@ export default function App() {
                                       }
                                     >
                                       Remove subscription
-                                    </button>
+                                    </ArcButton>
                                   </div>
                                 )}
                               </For>
@@ -1418,7 +1420,7 @@ export default function App() {
                 <div class="settings-grid">
                   <Panel title="Telemetry">
                     <div class="detail-body">
-                      <label><input type="checkbox" checked={telemetryEnabled()} onChange={e=>{
+                      <label><ArcInput type="checkbox" checked={telemetryEnabled()} onChange={e=>{
                         const enabled=e.currentTarget.checked;localStorage.setItem("remind.telemetry",enabled?"on":"off");setTelemetryEnabled(enabled);
                       }}/> Share operational diagnostics with Space Station</label>
                       <p class="hint">Enabled by default. Records action outcomes, timing, and browser interactions. Reminder text, tokens, URLs and input contents are excluded. Sandbox events remain inside the sandbox.</p>
@@ -1441,11 +1443,11 @@ export default function App() {
                         </dd>
                       </dl>
                       <div class="actions">
-                        <button class="secondary" onClick={changeOrganization}>
+                        <ArcButton class="secondary" onClick={changeOrganization}>
                           {test() ? "Sign in with a test token" : "Continue with IAm"}
-                        </button>
+                        </ArcButton>
                         <Show when={identity()}>
-                          <button
+                          <ArcButton
                             class="text-button"
                             onClick={() =>
                               void perform(async () => {
@@ -1456,7 +1458,7 @@ export default function App() {
                             }
                           >
                             Verify session
-                          </button>
+                          </ArcButton>
                         </Show>
                       </div>
                     </div>
@@ -1479,9 +1481,9 @@ export default function App() {
                             "—"}
                         </dd>
                       </dl>
-                      <button class="secondary" onClick={invalidate}>
+                      <ArcButton class="secondary" onClick={invalidate}>
                         Check readiness
-                      </button>
+                      </ArcButton>
                       <p class="hint">
                         The service connection is configured by the frontend
                         host. Sessions are encrypted on the server.
@@ -1522,10 +1524,10 @@ export default function App() {
                   </dd>
                 </dl>
                 <div class="actions wrap">
-                  <Show when={!testInfo()?.iam_control_version}><button class="secondary" onClick={configureIam}>
+                  <Show when={!testInfo()?.iam_control_version}><ArcButton class="secondary" onClick={configureIam}>
                     Configure IAm
-                  </button>
-                  <button
+                  </ArcButton>
+                  <ArcButton
                     class="secondary danger-text"
                     onClick={() =>
                       open({
@@ -1562,8 +1564,8 @@ export default function App() {
                     }
                   >
                     Clean environment
-                  </button>
-                  <button
+                  </ArcButton>
+                  <ArcButton
                     class="text-button"
                     onClick={() =>
                       confirm(
@@ -1581,7 +1583,7 @@ export default function App() {
                     }
                   >
                     Forget
-                  </button>
+                  </ArcButton>
                 </Show></div>
                 <p class="hint">
                   Inactive environments retire after 15 days, with a further 30
@@ -1594,9 +1596,9 @@ export default function App() {
             <Panel
               title="Reminder details"
               action={
-                <button class="text-button" onClick={() => setDetailId("")}>
+                <ArcButton class="text-button" onClick={() => setDetailId("")}>
                   Close
-                </button>
+                </ArcButton>
               }
             >
               <Show
@@ -1644,10 +1646,10 @@ export default function App() {
                         </dl>
                         <Show when={owner(r())}>
                           <div class="actions">
-                            <button class="secondary" onClick={() => edit(r())}>
+                            <ArcButton class="secondary" onClick={() => edit(r())}>
                               Edit reminder
-                            </button>
-                            <button
+                            </ArcButton>
+                            <ArcButton
                               class="secondary"
                               onClick={() =>
                                 void perform(() =>
@@ -1661,13 +1663,13 @@ export default function App() {
                               }
                             >
                               {r().status === "paused" ? "Resume" : "Pause"}
-                            </button>
-                            <button
+                            </ArcButton>
+                            <ArcButton
                               class="text-button"
                               onClick={() => archive(r())}
                             >
                               Archive
-                            </button>
+                            </ArcButton>
                           </div>
                         </Show>
                         <h3 class="section-heading">Execution history</h3>
@@ -1732,7 +1734,7 @@ export default function App() {
                               </div>
                               <div class="pagination">
                                 <span>webhook ingress receipts</span>
-                                <button
+                                <ArcButton
                                   class="secondary"
                                   disabled={!execHistory().length}
                                   onClick={() => {
@@ -1742,8 +1744,8 @@ export default function App() {
                                   }}
                                 >
                                   Previous
-                                </button>
-                                <button
+                                </ArcButton>
+                                <ArcButton
                                   class="secondary"
                                   disabled={!executions()?.next_cursor}
                                   onClick={() => {
@@ -1752,7 +1754,7 @@ export default function App() {
                                   }}
                                 >
                                   Next
-                                </button>
+                                </ArcButton>
                               </div>
                             </Show>
                           </Show>
@@ -1807,14 +1809,14 @@ function SecretDialog(p: { value: string; close: () => void }) {
           Anyone with this key can administer the sandbox. Keep it somewhere
           private.
         </p>
-        <input
+        <ArcInput
           aria-label="Environment root key"
           readonly
           value={p.value}
           onFocus={(e) => e.currentTarget.select()}
         />
         <div class="actions">
-          <button
+          <ArcButton
             class="secondary"
             onClick={async () => {
               try {
@@ -1826,10 +1828,10 @@ function SecretDialog(p: { value: string; close: () => void }) {
             }}
           >
             {copied() ? "Copied" : "Copy key"}
-          </button>
-          <button class="primary" onClick={p.close}>
+          </ArcButton>
+          <ArcButton class="primary" onClick={p.close}>
             Done
-          </button>
+          </ArcButton>
         </div>
       </div>
     </dialog>
