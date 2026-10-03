@@ -12,6 +12,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bootstrap:
+    name: Restricted bootstrap grants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 deploy/aws/test_bootstrap_grants.py
+
   rust:
     name: Rust quality gate
     runs-on: ubuntu-latest

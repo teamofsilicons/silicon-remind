@@ -50,8 +50,9 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 """ % (role, role, role, role, database, database, role)
     if testing:
         # Test runtime owns its control tables and replica schemas because its
-        # public lifecycle operations legitimately create/drop isolated schemas.
-        sql += 'GRANT CREATE ON DATABASE '+database+' TO '+role+';\n'
+        # public lifecycle operations create/drop isolated schemas. Replaying
+        # migrations also needs transaction-local canonical-ID mapping tables.
+        sql += 'GRANT CREATE, TEMPORARY ON DATABASE '+database+' TO '+role+';\n'
         sql += 'GRANT USAGE, CREATE ON SCHEMA public TO '+role+';\n'
     command(['psql', '-X', '--set', 'ON_ERROR_STOP=1'], env, sql+'COMMIT;\n')
     print('Configured restricted role: '+role, flush=True)
