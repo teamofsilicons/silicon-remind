@@ -94,6 +94,8 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
         "X-Remind-UI": "1",
         "Content-Type": "application/json",
         Cookie: cookie,
+        "X-Remind-Account": "signed-out",
+        "X-Remind-Context": "production",
       },
       body: "{}",
     });

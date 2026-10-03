@@ -1,4 +1,5 @@
 import { ArcButton, ArcInput } from './arc';
+import { IamSignIn } from "./IamSignIn";
 import {
   createSignal,
   createEffect,
@@ -77,6 +78,7 @@ export default function App() {
     const scope = dataScope();
     if (scope === displayedScope) return;
     displayedScope = scope;
+    setSigningIn(false);
     setDialog(undefined); setDialogError(""); setGlobalError(""); setNotice(""); setSecret("");
     setSelected([]); setDetailId(""); setCursor(""); setHistory([]);
     setExecCursor(""); setExecHistory([]); setSilicon(""); setStatus(""); setIncludeDeleted(false);
@@ -175,20 +177,9 @@ export default function App() {
     open({ title, description, submit: label, danger, run });
   }
   const [signingIn, setSigningIn] = createSignal(false);
-  async function continueWithIam() {
-    if (signingIn()) return;
-    setSigningIn(true);
-    try {
-      const result = await request<{ url: string }>("auth/start", "POST", {});
-      window.location.assign(result.url);
-    } catch (e) {
-      setSigningIn(false);
-      throw e;
-    }
-  }
   function login() {
     if (test()) return tokenLogin();
-    void perform(continueWithIam);
+    setSigningIn(true);
   }
   function changeOrganization() {
     login();
@@ -1772,6 +1763,14 @@ export default function App() {
           <span>Reminders, on schedule.</span>
         </footer>
       </div>
+      <Show when={signingIn()}>
+        <IamSignIn close={() => setSigningIn(false)} signedIn={async (kind, contextId) => {
+          const current = await reloadSession();
+          if (current?.identity?.actor_type !== kind || current.activeAccount !== contextId)
+            throw Error("The selected sign-in context changed. Please sign in again.");
+          invalidate();
+        }} />
+      </Show>
       <Show when={dialog()}>
         {(spec) => (
           <Modal
