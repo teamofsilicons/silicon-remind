@@ -315,7 +315,14 @@ async fn run_test_cycles(
     // Rotate through bounded pages, keeping production work between pages.
     for id in ids.into_iter().take(8) {
         *cursor = Some(id);
-        if let Some(lease) = tests.enter_worker(id).await? {
+        if let Some(lease) = tests
+            .enter_worker_if_pending(
+                id,
+                runtime.clock.now(),
+                runtime.encryption.current_version(),
+            )
+            .await?
+        {
             let repository = PostgresRepository::new(lease.pool.clone());
             let delivery = runtime.delivery.with_repository(
                 repository.clone(),
