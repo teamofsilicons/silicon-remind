@@ -24,7 +24,7 @@ pub async fn maintain(
     match crate_name {
         "silicon-remind-cli" => UpdateStatus::Managed {
             manager: "honeycomb".into(),
-            command: "honeycomb update 'tos>remind'".into(),
+            command: "honeycomb update 'remind'".into(),
         },
         "silicon-remind-client" => UpdateStatus::Disabled,
         _ => UpdateStatus::Unavailable,

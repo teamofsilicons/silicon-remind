@@ -105,7 +105,7 @@ async fn seed_visibility_fixture(pool: &PgPool) -> anyhow::Result<VisibilityFixt
     let denied_schedule = seed_visibility_schedule(
         pool,
         denied_owner,
-        "denied:tos",
+        "si:denied",
         "denied newest",
         now - Duration::minutes(1),
     )
@@ -113,7 +113,7 @@ async fn seed_visibility_fixture(pool: &PgPool) -> anyhow::Result<VisibilityFixt
     let first_allowed = seed_visibility_schedule(
         pool,
         first_allowed_owner,
-        "first:tos",
+        "si:first",
         "first allowed",
         now - Duration::minutes(2),
     )
@@ -121,15 +121,14 @@ async fn seed_visibility_fixture(pool: &PgPool) -> anyhow::Result<VisibilityFixt
     let second_allowed = seed_visibility_schedule(
         pool,
         second_allowed_owner,
-        "second:tos",
+        "si:second",
         "second allowed",
         now - Duration::minutes(3),
     )
     .await?;
-    let allowed_execution =
-        seed_visibility_execution(pool, first_allowed, "first:tos", now).await?;
+    let allowed_execution = seed_visibility_execution(pool, first_allowed, "si:first", now).await?;
     let denied_execution =
-        seed_visibility_execution(pool, denied_schedule, "denied:tos", now).await?;
+        seed_visibility_execution(pool, denied_schedule, "si:denied", now).await?;
 
     Ok(VisibilityFixture {
         carbon_scope: ReminderReadScope::silicon_principals(vec![
@@ -443,7 +442,7 @@ async fn bulk_schedule_status_uses_deterministic_error_precedence() -> anyhow::R
 async fn bulk_pause_serializes_after_scheduler_materialization() -> anyhow::Result<()> {
     let database = test_database().await?;
     let now = fixture_now();
-    let schedule_id = seed_due_schedule(&database.pool, "bulk-race:tos", now, "recurring").await?;
+    let schedule_id = seed_due_schedule(&database.pool, "si:bulk-race", now, "recurring").await?;
     let owner_principal_id = schedule_owner(&database.pool, schedule_id).await?;
     let mut scheduler_transaction = database.repository.begin().await?;
     let schedule = database
@@ -609,7 +608,7 @@ async fn idempotent_response_lookup_validates_hash_and_expiry() -> anyhow::Resul
     .await?;
     let context = IdempotencyContext {
         actor_type: ActorType::Silicon,
-        actor_id: "remaining:tos".to_owned(),
+        actor_id: "si:remaining".to_owned(),
         key: "replay-key".to_owned(),
         request_hash,
         expires_at: now + Duration::hours(24),
@@ -731,7 +730,7 @@ async fn seed_expired_schedule(pool: &PgPool) -> anyhow::Result<PurgeFixture> {
              id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
              schedule_kind, cron_expression, status, next_run_at, deleted_at, created_at, \
              updated_at \
-         ) VALUES ($1, 'tos', $2, 'assistant:tos', $3, 'Asia/Kolkata', 'recurring', $4, \
+         ) VALUES ($1, 'tos', $2, 'si:assistant', $3, 'Asia/Kolkata', 'recurring', $4, \
              'paused', NULL, $5, $6, $5)",
     )
     .bind(schedule_id)
@@ -751,7 +750,7 @@ async fn seed_expired_schedule(pool: &PgPool) -> anyhow::Result<PurgeFixture> {
                  id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
                  scheduled_for, reminder_text, timezone, status, attempt_count, \
                  attempted_at, failure_reason, created_at, updated_at \
-             ) VALUES ($1, $2, 'tos', 'assistant:tos', 1, 'recurring', $3, $4, \
+             ) VALUES ($1, $2, 'tos', 'si:assistant', 1, 'recurring', $3, $4, \
                  'Asia/Kolkata', 'failed', 1, $3, 'retention fixture', $3, $3)",
         )
         .bind(Uuid::now_v7())
@@ -790,7 +789,7 @@ async fn assert_deleted_reminder_snapshot(
     assert_eq!(ledger.schedule_id, fixture.schedule_id);
     assert_eq!(ledger.org_id, "tos");
     assert_eq!(ledger.owner_principal_id, fixture.owner_principal_id);
-    assert_eq!(ledger.silicon_id, "assistant:tos");
+    assert_eq!(ledger.silicon_id, "si:assistant");
     assert_eq!(ledger.reminder_text, fixture.reminder_text);
     assert_eq!(ledger.schedule_kind, "recurring");
     assert_eq!(ledger.cron_expression, fixture.cron_expression);
@@ -810,7 +809,7 @@ async fn assert_deleted_reminder_snapshot(
             "schedule_id": fixture.schedule_id,
             "org_id": "tos",
             "owner_principal_id": fixture.owner_principal_id,
-            "silicon_id": "assistant:tos",
+            "silicon_id": "si:assistant",
             "reminder_text": fixture.reminder_text,
             "schedule_kind": "recurring",
             "cron_expression": fixture.cron_expression,
@@ -870,7 +869,7 @@ async fn assert_trim_keeps_deterministic_newest(
                  schedule_id, org_id, owner_principal_id, silicon_id, reminder_text, \
                  schedule_kind, cron_expression, timezone, created_at, archived_at, purge_after, \
                  purged_at, purge_reason, record_text \
-             ) VALUES ($1, 'tos', $2, 'assistant:tos', $3, 'one_time', '0 0 * * *', 'UTC', \
+             ) VALUES ($1, 'tos', $2, 'si:assistant', $3, 'one_time', '0 0 * * *', 'UTC', \
                  $4, $5, $6, $7, 'deleted', '{}'::text)",
         )
         .bind(trim_schedule_id)
@@ -902,7 +901,7 @@ async fn assert_ledger_conflict_preserves_source(database: &TestDatabase) -> any
              schedule_id, org_id, owner_principal_id, silicon_id, reminder_text, \
              schedule_kind, cron_expression, timezone, last_triggered_at, created_at, \
              archived_at, purge_after, purged_at, purge_reason, record_text \
-         ) VALUES ($1, 'tos', $2, 'assistant:tos', $3, 'recurring', $4, \
+         ) VALUES ($1, 'tos', $2, 'si:assistant', $3, 'recurring', $4, \
              'Asia/Kolkata', $5, $6, $7, $8, $9, 'deleted', '{}'::text)",
     )
     .bind(fixture.schedule_id)
@@ -948,7 +947,7 @@ async fn one_time_materialization_archives_before_delivery_without_extending_ret
     let seed_now = fixture_now();
 
     let one_time_id =
-        seed_due_schedule(&database.pool, "one-time:tos", seed_now, "one_time").await?;
+        seed_due_schedule(&database.pool, "si:one-time", seed_now, "one_time").await?;
     let worker_now = fixture_now() + Duration::seconds(1);
     let execution =
         materialize_schedule(&database.repository, one_time_id, worker_now, None).await?;
@@ -981,7 +980,7 @@ async fn one_time_materialization_archives_before_delivery_without_extending_ret
     );
 
     let recurring_id =
-        seed_due_schedule(&database.pool, "recurring:tos", seed_now, "recurring").await?;
+        seed_due_schedule(&database.pool, "si:recurring", seed_now, "recurring").await?;
     let recurring = materialize_schedule(
         &database.repository,
         recurring_id,
@@ -1010,9 +1009,9 @@ async fn current_and_archived_sections_are_partitioned_before_pagination() -> an
     let database = test_database().await?;
     let seed_now = fixture_now();
     let current_id =
-        seed_due_schedule(&database.pool, "current-section:tos", seed_now, "recurring").await?;
+        seed_due_schedule(&database.pool, "si:current-section", seed_now, "recurring").await?;
     let manual_id =
-        seed_due_schedule(&database.pool, "manual-archive:tos", seed_now, "recurring").await?;
+        seed_due_schedule(&database.pool, "si:manual-archive", seed_now, "recurring").await?;
     let manual_owner = schedule_owner(&database.pool, manual_id).await?;
     let archived_at = fixture_now() + Duration::seconds(1);
     assert!(
@@ -1028,13 +1027,8 @@ async fn current_and_archived_sections_are_partitioned_before_pagination() -> an
             .await?
     );
 
-    let automatic_id = seed_due_schedule(
-        &database.pool,
-        "automatic-archive:tos",
-        seed_now,
-        "one_time",
-    )
-    .await?;
+    let automatic_id =
+        seed_due_schedule(&database.pool, "si:automatic-archive", seed_now, "one_time").await?;
     let automatic_owner = schedule_owner(&database.pool, automatic_id).await?;
     let worker_now = fixture_now() + Duration::seconds(2);
     let automatic_execution =
@@ -1134,7 +1128,7 @@ async fn manual_archive_cancels_unaccepted_work_without_extending_retention() ->
     let database = test_database().await?;
     let now = fixture_now();
     let schedule_id =
-        seed_due_schedule(&database.pool, "archive-cancel:tos", now, "recurring").await?;
+        seed_due_schedule(&database.pool, "si:archive-cancel", now, "recurring").await?;
     let execution_ids =
         seed_unaccepted_archive_executions(&database.pool, schedule_id, now).await?;
     let owner = schedule_owner(&database.pool, schedule_id).await?;
@@ -1262,9 +1256,9 @@ async fn seed_unaccepted_archive_executions(
              scheduled_for, reminder_text, timezone, status, attempt_count, \
              next_attempt_at, attempted_at, failure_reason, lease_owner, lease_expires_at\
          ) VALUES \
-             ($1, $3, 'tos', 'archive-cancel:tos', 1, 'recurring', $4, \
+             ($1, $3, 'tos', 'si:archive-cancel', 1, 'recurring', $4, \
               'pending archive', 'UTC', 'pending', 0, $6, NULL, NULL, NULL, NULL), \
-             ($2, $3, 'tos', 'archive-cancel:tos', 1, 'recurring', $5, \
+             ($2, $3, 'tos', 'si:archive-cancel', 1, 'recurring', $5, \
               'retrying archive', 'UTC', 'retrying', 1, $6, $4, \
               'temporary failure', 'archive-test-worker', $7)",
     )
@@ -1375,7 +1369,7 @@ async fn seed_expired_archive(pool: &PgPool) -> anyhow::Result<ExpiredArchiveFix
     .await?;
     sqlx::query(
         "INSERT INTO silicon_identities (org_id, principal_id, silicon_id, state) \
-         VALUES ('tos', $1, 'expired-archive:tos', 'active')",
+         VALUES ('tos', $1, 'si:expired-archive', 'active')",
     )
     .bind(owner_principal_id)
     .execute(pool)
@@ -1386,7 +1380,7 @@ async fn seed_expired_archive(pool: &PgPool) -> anyhow::Result<ExpiredArchiveFix
              schedule_kind, cron_expression, status, next_run_at, completed_at, \
              created_at, updated_at\
          ) VALUES (\
-             $1, 'tos', $2, 'expired-archive:tos', 'expired archive', 'UTC', \
+             $1, 'tos', $2, 'si:expired-archive', 'expired archive', 'UTC', \
              'one_time', '* * * * *', 'completed', NULL, $3, $4, $3\
          )",
     )
@@ -1405,9 +1399,9 @@ async fn seed_expired_archive(pool: &PgPool) -> anyhow::Result<ExpiredArchiveFix
              scheduled_for, reminder_text, timezone, status, attempt_count, \
              next_attempt_at, attempted_at, failure_reason, lease_owner, lease_expires_at\
          ) VALUES \
-             ($1, $3, 'tos', 'expired-archive:tos', 2, 'one_time', $4, \
+             ($1, $3, 'tos', 'si:expired-archive', 2, 'one_time', $4, \
               'expired pending', 'UTC', 'pending', 0, $6, NULL, NULL, NULL, NULL), \
-             ($2, $3, 'tos', 'expired-archive:tos', 2, 'one_time', $5, \
+             ($2, $3, 'tos', 'si:expired-archive', 2, 'one_time', $5, \
               'expired leased', 'UTC', 'retrying', 1, $6, $5, \
               'temporary failure', 'expired-lease-worker', $7)",
     )
@@ -1435,7 +1429,7 @@ async fn first_reminder_needs_no_webhook_and_preserves_revocation() -> anyhow::R
     let now = fixture_now();
     let principal = Uuid::now_v7();
     let mut actor = Actor::silicon(principal.to_string(), "tos", Uuid::now_v7(), 1);
-    actor.public_id = Some("first:tos".to_owned());
+    actor.public_id = Some("si:first".to_owned());
     let service = ScheduleService::new(
         database.repository.clone(),
         Arc::new(FixedClock(now)),
@@ -1454,7 +1448,7 @@ async fn first_reminder_needs_no_webhook_and_preserves_revocation() -> anyhow::R
     assert!(
         database
             .repository
-            .get_hook_destinations("tos", "first:tos")
+            .get_hook_destinations("tos", "si:first")
             .await?
             .is_empty()
     );
@@ -1465,7 +1459,7 @@ async fn first_reminder_needs_no_webhook_and_preserves_revocation() -> anyhow::R
     assert!(matches!(
         database
             .repository
-            .register_authenticated_silicon("tos", principal, "different:tos")
+            .register_authenticated_silicon("tos", principal, "si:different")
             .await,
         Err(RepositoryError::SiliconUnavailable)
     ));
@@ -1511,7 +1505,7 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         id: Uuid::now_v7(),
         org_id: "tos".to_owned(),
         owner_principal_id: principal_id,
-        silicon_id: "assistant:tos".to_owned(),
+        silicon_id: "si:assistant".to_owned(),
         endpoint_url_ciphertext: vec![1],
         endpoint_url_nonce: [2; 12],
         signing_secret_ciphertext: vec![3],
@@ -1527,14 +1521,14 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         .get_active_silicon_identity("tos", principal_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("active Silicon binding was not persisted"))?;
-    assert_eq!(binding.silicon_id, "assistant:tos");
+    assert_eq!(binding.silicon_id, "si:assistant");
     assert_eq!(
         database
             .repository
             .get_schedulable_silicon_identity("tos", principal_id)
             .await?
             .silicon_id,
-        "assistant:tos"
+        "si:assistant"
     );
 
     let now = fixture_now();
@@ -1542,7 +1536,7 @@ async fn principal_binding_preserves_public_id_and_revocation_tombstone() -> any
         id: Uuid::now_v7(),
         org_id: "tos".to_owned(),
         owner_principal_id: principal_id,
-        silicon_id: "assistant:tos".to_owned(),
+        silicon_id: "si:assistant".to_owned(),
         text: "Prepare report".to_owned(),
         timezone: "UTC".to_owned(),
         schedule_kind: "one_time".to_owned(),
@@ -1612,7 +1606,7 @@ async fn assert_revocation_tombstone_blocks_creation(
     assert!(
         database
             .repository
-            .get_hook_destination("tos", "assistant:tos")
+            .get_hook_destination("tos", "si:assistant")
             .await?
             .is_none()
     );
@@ -1641,7 +1635,7 @@ async fn assert_disabled_destination_allows_new_creation_but_not_replay(
 ) -> anyhow::Result<()> {
     database
         .repository
-        .disable_hook_destination("tos", "assistant:tos", now, audit)
+        .disable_hook_destination("tos", "si:assistant", now, audit)
         .await?;
     let replay = database
         .repository
@@ -1684,7 +1678,7 @@ async fn assert_maximum_identifier_binding(
     audit: &AuditContext,
 ) -> anyhow::Result<()> {
     let org_id = "o".repeat(50);
-    let silicon_id = format!("{}:{org_id}", "s".repeat(50));
+    let silicon_id = format!("si:{}", "s".repeat(50));
     let principal_id = Uuid::now_v7();
     repository
         .upsert_hook_destination(
@@ -1926,7 +1920,7 @@ async fn seed_bulk_schedule_status_fixture(
         .await?;
     sqlx::query(
         "INSERT INTO silicon_identities (org_id, principal_id, silicon_id, state) \
-         VALUES ('tos', $1, 'bulk-status:tos', 'active')",
+         VALUES ('tos', $1, 'si:bulk-status', 'active')",
     )
     .bind(fixture.owner_principal_id)
     .execute(pool)
@@ -1938,7 +1932,7 @@ async fn seed_bulk_schedule_status_fixture(
              id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
              scheduled_for, reminder_text, timezone, status, next_attempt_at\
          ) VALUES (\
-             $1, $2, 'tos', 'bulk-status:tos', 3, 'recurring', $3, \
+             $1, $2, 'tos', 'si:bulk-status', 3, 'recurring', $3, \
              'already materialized', 'UTC', 'pending', $4\
          )",
     )
@@ -1965,7 +1959,7 @@ async fn seed_bulk_status_schedule_rows(
              schedule_kind, cron_expression, status, next_run_at, version, \
              created_at, updated_at\
          ) VALUES (\
-             $1, 'tos', $2, 'bulk-status:tos', 'active bulk reminder', 'UTC', \
+             $1, 'tos', $2, 'si:bulk-status', 'active bulk reminder', 'UTC', \
              'recurring', '*/5 * * * *', 'active', $3, 3, $4, $5\
          )",
     )
@@ -1982,7 +1976,7 @@ async fn seed_bulk_status_schedule_rows(
              schedule_kind, cron_expression, status, next_run_at, version, \
              created_at, updated_at\
          ) VALUES (\
-             $1, 'tos', $2, 'bulk-status:tos', 'paused bulk reminder', 'UTC', \
+             $1, 'tos', $2, 'si:bulk-status', 'paused bulk reminder', 'UTC', \
              'recurring', '*/10 * * * *', 'paused', NULL, 7, $3, $4\
          )",
     )
@@ -1998,7 +1992,7 @@ async fn seed_bulk_status_schedule_rows(
              schedule_kind, cron_expression, status, next_run_at, version, \
              completed_at, created_at, updated_at\
          ) VALUES (\
-             $1, 'tos', $2, 'bulk-status:tos', 'completed bulk reminder', 'UTC', \
+             $1, 'tos', $2, 'si:bulk-status', 'completed bulk reminder', 'UTC', \
              'one_time', '0 9 * * *', 'completed', NULL, 2, $3, $4, $3\
          )",
     )
@@ -2014,7 +2008,7 @@ async fn seed_bulk_status_schedule_rows(
              schedule_kind, cron_expression, status, next_run_at, version, \
              deleted_at, created_at, updated_at\
          ) VALUES (\
-             $1, 'tos', $2, 'bulk-status:tos', 'archived bulk reminder', 'UTC', \
+             $1, 'tos', $2, 'si:bulk-status', 'archived bulk reminder', 'UTC', \
              'recurring', '0 12 * * *', 'active', NULL, 5, $3, $4, $3\
          )",
     )
@@ -2032,7 +2026,7 @@ async fn seed_foreign_bulk_status_schedule(pool: &PgPool) -> anyhow::Result<Uuid
     let schedule_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO silicon_identities (org_id, principal_id, silicon_id, state) \
-         VALUES ('tos', $1, 'bulk-foreign:tos', 'active')",
+         VALUES ('tos', $1, 'si:bulk-foreign', 'active')",
     )
     .bind(owner_principal_id)
     .execute(pool)
@@ -2042,7 +2036,7 @@ async fn seed_foreign_bulk_status_schedule(pool: &PgPool) -> anyhow::Result<Uuid
              id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
              schedule_kind, cron_expression, status, next_run_at\
          ) VALUES (\
-             $1, 'tos', $2, 'bulk-foreign:tos', 'foreign bulk reminder', 'UTC', \
+             $1, 'tos', $2, 'si:bulk-foreign', 'foreign bulk reminder', 'UTC', \
              'recurring', '0 8 * * *', 'active', $3\
          )",
     )
@@ -2065,7 +2059,7 @@ async fn seed_expired_bulk_status_schedule(
              id, org_id, owner_principal_id, silicon_id, reminder_text, timezone, \
              schedule_kind, cron_expression, status, next_run_at, deleted_at, created_at\
          ) VALUES (\
-             $1, 'tos', $2, 'bulk-status:tos', 'expired bulk reminder', 'UTC', \
+             $1, 'tos', $2, 'si:bulk-status', 'expired bulk reminder', 'UTC', \
              'recurring', '0 7 * * *', 'paused', NULL, $3, $4\
          )",
     )
@@ -2369,9 +2363,9 @@ async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixtur
              id, org_id, owner_principal_id, silicon_id, reminder_text, \
              timezone, schedule_kind, cron_expression, status, next_run_at\
          ) VALUES \
-             ($1, 'tos', $4, 'removed:tos', 'target', 'UTC', 'recurring', '* * * * *', \
+             ($1, 'tos', $4, 'si:removed', 'target', 'UTC', 'recurring', '* * * * *', \
               'active', $3), \
-             ($2, 'tos', $5, 'remaining:tos', 'other', 'UTC', 'recurring', '* * * * *', \
+             ($2, 'tos', $5, 'si:remaining', 'other', 'UTC', 'recurring', '* * * * *', \
               'active', $3)",
     )
     .bind(target_schedule_id)
@@ -2389,7 +2383,7 @@ async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixtur
              schedule_kind, cron_expression, status, next_run_at, completed_at, \
              created_at, updated_at\
          ) VALUES (\
-             $1, 'tos', $2, 'removed:tos', 'completed target', 'UTC', \
+             $1, 'tos', $2, 'si:removed', 'completed target', 'UTC', \
              'one_time', '* * * * *', 'completed', NULL, $3, $4, $3\
          )",
     )
@@ -2408,7 +2402,7 @@ async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixtur
              attempt_count, next_attempt_at, attempted_at, lease_owner, \
              lease_expires_at\
          ) VALUES (\
-             $1, $2, 'tos', 'removed:tos', 1, 'recurring', $3, 'target', \
+             $1, $2, 'tos', 'si:removed', 1, 'recurring', $3, 'target', \
              'UTC', 'retrying', 1, $3, $3, 'delivery-worker', $4\
          )",
     )
@@ -2424,7 +2418,7 @@ async fn seed_lifecycle_fixture(pool: &PgPool) -> anyhow::Result<LifecycleFixtur
              id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
              scheduled_for, reminder_text, timezone, status, next_attempt_at\
          ) VALUES (\
-             $1, $2, 'tos', 'removed:tos', 2, 'one_time', $3, \
+             $1, $2, 'tos', 'si:removed', 2, 'one_time', $3, \
              'completed target', 'UTC', 'pending', $3\
          )",
     )
@@ -2606,7 +2600,7 @@ async fn insert_idempotency_response(
              idempotency_key, request_hash, state, response_status, \
              response_body, created_at, expires_at\
          ) VALUES (\
-             $1, 'tos', 'silicon', 'remaining:tos', 'schedule.create', NULL, \
+             $1, 'tos', 'silicon', 'si:remaining', 'schedule.create', NULL, \
              $2, $3, 'completed', 201, '{\"id\":\"stored\"}'::jsonb, $4, $5\
          )",
     )

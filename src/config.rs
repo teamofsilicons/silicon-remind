@@ -600,9 +600,7 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
     validate_http_url("REMIND_PUBLIC_BASE_URL", &server.public_base_url)?;
     validate_http_url("REMIND_IAM_BASE_URL", &iam.base_url)?;
 
-    if iam.app_id.len() > 255 {
-        return Err(invalid("REMIND_IAM_APP_ID", "must be at most 255 bytes"));
-    }
+    validate_application_handle(&iam.app_id)?;
     if worker.batch_size.get() > MAX_WORKER_BATCH_SIZE {
         return Err(invalid("REMIND_WORKER_BATCH_SIZE", "must be at most 10000"));
     }
@@ -685,6 +683,24 @@ fn validate_cross_field_policy(settings: &Settings) -> Result<(), SettingsError>
     require_https("REMIND_IAM_BASE_URL", &iam.base_url)?;
     validate_secret_strength("REMIND_IAM_APP_SECRET", &iam.app_secret)?;
     validate_secret_strength("REMIND_INTERNAL_API_TOKEN", &internal_api.bearer_token)?;
+    Ok(())
+}
+
+fn validate_application_handle(app_id: &str) -> Result<(), SettingsError> {
+    if !(1..=80).contains(&app_id.len())
+        || !app_id
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase())
+        || !app_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+    {
+        return Err(invalid(
+            "REMIND_IAM_APP_ID",
+            "must be a bare IAM application handle",
+        ));
+    }
     Ok(())
 }
 

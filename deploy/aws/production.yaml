@@ -693,7 +693,7 @@ Resources:
           Value:
             Ref: IamBaseUrl
         - Name: REMIND_IAM_APP_ID
-          Value: tos>remind
+          Value: remind
         - Name: REMIND_ENCRYPTION_CURRENT_VERSION
           Value: '1'
         - Name: REMIND_DATABASE_MAX_CONNECTIONS
@@ -832,7 +832,7 @@ Resources:
           Value:
             Ref: IamBaseUrl
         - Name: REMIND_IAM_APP_ID
-          Value: tos>remind
+          Value: remind
         - Name: REMIND_ENCRYPTION_CURRENT_VERSION
           Value: '1'
         - Name: REMIND_DATABASE_MAX_CONNECTIONS

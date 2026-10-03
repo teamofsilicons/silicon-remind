@@ -57,15 +57,15 @@ mod tests {
         .execute(&pool)
         .await?;
         assert_eq!(resolve(&pool, "silicon", "agent:alpha").await?, old_silicon);
-        assert!(resolve(&pool, "carbon", "person").await.is_err());
-        sqlx::query("INSERT INTO iam_identity_bindings VALUES('carbon','person',$1)")
+        assert!(resolve(&pool, "carbon", "c:person").await.is_err());
+        sqlx::query("INSERT INTO iam_identity_bindings VALUES('carbon','c:person',$1)")
             .bind(old_carbon)
             .execute(&pool)
             .await?;
-        assert_eq!(resolve(&pool, "carbon", "person").await?, old_carbon);
-        let membership = resolve(&pool, "membership", "person[alpha]").await?;
+        assert_eq!(resolve(&pool, "carbon", "c:person").await?, old_carbon);
+        let membership = resolve(&pool, "membership", "c:person[alpha]").await?;
         assert_eq!(
-            resolve(&pool, "membership", "person[alpha]").await?,
+            resolve(&pool, "membership", "c:person[alpha]").await?,
             membership
         );
         let created = resolve(&pool, "silicon", "newagent:alpha").await?;
@@ -77,18 +77,42 @@ mod tests {
                 .await
                 .is_err()
         );
+        sqlx::raw_sql("CREATE FUNCTION schema_trigger_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER schema_disabled AFTER UPDATE ON silicon_identities FOR EACH ROW EXECUTE FUNCTION schema_trigger_probe(); ALTER TABLE silicon_identities DISABLE TRIGGER schema_disabled; CREATE TRIGGER schema_replica AFTER UPDATE ON silicon_identities FOR EACH ROW EXECUTE FUNCTION schema_trigger_probe(); ALTER TABLE silicon_identities ENABLE REPLICA TRIGGER schema_replica; CREATE TRIGGER schema_always AFTER UPDATE ON silicon_identities FOR EACH ROW EXECUTE FUNCTION schema_trigger_probe(); ALTER TABLE silicon_identities ENABLE ALWAYS TRIGGER schema_always; ").execute(&pool).await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0009_public_identifier_schema.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let modes: Vec<(String,String)> = sqlx::query_as("SELECT tgname,tgenabled::text FROM pg_trigger WHERE tgrelid='silicon_identities'::regclass AND tgname LIKE 'schema_%' ORDER BY tgname").fetch_all(&pool).await?;
+        assert_eq!(
+            modes,
+            vec![
+                ("schema_always".into(), "A".into()),
+                ("schema_disabled".into(), "D".into()),
+                ("schema_replica".into(), "R".into())
+            ]
+        );
+        sqlx::raw_sql("DROP TRIGGER schema_disabled ON silicon_identities; DROP TRIGGER schema_replica ON silicon_identities; DROP TRIGGER schema_always ON silicon_identities; DROP FUNCTION schema_trigger_probe();").execute(&pool).await?;
+        assert_eq!(resolve(&pool, "silicon", "si:agent").await?, old_silicon);
+        assert_eq!(resolve(&pool, "silicon", "si:newagent").await?, created);
+        assert_eq!(resolve(&pool, "carbon", "c:person").await?, old_carbon);
+        assert_eq!(
+            resolve(&pool, "membership", "c:person[alpha]").await?,
+            membership
+        );
+        assert!(resolve(&pool, "silicon", "agent:alpha").await.is_err());
         sqlx::raw_sql("CREATE SCHEMA isolated; SET search_path TO isolated")
             .execute(&pool)
             .await?;
         for migration in MIGRATOR.iter() {
             sqlx::raw_sql(migration.sql.clone()).execute(&pool).await?;
         }
-        let isolated = resolve(&pool, "silicon", "agent:alpha").await?;
+        let isolated = resolve(&pool, "silicon", "si:agent").await?;
         assert_ne!(isolated, old_silicon);
         sqlx::raw_sql("SET search_path TO public")
             .execute(&pool)
             .await?;
-        assert_eq!(resolve(&pool, "silicon", "agent:alpha").await?, old_silicon);
+        assert_eq!(resolve(&pool, "silicon", "si:agent").await?, old_silicon);
         pool.close().await;
         Ok(())
     }

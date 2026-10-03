@@ -226,7 +226,15 @@ pub fn destination_associated_data(org_id: &str, silicon_id: &str) -> Vec<u8> {
     let mut data = Vec::with_capacity(org_id.len() + silicon_id.len() + 1);
     data.extend_from_slice(org_id.as_bytes());
     data.push(0);
-    data.extend_from_slice(silicon_id.as_bytes());
+    // Retain the original cryptographic identity through the public-ID rename.
+    // The organization is the authenticated stored scope, never parsed from the ID.
+    if let Some(handle) = silicon_id.strip_prefix("si:") {
+        data.extend_from_slice(handle.as_bytes());
+        data.push(b':');
+        data.extend_from_slice(org_id.as_bytes());
+    } else {
+        data.extend_from_slice(silicon_id.as_bytes());
+    }
     data
 }
 
@@ -248,6 +256,18 @@ mod tests {
     use secrecy::{ExposeSecret as _, SecretBox, SecretString};
 
     use super::{SecretCipher, destination_associated_data};
+
+    #[test]
+    fn public_id_cutover_keeps_destination_ciphertext_readable() {
+        assert_eq!(
+            destination_associated_data("tos", "assistant:tos"),
+            destination_associated_data("tos", "si:assistant")
+        );
+        assert_ne!(
+            destination_associated_data("tos", "si:assistant"),
+            destination_associated_data("other", "si:assistant")
+        );
+    }
 
     #[test]
     fn round_trip_is_bound_to_destination() {

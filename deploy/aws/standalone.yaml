@@ -189,7 +189,7 @@ Resources:
                 'REMIND_WORKER_OPERATIONAL_BIND_ADDR': '0.0.0.0:9090',
                 'REMIND_PUBLIC_BASE_URL': 'https://${HostName}',
                 'REMIND_IAM_BASE_URL': values.get('REMIND_IAM_BASE_URL', 'https://backend.iam.teamofsilicons.com'),
-                'REMIND_IAM_APP_ID': values.get('REMIND_IAM_APP_ID', 'tos>remind'),
+                'REMIND_IAM_APP_ID': values.get('REMIND_IAM_APP_ID', 'remind'),
                 'REMIND_ENCRYPTION_CURRENT_VERSION': values.get('REMIND_ENCRYPTION_CURRENT_VERSION', '1'),
             })
             with open('/etc/remind/runtime.env', 'w', opener=lambda p,m: os.open(p, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)) as output:

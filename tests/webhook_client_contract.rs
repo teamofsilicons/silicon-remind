@@ -35,7 +35,7 @@ impl Fixture {
             event: ReminderEvent {
                 execution_id: Uuid::from_u128(1),
                 schedule_id: Uuid::from_u128(2),
-                silicon_id: "assistant:tos".to_owned(),
+                silicon_id: "si:assistant".to_owned(),
                 text: "Prepare the daily report".to_owned(),
                 scheduled_for,
                 timezone: "Asia/Kolkata".to_owned(),

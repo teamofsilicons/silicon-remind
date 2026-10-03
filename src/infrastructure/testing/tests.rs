@@ -35,7 +35,7 @@ async fn discovery_isolated_cleanup_revocation_and_worker_admission() -> anyhow:
     let server = MockServer::start().await;
     let settings = IamSettings {
         base_url: server.uri().parse()?,
-        app_id: "tos>remind".into(),
+        app_id: "remind".into(),
         app_secret: SecretString::from(format!("ask_{}", "p".repeat(43))),
         request_timeout: Duration::from_secs(2),
         webhook_keys: std::collections::BTreeMap::default(),
@@ -50,7 +50,7 @@ async fn discovery_isolated_cleanup_revocation_and_worker_admission() -> anyhow:
     let tests = TestEnvironments::connect(&database, &settings, cipher).await?;
     let secret = SecretString::from(format!("ask_{}", "t".repeat(43)));
     let id = Uuid::now_v7();
-    let mut body = json!({"environment_id":id,"application":{"app_id":"tos>remind","base_url":"https://remind.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":"Discovery test","version":1,"key_generation":1,"created_at":"2026-09-13T00:00:00Z","creator_type":"carbon","creator_id":"tester"},"webhook_key_digest":hex::encode(hash("12345678901234567890123456789012"))});
+    let mut body = json!({"environment_id":id,"application":{"app_id":"remind","base_url":"https://remind.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":"Discovery test","version":1,"key_generation":1,"created_at":"2026-09-13T00:00:00Z","creator_type":"carbon","creator_id":"tester"},"webhook_key_digest":hex::encode(hash("12345678901234567890123456789012"))});
     Mock::given(method("GET"))
         .and(path("/api/v1/application/testing-context"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&body))

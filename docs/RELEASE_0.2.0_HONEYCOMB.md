@@ -1,6 +1,6 @@
 # Remind 0.2.0 Honeycomb release — 2026-09-16
 
-Application `tos>remind` is registered in Honeycomb and release `0.2.0` is uploaded.
+Application `remind` is registered in Honeycomb and release `0.2.0` is uploaded.
 It is currently private. Publication request
 `2f517049-2d06-465e-ab91-ce33d8045cec` is `awaiting_validator`, revision 1,
 with one pending `honeycomb` review gate. The current organization-owner session
@@ -49,5 +49,5 @@ webhook processing works with the new identity; deployment and integration check
 are still required.
 
 Check completion through the Honeycomb console's Sent requests or
-`honeycomb publication get 'tos>remind' --json`. After approval, verify the app is
+`honeycomb publication get 'remind' --json`. After approval, verify the app is
 public and anonymously installable before describing public distribution as done.

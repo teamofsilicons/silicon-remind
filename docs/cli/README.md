@@ -12,7 +12,7 @@ reuses another context's session.
 ## Install and start
 
 ```sh
-honeycomb install 'tos>remind'
+honeycomb install 'remind'
 remind --help
 remind login '<SLT-from-IAM>'
 ```
@@ -37,7 +37,7 @@ remind auth whoami
 remind config home /secure/remind-state
 ```
 
-The SLT must be for `tos>remind` and bound to the desired organization. A successful
+The SLT must be for `remind` and bound to the desired organization. A successful
 login verifies the organization before saving the new session. Near expiry, a
 normal authenticated command rotates the saved refresh token before proceeding.
 `auth refresh` requests an explicit rotation; `auth logout` revokes the IAM family
@@ -66,14 +66,14 @@ check returns `authenticated: true` alongside `actor_type` (`carbon` or `silicon
 tokens. For example:
 
 ```json
-{"authenticated":true,"principal_id":"01992000-0000-7000-8000-000000000001","actor_type":"silicon","public_id":"assistant:tos","org_id":"tos","membership_id":"01992000-0000-7000-8000-000000000002","org_role":"member","authorization_epoch":1,"can_manage_reminders":true}
+{"authenticated":true,"principal_id":"01992000-0000-7000-8000-000000000001","actor_type":"silicon","public_id":"si:assistant","org_id":"tos","membership_id":"01992000-0000-7000-8000-000000000002","org_role":"member","authorization_epoch":1,"can_manage_reminders":true}
 ```
 
 No saved session or an HTTP 401 from verification/refresh returns
 `{"authenticated":false}` with exit status 0. A permission denial, unavailable
 server, or malformed response remains an error with a nonzero exit status; it is
-not reported as a successful authentication check. `--org` selects the organization
-to verify. `auth whoami` remains available with its existing identity/error output.
+not reported as a successful authentication check. `--account` and `--org` select an already saved account/organization context
+to verify. They cannot retarget an existing credential. `auth whoami` remains available with its existing identity/error output.
 
 ## Home directory selection
 
@@ -134,8 +134,9 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 
 | Command | Purpose / useful options |
 | --- | --- |
+| `auth contexts` | List saved account and organization contexts without credentials |
 | `auth login` | Secure SLT prompt; `--org`, `--slt-stdin` |
-| `login <slt>` | Direct IAM SLT login; `--org` may select the organization |
+| `login <slt>` | Direct IAM SLT login; `--org` must match the SLT; testing actor IDs may select an org |
 | `iam` | Public `app_id`, IAM URL and linked IAM environment; no login needed |
 | `login status` | Live authentication result and Carbon/Silicon identity; supports `--json` |
 | `auth whoami` | Live IAM identity and permissions |
@@ -176,7 +177,7 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 | `health` | Liveness; `--ready` checks database readiness |
 
 Every command accepts `-h`/`--help`. Missing required flags produce the relevant
-usage. Global flags are `--url`, `--org`, `--test <id>`, `--json`, `--no-update`, and
+usage. Global flags are `--url`, `--account`, `--org`, `--test <id>`, `--json`, `--no-update`, and
 `--idempotency-key`. `REMIND_URL` and `REMIND_ORG` supply URL/org defaults for an
 invocation. They do not move existing sessions between contexts.
 
@@ -219,7 +220,7 @@ environments can be recovered for 30 days. See the [full guide](../testing-envir
 
 ## Updating
 
-Install with `honeycomb install 'tos>remind'` and update with `honeycomb update 'tos>remind'`. Remind never replaces its executable. `remind update` and `remind update --check` return the Honeycomb command without changing files or querying crates.io.
+Install with `honeycomb install 'remind'` and update with `honeycomb update 'remind'`. Remind never replaces its executable. `remind update` and `remind update --check` return the Honeycomb command without changing files or querying crates.io.
 
 Remove an older standalone updater with `remind daemon uninstall`; `daemon status` remains available for diagnosis. `daemon install`, `daemon run`, and `config auto-update on` now explain the migration to Honeycomb. `--no-update` and `config auto-update off` remain accepted for older scripts.
 

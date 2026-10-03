@@ -1,6 +1,6 @@
 # Test a complete reminder workflow
 
-Create or import the `tos>remind` application in an [IAM test environment](https://docs.iam.teamofsilicons.com/api/testing-environments/), then use that application's `app_secret`. Remind discovers the sandbox and starts with empty data. You do not enter an IAM root key or manually pair environments.
+Create or import the `remind` application in an [IAM test environment](https://docs.iam.teamofsilicons.com/api/testing-environments/), then use that application's `app_secret`. Remind discovers the sandbox and starts with empty data. You do not enter an IAM root key or manually pair environments.
 
 ## CLI
 

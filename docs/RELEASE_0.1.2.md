@@ -65,7 +65,7 @@ Public verification after rollout:
 
 - Backend `/health/ready` returned HTTP 200.
 - `/api/v1/auth/iam` returned HTTP 200 with `Cache-Control: no-store`,
-  `app_id: "tos>remind"`, `iam_url: "https://backend.iam.teamofsilicons.com/"`,
+  `app_id: "remind"`, `iam_url: "https://backend.iam.teamofsilicons.com/"`,
   and `iam_environment_id: null`.
 - Frontend `/` and gateway `/ui/api/health/ready` returned HTTP 200.
 - The fresh crates.io CLI 0.1.2 returned the deployed IAM metadata through

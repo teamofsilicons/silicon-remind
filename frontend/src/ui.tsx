@@ -1,6 +1,7 @@
+import { ArcButton, ArcInput, ArcBadge, ArcCard } from './arc';
 import { For, Show, onMount, onCleanup, type JSX } from "solid-js";
 export function Badge(p: { value: string }) {
-  return <span class={"badge " + p.value}>{p.value.replaceAll("_", " ")}</span>;
+  return <ArcBadge class={"badge " + p.value}>{p.value.replaceAll("_", " ")}</ArcBadge>;
 }
 export function Panel(p: {
   title: string;
@@ -8,13 +9,13 @@ export function Panel(p: {
   children: JSX.Element;
 }) {
   return (
-    <section class="panel">
+    <ArcCard as="section" class="panel">
       <div class="panel-head">
         <h2>{p.title}</h2>
         {p.action}
       </div>
       {p.children}
-    </section>
+    </ArcCard>
   );
 }
 export function Empty(p: { title: string; detail?: string }) {
@@ -79,7 +80,7 @@ export function Modal(p: {
       >
         <header>
           <h2 id="dialog-title">{p.spec.title}</h2>
-          <button
+          <ArcButton
             type="button"
             class="icon-button"
             aria-label="Close dialog"
@@ -87,7 +88,7 @@ export function Modal(p: {
             onClick={p.close}
           >
             ×
-          </button>
+          </ArcButton>
         </header>
         <Show when={p.spec.description}>
           <p class="muted">{p.spec.description}</p>
@@ -103,7 +104,7 @@ export function Modal(p: {
                     <Show
                       when={f.options}
                       fallback={
-                        <input
+                        <ArcInput
                           name={f.name}
                           type={f.type || "text"}
                           value={f.value || ""}
@@ -156,21 +157,21 @@ export function Modal(p: {
           </p>
         </Show>
         <footer>
-          <button
+          <ArcButton
             type="button"
             class="secondary"
             disabled={p.busy}
             onClick={p.close}
           >
             Cancel
-          </button>
-          <button
+          </ArcButton>
+          <ArcButton
             type="submit"
             class={p.spec.danger ? "danger" : "primary"}
             disabled={p.busy}
           >
             {p.busy ? "Working…" : p.spec.submit || "Save changes"}
-          </button>
+          </ArcButton>
         </footer>
       </form>
     </dialog>

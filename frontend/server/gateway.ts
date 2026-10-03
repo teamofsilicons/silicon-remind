@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 interface Context {
   id: string;
+  contextId?: string;
   name: string;
   org: string;
   organizations?: string[];
@@ -19,6 +20,7 @@ interface Context {
 interface State {
   active: string;
   contexts: Record<string, Context>;
+  accounts?: Record<string, Context>;
   touched: number;
   login?: { nonce: string; contextId: string; expires: number };
 }
@@ -92,6 +94,10 @@ export function createGateway(config: {
     }
   }
   async function save(id: string, s: State) {
+    s.accounts ||= {};
+    for (const context of Object.values(s.contexts)) {
+      if (context.contextId && context.token) s.accounts[context.contextId] = context;
+    }
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const iv = randomBytes(12),
       c = createCipheriv("aes-256-gcm", key, iv);
@@ -161,6 +167,11 @@ export function createGateway(config: {
   }
   const summary = (s: State) => ({
     active: s.active,
+    activeAccount: s.contexts[s.active]?.contextId || null,
+    productionAccount: s.contexts.production.contextId || null,
+    accounts: Object.values(s.accounts || {}).filter(c => c.id === s.active && c.token).map(c => ({
+      id: c.contextId, org: c.org, identity: c.identity || null,
+    })),
     contexts: Object.values(s.contexts).map((c) => ({
       id: c.id,
       name: c.name,
@@ -236,6 +247,44 @@ export function createGateway(config: {
       for (const context of Object.values(state.contexts)) context.telemetryEnabled = req.headers["x-remind-telemetry"] !== "off";
       let ctx = state.contexts[state.active],
         data: any;
+      // The browser captures the selected account context when issuing a request.
+      // Reject old-tab actions rather than rerouting them after another tab switches.
+      if ((url.pathname === "/ui/logout" || (url.pathname.startsWith("/ui/api/") && !url.pathname.startsWith("/ui/api/health/")))
+        && req.headers["x-remind-account"] !== (ctx.contextId || "signed-out")) {
+        throw Object.assign(Error("Account or organization changed. Reload this view before continuing."), { status: 409 });
+      }
+      if ((url.pathname === "/ui/logout" || (url.pathname.startsWith("/ui/api/") && !url.pathname.startsWith("/ui/api/health/")))
+        && req.headers["x-remind-context"] !== state.active) {
+        throw Object.assign(Error("Environment changed. Reload this view before continuing."), { status: 409 });
+      }
+      function installTokens(c: Context, tokens: any, expected?: Context) {
+        const actor = tokens.actor;
+        if (typeof tokens.access_token !== "string" || !tokens.access_token
+          || typeof tokens.refresh_token !== "string" || !tokens.refresh_token
+          || !Number.isSafeInteger(tokens.expires_in) || tokens.expires_in <= 0
+          || typeof tokens.org_id !== "string" || !/^[a-z0-9_-]{3,50}$/.test(tokens.org_id)
+          || !["carbon", "silicon"].includes(actor?.type) || typeof actor?.public_id !== "string" || !actor.public_id
+          || (expected && (tokens.org_id !== expected.org || actor.type !== expected.identity?.actor_type || actor.public_id !== expected.identity?.public_id))) {
+          throw Object.assign(Error("Sign in again and choose one account and organization."), { status: 401 });
+        }
+        c.token = tokens.access_token;
+        c.refresh = tokens.refresh_token;
+        c.org = tokens.org_id;
+        c.organizations = [tokens.org_id];
+        c.identity = { actor_type: actor.type, public_id: actor.public_id, org_id: tokens.org_id };
+        c.expires = Date.now() + tokens.expires_in * 1000;
+      }
+      function remember(candidate: Context) {
+        state.accounts ||= {};
+        const previous = Object.values(state.accounts).find(c => c.id === candidate.id && c.org === candidate.org
+          && c.identity?.actor_type === candidate.identity?.actor_type && c.identity?.public_id === candidate.identity?.public_id);
+        candidate.contextId = previous?.contextId || randomBytes(16).toString("hex");
+        state.accounts[candidate.contextId] = candidate;
+        state.contexts[candidate.id] = candidate;
+      }
+      function forgetAccounts(world: string) {
+        for (const [key, account] of Object.entries(state.accounts || {})) if (account.id === world) delete state.accounts![key];
+      }
       async function authenticated(c: Context, force = false) {
         for (let attempt = 0; attempt < 2 && c.refresh && (force || c.pending || (c.expires || 0) < Date.now() + 30000); attempt++) {
           const started = c.refreshStarted ?? (c.pending ? Date.now() - 1800000 : Date.now());
@@ -251,9 +300,7 @@ export function createGateway(config: {
               c.pending,
               false,
             );
-            if (typeof tokens.access_token !== "string" || !tokens.access_token || typeof tokens.refresh_token !== "string" || !tokens.refresh_token || !Number.isSafeInteger(tokens.expires_in) || tokens.expires_in <= 0 || !Number.isSafeInteger(started + tokens.expires_in * 1000)) throw Error("Invalid refresh response");
-            c.token = tokens.access_token;
-            c.refresh = tokens.refresh_token;
+            installTokens(c, tokens, c);
             c.expires = started + tokens.expires_in * 1000;
             delete c.pending;
             delete c.refreshStarted;
@@ -261,6 +308,7 @@ export function createGateway(config: {
             await save(id, state);
           } catch (e: any) {
             if (e.status === 401) {
+              if (c.contextId) delete state.accounts?.[c.contextId];
               delete c.token;
               delete c.refresh;
               delete c.identity;
@@ -285,15 +333,21 @@ export function createGateway(config: {
         }
       }
       async function selectOrganization(c: Context, requested?: string) {
+        if (requested !== undefined && requested !== c.org)
+          throw Object.assign(Error("Sign in separately to use another organization."), { status: 403 });
         // Discovery omits organization routing without changing the saved selection.
         // A failed refresh must retain that selection across restart as well.
         const result = await authorizedRemote("/api/v1/auth/organizations", c, "GET", undefined, undefined, true);
         const organizations: string[] = result.items.map((item: any) => item.org_id);
-        if (requested !== undefined && !organizations.includes(requested))
-          throw Object.assign(Error("This organization has not been authorized in IAm"), { status: 403 });
-        c.organizations = organizations;
-        c.org = requested ?? (organizations.includes(c.org) ? c.org : organizations[0] || "");
-        c.identity = c.org ? await authorizedRemote("/api/v1/auth/me", c) : undefined;
+        if (!c.org || organizations.length !== 1 || organizations[0] !== c.org)
+          throw Object.assign(Error("Sign in to the selected account and organization. Existing credentials cannot switch organizations."), { status: 401, contextInvalid: true });
+        const identity = await authorizedRemote("/api/v1/auth/me", c);
+        if (identity.org_id !== c.org || !["carbon", "silicon"].includes(identity.actor_type)
+          || (c.identity && (identity.public_id !== c.identity.public_id || identity.actor_type !== c.identity.actor_type))) {
+          throw Object.assign(Error("The selected account changed. Sign in again."), { status: 401, contextInvalid: true });
+        }
+        c.organizations = [c.org];
+        c.identity = identity;
       }
       if (callback) {
         const attempt = state.login;
@@ -331,13 +385,11 @@ export function createGateway(config: {
           attempt.nonce,
           false,
         );
-        candidate.token = tokens.access_token;
-        candidate.refresh = tokens.refresh_token;
-        candidate.expires = Date.now() + tokens.expires_in * 1000;
+        installTokens(candidate, tokens);
         delete candidate.pending;
         delete candidate.refreshStarted;
         await selectOrganization(candidate);
-        state.contexts[attempt.contextId] = candidate;
+        remember(candidate);
         await save(id, state);
         res.setHeader("Set-Cookie", [sessionCookie(id), loginCookie("", 0)]);
         res.writeHead(303, { Location: "/#reminders" });
@@ -360,7 +412,7 @@ export function createGateway(config: {
         const redirect = new URL("/ui/auth/callback", origin);
         redirect.searchParams.set("state", nonce);
         const destination = new URL("/login", authOrigin);
-        destination.searchParams.set("app_id", "tos>remind");
+        destination.searchParams.set("app_id", "remind");
         destination.searchParams.set("redirect_uri", redirect.href);
         res.setHeader("Set-Cookie", [
           sessionCookie(id),
@@ -369,6 +421,7 @@ export function createGateway(config: {
         data = { url: destination.href };
       } else if (url.pathname === "/ui/telemetry" && req.method === "POST") {
         if (req.headers["x-remind-context"] !== state.active) throw Object.assign(Error("Telemetry environment changed"), {status:409});
+        if (req.headers["x-remind-account"] !== (ctx.contextId || "signed-out")) throw Object.assign(Error("Telemetry account changed"), {status:409});
         if (ctx.telemetryEnabled === false) { data = {accepted:0}; }
         else {
           await authenticated(ctx);
@@ -385,6 +438,12 @@ export function createGateway(config: {
         if (ctx.token) {
           try { await authenticated(ctx); await selectOrganization(ctx); }
           catch (error: any) {
+            if (error.contextInvalid) {
+              if (ctx.contextId) delete state.accounts?.[ctx.contextId];
+              delete ctx.token; delete ctx.refresh; delete ctx.contextId;
+              delete ctx.pending; delete ctx.refreshStarted;
+              ctx.org = ""; ctx.organizations = [];
+            }
             if (ctx.refresh) throw Object.assign(Error("This session could not be verified. Retry; your saved sign-in is retained."), { status: 503 });
             delete ctx.identity;
             authError = "This session is no longer valid. Sign in again in the selected environment.";
@@ -399,6 +458,15 @@ export function createGateway(config: {
         const candidate = { ...ctx };
         await selectOrganization(candidate, body.org);
         state.contexts[state.active] = candidate;
+        data = summary(state);
+      } else if (url.pathname === "/ui/account" && req.method === "POST") {
+        const candidate = state.accounts?.[body.id];
+        if (!candidate || candidate.id !== state.active)
+          throw Object.assign(Error("Sign in to this account and organization first."), { status: 404 });
+        delete state.login;
+        state.contexts[state.active] = candidate;
+        await authenticated(candidate);
+        await selectOrganization(candidate);
         data = summary(state);
       } else if (url.pathname === "/ui/login" && req.method === "POST") {
         delete state.login;
@@ -415,18 +483,16 @@ export function createGateway(config: {
           "/api/v1/auth/login",
           candidate,
           "POST",
-          { slt: body.slt.trim() },
+          { slt: body.slt.trim(), ...(body.org ? { org_id: body.org } : {}) },
           (req.headers["idempotency-key"] as string) ||
             randomBytes(16).toString("hex"),
           false,
         );
-        candidate.token = tokens.access_token;
-        candidate.refresh = tokens.refresh_token;
-        candidate.expires = Date.now() + tokens.expires_in * 1000;
+        installTokens(candidate, tokens);
         delete candidate.pending;
         delete candidate.refreshStarted;
         await selectOrganization(candidate);
-        state.contexts[state.active] = candidate;
+        remember(candidate);
         data = summary(state);
       } else if (url.pathname === "/ui/logout" && req.method === "POST") {
         delete state.login;
@@ -440,6 +506,8 @@ export function createGateway(config: {
             false,
           );
         delete ctx.token;
+        if (ctx.contextId) delete state.accounts?.[ctx.contextId];
+        delete ctx.contextId;
         delete ctx.refresh;
         delete ctx.identity;
         delete ctx.organizations;
@@ -472,6 +540,7 @@ export function createGateway(config: {
               Error("The key belongs to a different environment"),
               { status: 422 },
             );
+          if (state.contexts[env.id]?.key !== candidate.key) forgetAccounts(env.id);
           state.contexts[env.id] = candidate;
           state.active = env.id;
         } else if (body.action === "forget") {
@@ -480,6 +549,7 @@ export function createGateway(config: {
               status: 422,
             });
           delete state.contexts[body.id];
+          forgetAccounts(body.id);
           if (state.active === body.id) state.active = "production";
         } else {
           if (!Object.hasOwn(state.contexts, body.id))
@@ -507,8 +577,11 @@ export function createGateway(config: {
           !["GET", "POST", "PATCH", "PUT", "DELETE"].includes(method)
         )
           throw Object.assign(Error("Unknown action"), { status: 404 });
-        if (path.startsWith("/test-environments"))
+        if (path.startsWith("/test-environments")) {
+          if (req.headers["x-remind-production-account"] !== (state.contexts.production.contextId || "signed-out"))
+            throw Object.assign(Error("Production account changed. Reload before managing environments."), { status: 409 });
           ctx = state.contexts.production;
+        }
         const health = path.startsWith("/health/");
         if (health) ctx = { id: "", name: "", org: "" };
         else if (!path.startsWith("/testing-environment"))
@@ -531,6 +604,7 @@ export function createGateway(config: {
         ) {
           const envId = path.split("/")[2];
           delete state.contexts[envId];
+          forgetAccounts(envId);
           if (state.active === envId) state.active = "production";
         }
         if (data?.key && path.startsWith("/test-environments")) {
@@ -543,6 +617,7 @@ export function createGateway(config: {
                 state.contexts.production,
               );
             const old = state.contexts[envId];
+            if (old?.key !== data.key) forgetAccounts(envId);
             state.contexts[envId] =
               old?.key === data.key
                 ? { ...old, name: env?.name || old.name }

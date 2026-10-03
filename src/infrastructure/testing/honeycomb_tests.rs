@@ -40,7 +40,7 @@ impl Fixture {
         let server = MockServer::start().await;
         let iam = IamSettings {
             base_url: server.uri().parse()?,
-            app_id: "tos>remind".into(),
+            app_id: "remind".into(),
             app_secret: SecretString::from(format!("ask_{}", "p".repeat(43))),
             request_timeout: Duration::from_secs(2),
             webhook_keys: std::collections::BTreeMap::default(),
@@ -57,7 +57,7 @@ impl Fixture {
             operation_id: Uuid::now_v7(),
             environment_id: Uuid::now_v7(),
             org_id: "tos".into(),
-            app_id: "tos>remind".into(),
+            app_id: "remind".into(),
             environment_revision: 1,
             generation: 1,
             key_version: 1,
@@ -67,7 +67,7 @@ impl Fixture {
             reason: "requested".into(),
             retired_apps: vec![],
         };
-        let context = json!({"environment_id":operation.environment_id,"application":{"app_id":"tos>remind","base_url":"https://remind.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":operation.environment_id,"org_id":"tos","name":"Managed sandbox","version":1,"key_generation":1,"created_at":"2026-09-13T00:00:00Z","creator_type":"carbon","creator_id":"tester"},"webhook_key_digest":hex::encode(hash(&operation.testing_key))});
+        let context = json!({"environment_id":operation.environment_id,"application":{"app_id":"remind","base_url":"https://remind.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":operation.environment_id,"org_id":"tos","name":"Managed sandbox","version":1,"key_generation":1,"created_at":"2026-09-13T00:00:00Z","creator_type":"carbon","creator_id":"tester"},"webhook_key_digest":hex::encode(hash(&operation.testing_key))});
         Ok(Self {
             _container: container,
             tests,
@@ -273,7 +273,7 @@ async fn activity_is_retryable_generation_scoped_and_retirement_is_selected() ->
     );
     Mock::given(method("POST"))
         .and(path(format!(
-            "/api/v1/environments/{}/apps/tos%3Eremind/activity",
+            "/api/v1/environments/{}/apps/remind/activity",
             f.operation.environment_id
         )))
         .and(header(
@@ -292,7 +292,7 @@ async fn activity_is_retryable_generation_scoped_and_retirement_is_selected() ->
         .report_honeycomb_activity(&receiver.uri().parse()?)
         .await?;
     f.next("retire-applications");
-    f.operation.retired_apps = vec!["tos>other".into()];
+    f.operation.retired_apps = vec!["other".into()];
     f.tests.apply_honeycomb(&f.operation).await?;
     assert_eq!(
         f.count().await?,
@@ -300,7 +300,7 @@ async fn activity_is_retryable_generation_scoped_and_retirement_is_selected() ->
         "unselected participant must retain records"
     );
     f.next("retire-applications");
-    f.operation.retired_apps = vec!["tos>remind".into()];
+    f.operation.retired_apps = vec!["remind".into()];
     f.tests.apply_honeycomb(&f.operation).await?;
     assert!(
         f.tests

@@ -61,7 +61,7 @@ rights. All test replicas use the same embedded migrations as production.
    `/health/ready`, then authenticate a real IAM session and exercise a sandbox.
 6. Confirm the intended pending IAM webhook URL. Obtain a fresh direct-Carbon
    step-up for action `application.webhook.approve` and the internal app UUID,
-   then run `iam app approve-webhook 'tos>remind'`. Check IAM metadata and an
+   then run `iam app approve-webhook 'remind'`. Check IAM metadata and an
    actual upstream delivery, not merely a manually signed fixture.
 
 For updates, preserve all existing stack parameters unless explicitly changing

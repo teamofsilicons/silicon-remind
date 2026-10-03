@@ -139,7 +139,7 @@ PostgreSQL concurrency require a running Docker daemon for Testcontainers.
 
 Build the public client and CLI with `cargo build --workspace`. The executable is
 `target/debug/remind`; run `remind -h` for commands. Obtain an IAM SLT for
-`tos>remind`, then use:
+`remind`, then use:
 
 ```sh
 remind login <slt>
@@ -147,11 +147,12 @@ remind webhook subscribe https://example.com/reminders --secret-stdin < /private
 remind create --text 'Check the build' --cron '*/5 * * * *' --timezone Asia/Kolkata
 ```
 
-`remind login <slt>` needs no `--org`. The organization comes from `--org` when given,
-then from the SLT, then from the only authorized organization, and for a Silicon from the
-organization in its own `handle:org` identity - so a Silicon granted several organizations
-still signs in unprompted. It is saved with the session, and `--org` overrides it per
-command. Only a Carbon in several organizations must choose, and the error names them.
+`remind login <slt>` uses the one organization selected in IAM. `--org` must
+match that selection; it also selects the organization for a testing actor ID.
+Each login is retained separately by server, environment, account and organization.
+Use `remind auth contexts` to list them, then `remind --account si:assistant
+--org tos list` to select a saved context. Refresh cannot change its account or
+organization. Older unscoped sessions need a fresh IAM login.
 
 Only Silicons configure destinations or mutate their own reminders. Both Carbon
 and Silicon members can read reminders throughout their organization. All IAM

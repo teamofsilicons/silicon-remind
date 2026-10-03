@@ -71,8 +71,8 @@ Secret arguments were provided via stdin/protected files; values are not logged.
 - Created real hosted IAM environment `01a073c6-3276-7ac0-85d7-cb3aeafd2564`
   using the existing authorized production IAM CLI session. Bootstrapped a test
   Carbon `remindmanual` with IAM's fixed sandbox OTP; no email/SMS is sent in
-  this plane. Imported `tos>remind` and created `remindrunner:tos`.
-- IAM `app show tos>remind`: application verified, signing version 1, public
+  this plane. Imported `remind` and created `si:remindrunner`.
+- IAM `app show remind`: application verified, signing version 1, public
   webhook pending_review with no active URL. Public deployment is not proven.
 - Production Carbon SLT → Remind CLI login: owner identity in `tos`, read-only
   for reminder writes. Test Carbon and test Silicon SLTs both exchanged through
@@ -124,7 +124,7 @@ and worker results were then inspected manually.
   deleted key retrieval: 404; restore uses a new key; wrong-ID import does not
   overwrite the existing saved main key.
 - Test Carbon owner read another Silicon's archived reminder (200), but create
-  returned 403. A second real IAM Silicon `remindobserver:tos` likewise read it
+  returned 403. A second real IAM Silicon `si:remindobserver` likewise read it
   but could not edit it (403). No authority is inferred from org-owner role for
   Carbon reminder mutations.
 - Created `manual-boundaries`, ID `01a073dc-d78a-7671-947f-ccbafe65b9d0`, with only
@@ -191,7 +191,7 @@ and worker results were then inspected manually.
   returned 401; a newly signed changed payload with the same event ID returned
   409. Both linked active Remind replicas recorded the event independently;
   persisted projections did not contain the outer root-key wrapper.
-- Removed disposable `remindobserver:tos` through real IAM with sandbox Carbon
+- Removed disposable `si:remindobserver` through real IAM with sandbox Carbon
   step-up. IAM showed membership removed, version 2; Remind live introspection
   immediately returned 401. A manually signed matching removal projection
   revoked the local identity, disabled its destination and archived its future
@@ -241,7 +241,7 @@ with read-only root filesystem, all capabilities dropped and no-new-privileges.
 - `GET /health/ready` without sandbox headers: 200, status ok. A sandbox selector
   on this global operational route is rejected 403, as intended.
 - `GET /api/v1/auth/me` with the runner's real test session and Remind sandbox
-  root key: 200, correct `remindrunner:tos` identity and member permissions.
+  root key: 200, correct `si:remindrunner` identity and member permissions.
 - Stopped and removed only this temporary verification container afterward.
 - Final source-secret scan found no configured protected values outside ignored
   files. `.env` is mode 0600 and ignored. Diff whitespace checks pass excluding
@@ -329,7 +329,7 @@ sandboxes were retired afterward. Image and rollout evidence is recorded in
 - Chrome on local Remind: Continue with IAm opened IAM with `app_id` and
   `redirect_uri`, without either organization query parameter.
 - IAM displayed Choose organizations and the existing authorized `tos` grant.
-  Continuing with that grant returned to `/#reminders` as Carbon `saket`, with
+  Continuing with that grant returned to `/#reminders` as Carbon `c:saket`, with
   `tos` selected in the organization dropdown and the read-only reminder view.
 - Gateway regression checks cover unscoped exchange/discovery, multiple grants,
   switching, refusal of unauthorized organizations, removed/empty grants, and

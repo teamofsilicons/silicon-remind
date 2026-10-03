@@ -23,7 +23,7 @@ The worker posts UTF-8 JSON:
   "payload": {
     "execution_id": "<stable-occurrence-uuid>",
     "schedule_id": "<schedule-uuid>",
-    "silicon_id": "handle:org",
+    "silicon_id": "si:handle",
     "text": "<exact reminder text>",
     "scheduled_for": "<intended-UTC-trigger>",
     "timezone": "Asia/Kolkata"

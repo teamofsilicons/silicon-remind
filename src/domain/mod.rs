@@ -13,8 +13,8 @@ pub use actor::{Actor, ActorKind, ReminderReadScope};
 pub use cursor::{CursorError, CursorKind, PageCursor};
 pub use execution::{Execution, ExecutionStatus, ExecutionStatusTransitionError};
 pub use identity::{
-    IAM_LABEL_MAX_BYTES, IAM_LABEL_MIN_BYTES, is_valid_global_silicon_id, is_valid_iam_label,
-    silicon_id_belongs_to_org,
+    IAM_LABEL_MAX_BYTES, IAM_LABEL_MIN_BYTES, is_valid_carbon_id, is_valid_global_silicon_id,
+    is_valid_iam_label,
 };
 pub use schedule::{
     ARCHIVE_RETENTION_DAYS, CreateScheduleCommand, CronExpression, MAX_SCHEDULE_STATUS_BATCH_SIZE,

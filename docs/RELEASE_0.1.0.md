@@ -14,9 +14,9 @@ fixture precision correction. Runtime code is unchanged by that test-only fix.
   `https://backend.remind.teamofsilicons.com`.
 - Bootstrap task `9da5f6c27552409ea4b4f2a232ac0611` exited 0 after both databases
   migrated, production runtime grants applied and restricted secrets published.
-- Production Carbon `saket` logged in through real IAM with owner/read permissions.
+- Production Carbon `c:saket` logged in through real IAM with owner/read permissions.
 - Created public sandbox `01a0741b-559b-7bd1-a700-f6747113fd8f`, bound to the existing
-  IAM test world. Test Silicon `remindrunner:tos` logged in successfully; sandbox
+  IAM test world. Test Silicon `si:remindrunner` logged in successfully; sandbox
   metadata is accessible. Webhook subscriptions are optional, so reminders can
   be created before a receiver is configured.
 - Unsigned public `/webhook/` request is rejected 401. Internal routes and metrics
@@ -33,7 +33,7 @@ used for earlier manual acceptance was not deployed or imported.
 
 ## IAM webhook active and receiving
 
-Live IAM metadata confirms `tos>remind` has the active receiver
+Live IAM metadata confirms `remind` has the active receiver
 `https://backend.remind.teamofsilicons.com/webhook/`, signing secret version 1,
 webhook version 2. Approval was already complete when this verification resumed;
 no repeated approval or replacement credential was issued.

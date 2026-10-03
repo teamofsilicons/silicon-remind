@@ -1,20 +1,30 @@
 export class ApiError extends Error {
-  constructor(
-    message: string,
-    public code?: string,
-    public requestId?: string,
-    public status?: number,
-  ) {
+  code?: string;
+  requestId?: string;
+  status?: number;
+  constructor(message: string, code?: string, requestId?: string, status?: number) {
     super(message);
+    this.code = code;
+    this.requestId = requestId;
+    this.status = status;
   }
 }
 const pending = new Map<string, string>();
+let accountContext = "signed-out";
+let productionContext = "signed-out";
+let environmentContext = "production";
+let selectionGeneration = 0;
+const selectionActions = new Set(["login", "logout", "account", "context", "organization"]);
 export async function request<T>(
   path: string,
   method = "GET",
   body?: unknown,
 ): Promise<T> {
-  const signature = method + path + JSON.stringify(body);
+  const capturedContext = accountContext;
+  const capturedProduction = productionContext;
+  const capturedEnvironment = environmentContext;
+  const generation = selectionActions.has(path) ? ++selectionGeneration : selectionGeneration;
+  const signature = JSON.stringify([capturedEnvironment, capturedContext, capturedProduction, method, path, body]);
   let mutation = pending.get(signature);
   if (method !== "GET") {
     mutation ||= crypto.randomUUID();
@@ -27,6 +37,9 @@ export async function request<T>(
       headers: {
         "Content-Type": "application/json",
         "X-Remind-UI": "1",
+        "X-Remind-Account": capturedContext,
+        "X-Remind-Production-Account": capturedProduction,
+        "X-Remind-Context": capturedEnvironment,
         "X-Remind-Telemetry": localStorage.getItem("remind.telemetry") === "off" ? "off" : "on",
         ...(mutation ? { "Idempotency-Key": mutation } : {}),
       },
@@ -46,6 +59,17 @@ export async function request<T>(
     );
   }
   if (response.ok) {
+    if (generation !== selectionGeneration || (path.startsWith("api") && (capturedContext !== accountContext || capturedProduction !== productionContext || capturedEnvironment !== environmentContext)))
+      throw new ApiError("Account changed while loading. Reload this view.", undefined, undefined, 409);
+    if (["session", "login", "logout", "account", "context", "organization"].includes(path) && result) {
+      const nextAccount = result.activeAccount || "signed-out";
+      const nextProduction = result.productionAccount || "signed-out";
+      const nextEnvironment = result.active || "production";
+      if (accountContext !== nextAccount || productionContext !== nextProduction || environmentContext !== nextEnvironment) selectionGeneration++;
+      accountContext = nextAccount;
+      productionContext = nextProduction;
+      environmentContext = nextEnvironment;
+    }
     pending.delete(signature);
     return result;
   }

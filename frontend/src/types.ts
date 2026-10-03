@@ -28,6 +28,9 @@ export interface Context {
   identity: Identity | null;
 }
 export interface Session {
+  activeAccount: string | null;
+  productionAccount: string | null;
+  accounts: { id: string; org: string; identity: Identity | null }[];
   authError?: string;
   active: string;
   contexts: Context[];

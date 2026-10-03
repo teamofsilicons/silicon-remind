@@ -394,18 +394,18 @@ mod tests {
             let endpoint = format!("{scheme}://127.0.0.1:8787/reminders");
             let url = encryption.encrypt(
                 &SecretString::from(endpoint.clone()),
-                &destination_field_associated_data("test", "clock:test", "endpoint_url"),
+                &destination_field_associated_data("test", "si:clock", "endpoint_url"),
             )?;
             let secret = encryption.encrypt(
                 &SecretString::from("fixture-signing-secret"),
-                &destination_field_associated_data("test", "clock:test", "signing_secret"),
+                &destination_field_associated_data("test", "si:clock", "signing_secret"),
             )?;
             let now = Utc::now();
             let row = HookDestinationRow {
                 id: Uuid::nil(),
                 org_id: "test".into(),
                 owner_principal_id: Uuid::nil(),
-                silicon_id: "clock:test".into(),
+                silicon_id: "si:clock".into(),
                 endpoint_url_ciphertext: url.ciphertext,
                 endpoint_url_nonce: url.nonce,
                 signing_secret_ciphertext: secret.ciphertext,

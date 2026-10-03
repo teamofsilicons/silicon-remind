@@ -1,0 +1,54 @@
+/* UIArc surfaces keep the scheduling workspace compact and readable. */
+:root { --blue:#2468d5; --line:#e4e7ec; --muted:#667182; background:#fafbfc; color:#20242c; }
+body { -webkit-font-smoothing:antialiased; }
+.sidebar { background:#f5f7fa; border-right-color:#e7ebf0; padding-inline:16px; }
+.brand { height:76px; font-size:21px; }
+.brand span { font-family:inherit; font-size:11px; letter-spacing:.03em; color:#657084; }
+.context { padding:20px 8px 26px; }
+.context label { font-family:inherit; font-size:11px; font-weight:500; letter-spacing:.02em; }
+.context select { border-radius:10px; min-height:40px; border-color:#e1e6ee; }
+.context .text-button { margin-top:8px; font-size:12px; }
+nav a { min-height:42px; border-radius:10px; padding:10px 12px; }
+nav a.active { background:#e9f0fc; color:#1d59b2; font-weight:500; }
+nav a>span { font-size:17px; }
+.topbar { height:76px; padding-inline:36px; border-bottom-color:#e7ebf0; }
+.topbar-account { margin-left:auto; display:inline-flex; gap:7px; color:#59677a; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.topbar-account strong { font-weight:500; color:#293a53; }
+main { padding-top:40px; }
+h1 { font-size:30px; font-weight:550; letter-spacing:-.035em; }
+.eyebrow { font-family:inherit; font-size:11px; letter-spacing:.035em; font-weight:500; margin-bottom:12px; }
+.page-heading { margin-bottom:28px; }
+.arc-button.primary,.arc-button.secondary,.arc-button.danger { min-height:38px; border-radius:10px; padding:0 14px; }
+.arc-button.row-link { border:0; padding:0; min-height:0; background:transparent; box-shadow:none; white-space:normal; display:inline; font-size:14px; font-weight:500; line-height:1.5; text-align:left; }
+.arc-button.row-link:hover { color:var(--blue); }
+.arc-button.text-button { padding:6px 0; min-height:0; }
+.arc-button.icon-button { padding:0 7px; }
+.arc-card.panel { border-radius:16px; border-color:var(--line); }
+.panel-head { min-height:66px; padding:18px 24px; }
+.panel-head h2 { font-size:15px; font-weight:500; }
+.filters { background:#fff; }
+input:not([type=checkbox]):not([type=radio]),select,textarea { border-radius:10px; border-color:#dce2ea; }
+input.arc-input { font-size:13px; min-height:38px; }
+input[type=checkbox] { accent-color:var(--blue); }
+th { background:#f9fafc; font-weight:500; color:#687487; }
+td { border-color:#eef1f5; }
+.arc-badge { min-height:24px; border-radius:999px; padding:0 9px; font-size:11px; border:1px solid #e1e6ee; }
+.arc-badge.active { color:#267050; background:#eef7f1; border-color:#dfede4; }
+.arc-badge.paused { color:#8a651c; background:#fff8e9; border-color:#f1e8ce; }
+.empty { padding:52px 24px; }
+.empty-icon { width:44px; height:44px; border-radius:14px; background:#f0f4fa; color:#527098; }
+dialog { border-radius:18px; border-color:var(--line); box-shadow:0 24px 64px #13233c26; }
+dialog::backdrop { background:#16223859; backdrop-filter:blur(3px); }
+dialog h2 { font-size:20px; font-weight:550; letter-spacing:-.02em; }
+@media(max-width:1100px) { .topbar-account>span { display:none; } }
+@media(max-width:760px) { .topbar { height:68px; padding:0 16px; gap:10px; flex-wrap:wrap; } .topbar>span { flex:1; } .topbar .plane { display:block; border:0; padding:0; margin:3px 0 0; font-size:10px; } .topbar-account { font-size:11px; }  .sidebar { top:68px; } main { padding:28px 16px 40px; } .page-heading .actions { margin-top:18px; } .panel-head { padding:18px; } .filters { padding:16px; } .table-scroll { scrollbar-width:thin; scrollbar-color:#c5cedb transparent; } .table-scroll::after { content:'Scroll to see schedule and status →'; position:sticky; left:0; display:block; width:calc(100vw - 68px); padding:10px 16px; color:var(--muted); font-size:11px; background:#f9fafc; border-top:1px solid var(--line); } }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none !important; animation:none !important; } }
+/* Keep account actions inside the fixed mobile header for long workspace names. */
+@media(max-width:760px) {
+ .topbar { flex-wrap:nowrap; }
+ .topbar>span { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+ .topbar .plane { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+ .topbar-account { min-width:0; max-width:30%; }
+ .topbar-account strong { overflow:hidden; text-overflow:ellipsis; }
+ .topbar>.actions { flex-shrink:0; }
+}
