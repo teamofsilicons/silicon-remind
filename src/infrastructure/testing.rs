@@ -30,6 +30,7 @@ use uuid::Uuid;
 mod discovery;
 /// Honeycomb participant lifecycle contract.
 pub mod honeycomb;
+mod worker_admission;
 
 static CONTROL_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./testing/migrations");
 const MAX_CACHED_TEST_POOLS: usize = 4;
