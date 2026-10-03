@@ -14,19 +14,31 @@ for retained integrations, but new registration should use `/webhook/`.
 
 All IAM HTTP operations use the published `silicon-iam-client` crate. The backend
 disables runtime dependency updates because deployment owns its compiled binary.
-Client/CLI users of Remind have separate default-on updater behavior.
+Client/CLI updates are managed through Honeycomb. The vendored IAM 5 SDK
+is pinned to the reviewed migration candidate; see its VENDORED.md provenance.
 
 ## Login and authorization
 
 The CLI and Rust client submit an IAM short-lived token to Remind's login route.
 The server exchanges it through `oauth().login` with its Application credential.
 Refresh uses `oauth().refresh`; logout uses `oauth().revoke`. No IAM password or
-OTP is accepted by Remind. Browser sign-in starts an unscoped IAM login: the user
-selects the organizations to authorize in IAM itself. Remind exchanges the SLT
-without an organization header, then discovers the granted organizations through
-`GET /api/v1/auth/organizations`. The sidebar switches between those grants.
-`X-Org-ID` selects an already-authorized organization for reminder requests; it
-does not add grants or scope a new login.
+OTP is accepted by Remind. IAM 5 login selects exactly one Carbon or Silicon
+account and one organization. Remind rejects unscoped legacy credentials and
+asks the user to sign in again. `/auth/organizations` returns only that session's
+organization; changing `X-Org-ID` cannot change its authority.
+
+The website keeps separate encrypted sessions for saved account and organization
+contexts. The account selector switches credentials and resets context-specific
+data. A request captured before a switch is rejected instead of being sent to
+the newly selected context. Refresh is serialized, persists its idempotency key
+before rotation, and must retain the same account and organization. The CLI
+retains contexts separately by server, testing environment, account and org;
+`--account c:alice --org tos` selects an existing context and `auth contexts`
+lists saved contexts without showing credentials. Testing actor login accepts an
+explicit `org_id` (`--org` in the CLI).
+
+Remind does not request OBO roots. Ordinary login never provides delegated
+provider authority, and no legacy OBO grant is inferred during migration.
 
 Every authenticated request calls IAM introspection with the requested org and
 requires an active Application access token, future expiry, matching app/client

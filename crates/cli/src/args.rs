@@ -52,6 +52,9 @@ pub struct Cli {
     /// Select the organization for this invocation.
     #[arg(long, global = true, env = "REMIND_ORG")]
     pub org: Option<String>,
+    /// Select a saved Carbon or Silicon account without changing its organization.
+    #[arg(long, global = true, env = "REMIND_ACCOUNT")]
+    pub account: Option<String>,
     /// Run the same command in a saved test environment, using its isolated session.
     #[arg(long, global = true)]
     pub test: Option<Uuid>,
@@ -221,6 +224,8 @@ pub enum Login {
 }
 #[derive(Subcommand)]
 pub enum Auth {
+    /// List saved account and organization contexts without exposing credentials.
+    Contexts,
     /// Exchange an IAM SLT; prompt securely, or read it from standard input.
     Login {
         #[arg(long)]

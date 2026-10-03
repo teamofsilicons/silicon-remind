@@ -154,8 +154,7 @@ async fn run(cli: &mut Cli) -> anyhow::Result<()> {
     let result = execute(cli, &mut store).await;
     emit_local_event(
         &store,
-        cli.test,
-        cli.url.as_deref(),
+        cli,
         "cli",
         "command_completed",
         result.is_ok(),
@@ -194,7 +193,13 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 && std::env::var("REMIND_TELEMETRY_ENABLED").as_deref() != Ok("false"),
         )
         .auto_update(false);
-    let session_slot = slot(&url, cli.test);
+    let base_slot = slot(&url, cli.test);
+    let session_slot = state::selected_slot(
+        &store.state,
+        &base_slot,
+        cli.org.as_deref(),
+        cli.account.as_deref(),
+    )?;
     if let Some(id) = cli.test.filter(|_| {
         !matches!(
             cli.command,
@@ -239,6 +244,10 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
     if needs_session {
         let stored=store.state.sessions.get(&session_slot).context("no session for this server and environment; run remind auth login --org <org> (with --test <id> for a sandbox)")?;
         let org = cli.org.clone().unwrap_or_else(|| stored.org.clone());
+        anyhow::ensure!(
+            stored.session.org_id.as_deref() == Some(org.as_str()) && stored.org == org,
+            "This credential belongs to another organization. Sign in to the selected account and organization again."
+        );
         if !matches!(
             cli.command,
             Command::Auth {
@@ -314,12 +323,21 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
             let slt = slt
                 .as_ref()
                 .context("provide an SLT or use remind login status")?;
-            login_with_token(cli, store, &client, &session_slot, Secret::new(slt.clone())).await?;
+            login_with_token(cli, store, &client, &base_slot, Secret::new(slt.clone())).await?;
         }
         Command::Auth { command } => match command {
+            Auth::Contexts => {
+                let items: Vec<_> = store.state.sessions.iter()
+                    .filter(|(key, _)| *key == &base_slot || key.starts_with(&format!("{base_slot}#")))
+                    .map(|(key, saved)| serde_json::json!({"account":saved.session.actor,
+                        "org_id":saved.org, "selected":key == &session_slot,
+                        "requires_login":saved.session.org_id.as_deref() != Some(saved.org.as_str())}))
+                    .collect();
+                output(cli, &serde_json::json!({"items":items}))?;
+            }
             Auth::Login { slt_stdin } => {
                 let token = read_secret("IAM short-lived token: ", *slt_stdin)?;
-                login_with_token(cli, store, &client, &session_slot, token).await?;
+                login_with_token(cli, store, &client, &base_slot, token).await?;
                 suggest(
                     cli,
                     "Logged in. Optional next step: remind webhook subscribe <url>.",
@@ -340,6 +358,10 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                     .logout(&stored.session.refresh_token, &mutation)
                     .await?;
                 store.state.sessions.remove(&session_slot);
+                store
+                    .state
+                    .selected_sessions
+                    .retain(|_, selected| selected != &session_slot);
                 store.save()?;
                 output(cli, &serde_json::json!({"status":"logged_out"}))?;
             }
@@ -616,7 +638,7 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 }
                 store.state.test_names.remove(&slot(&url, Some(*id)));
                 store.state.test_keys.remove(&slot(&url, Some(*id)));
-                store.state.sessions.remove(&slot(&url, Some(*id)));
+                store.forget_sessions(&slot(&url, Some(*id)));
                 store.save()?;
                 output(
                     cli,
@@ -645,7 +667,7 @@ async fn execute(cli: &Cli, store: &mut Store) -> anyhow::Result<()> {
                 }
                 store.state.test_names.remove(&slot(&url, Some(*id)));
                 store.state.test_keys.remove(&slot(&url, Some(*id)));
-                store.state.sessions.remove(&slot(&url, Some(*id)));
+                store.forget_sessions(&slot(&url, Some(*id)));
                 store.save()?;
                 output(
                     cli,
@@ -730,6 +752,9 @@ async fn login_status(
         return Ok(models::LoginStatus::default());
     };
     let org = cli.org.clone().unwrap_or_else(|| stored.org.clone());
+    if stored.session.org_id.as_deref() != Some(org.as_str()) || stored.org != org {
+        return Ok(models::LoginStatus::default());
+    }
     if (stored.pending_refresh_key.is_some()
         || stored.expires_at <= chrono::Utc::now().timestamp() + 30)
         && let Err(error) = refresh_session(store, session_slot, client, None).await
@@ -769,27 +794,6 @@ async fn login_status(
     unreachable!("the second identity check returns directly")
 }
 
-/// Choose the sole IAM-authorized organization when the session names none.
-/// Public actor IDs do not encode an organization; multiple grants need --org.
-async fn resolve_organization(client: &Client, bearer: &Secret) -> anyhow::Result<String> {
-    let organizations = client.organizations(bearer).await?;
-    if let [only] = organizations.as_slice() {
-        return Ok(only.org_id.clone());
-    }
-    if organizations.is_empty() {
-        bail!(
-            "this login is not authorized for any organization; grant one through IAM, then sign in again"
-        );
-    }
-    let available: Vec<_> = organizations
-        .iter()
-        .map(|identity| identity.org_id.as_str())
-        .collect();
-    bail!(
-        "several organizations are available ({}); choose one with --org <org>",
-        available.join(", ")
-    )
-}
 async fn login_with_token(
     cli: &Cli,
     store: &mut Store,
@@ -801,16 +805,50 @@ async fn login_with_token(
         Some(key) => Mutation::with_key(key)?,
         None => Mutation::new(),
     };
-    let session = client.login(&token, &mutation).await?;
-    let org = match cli.org.clone().or_else(|| session.org_id.clone()) {
-        Some(org) => org,
-        None => resolve_organization(client, &session.access_token).await?,
-    };
+    let session = client
+        .login_in_organization(&token, cli.org.as_deref(), &mutation)
+        .await?;
+    let org = session
+        .org_id
+        .clone()
+        .filter(|org| !org.is_empty())
+        .context(
+            "IAM 5 requires one organization per login. Sign in again and select an organization.",
+        )?;
+    anyhow::ensure!(
+        cli.org.as_ref().is_none_or(|requested| requested == &org),
+        "The login belongs to a different organization"
+    );
+    let account = session.actor["public_id"]
+        .as_str()
+        .context("Login did not identify the selected account")?;
+    let kind = session.actor["type"]
+        .as_str()
+        .context("Login did not identify the selected account type")?;
+    anyhow::ensure!(
+        matches!(kind, "carbon" | "silicon"),
+        "Login must represent a Carbon or Silicon"
+    );
+    anyhow::ensure!(
+        cli.account
+            .as_deref()
+            .is_none_or(|requested| requested == account),
+        "The login belongs to another account"
+    );
+    let context_slot = format!("{session_slot}#{kind}:{account}@{org}");
     let identity = client
         .with_session(session.access_token.clone(), org.clone())?
         .me()
         .await?;
-    save_session(store, session_slot, session, org)?;
+    anyhow::ensure!(
+        identity.public_id.as_deref() == Some(account) && identity.org_id == org,
+        "IAM session identity changed during login"
+    );
+    store
+        .state
+        .selected_sessions
+        .insert(session_slot.into(), context_slot.clone());
+    save_session(store, &context_slot, session, org)?;
     output(cli, &identity)?;
     suggest(
         cli,
@@ -850,8 +888,13 @@ async fn refresh_session(
         stored.pending_refresh_key = Some(mutation.key().into());
         let token = stored.session.refresh_token.clone();
         let org = stored.org.clone();
+        let actor = stored.session.actor.clone();
         store.save()?;
         let session = client.refresh(&token, &mutation).await?;
+        anyhow::ensure!(
+            session.org_id.as_deref() == Some(org.as_str()) && session.actor == actor,
+            "IAM refresh changed the selected account or organization; sign in again"
+        );
         let expires_at = started_at.saturating_add(session.expires_in.max(0));
         save_session_at(store, key, session, org, expires_at)?;
         if expires_at > chrono::Utc::now().timestamp() + 30 {
@@ -947,8 +990,7 @@ fn suggest(cli: &Cli, text: &str) {
 
 async fn emit_local_event(
     store: &Store,
-    test: Option<uuid::Uuid>,
-    url: Option<&str>,
+    cli: &Cli,
     source: &str,
     event: &str,
     success: bool,
@@ -958,15 +1000,23 @@ async fn emit_local_event(
     {
         return;
     }
-    let url = url.unwrap_or(&store.state.url);
-    let key = slot(url, test);
-    let Some(session) = store.state.sessions.get(&key) else {
+    let url = cli.url.as_deref().unwrap_or(&store.state.url);
+    let key = slot(url, cli.test);
+    let Ok(session_key) = state::selected_slot(
+        &store.state,
+        &key,
+        cli.org.as_deref(),
+        cli.account.as_deref(),
+    ) else {
+        return;
+    };
+    let Some(session) = store.state.sessions.get(&session_key) else {
         return;
     };
     let Ok(mut client) = Client::new(url) else {
         return;
     };
-    if test.is_some() {
+    if cli.test.is_some() {
         let Some(secret) = store.state.test_keys.get(&key) else {
             return;
         };

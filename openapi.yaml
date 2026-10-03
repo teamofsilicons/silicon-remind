@@ -344,6 +344,9 @@ paths:
                 slt: &id002
                   type: string
                   writeOnly: true
+                org_id:
+                  type: string
+                  description: Select one organization for a testing actor. An issued SLT must already represent this organization.
               required:
               - slt
       security: []
@@ -1204,9 +1207,8 @@ components:
         actor:
           type: object
         org_id:
-          type:
-          - string
-          - 'null'
+          type: string
+          description: The single organization selected during IAM login. Refresh preserves this context.
       required:
       - access_token
       - refresh_token
@@ -1214,6 +1216,7 @@ components:
       - token_type
       - scope
       - actor
+      - org_id
     Identity:
       type: object
       properties:

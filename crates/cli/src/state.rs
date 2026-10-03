@@ -27,6 +27,8 @@ pub struct State {
     pub telemetry: bool,
     pub last_update_check: u64,
     pub sessions: BTreeMap<String, StoredSession>,
+    #[serde(default)]
+    pub selected_sessions: BTreeMap<String, String>,
     pub test_keys: BTreeMap<String, Secret>,
     #[serde(default)]
     pub selected_tests: BTreeMap<String, uuid::Uuid>,
@@ -44,6 +46,7 @@ impl Default for State {
             telemetry: true,
             last_update_check: 0,
             sessions: BTreeMap::new(),
+            selected_sessions: BTreeMap::new(),
             test_keys: BTreeMap::new(),
             selected_tests: BTreeMap::new(),
             test_names: BTreeMap::new(),
@@ -56,6 +59,12 @@ pub struct Store {
     _lock: File,
 }
 impl Store {
+    pub fn forget_sessions(&mut self, base: &str) {
+        self.state
+            .sessions
+            .retain(|key, _| key != base && !key.starts_with(&format!("{base}#")));
+        self.state.selected_sessions.remove(base);
+    }
     pub fn home_dir(&self) -> &std::path::Path {
         self.dir.parent().unwrap_or(self.dir.as_path())
     }
@@ -171,4 +180,90 @@ pub fn slot(url: &str, test: Option<uuid::Uuid>) -> String {
         url.trim_end_matches('/'),
         test.map_or_else(|| "production".into(), |id| id.to_string())
     )
+}
+
+pub fn selected_slot(
+    state: &State,
+    base: &str,
+    org: Option<&str>,
+    account: Option<&str>,
+) -> anyhow::Result<String> {
+    let matches = |key: &str, saved: &StoredSession| {
+        (key == base || key.starts_with(&format!("{base}#")))
+            && saved.session.org_id.as_deref() == Some(saved.org.as_str())
+            && org.is_none_or(|org| org == saved.org)
+            && account
+                .is_none_or(|account| saved.session.actor["public_id"].as_str() == Some(account))
+    };
+    if let Some(key) = state.selected_sessions.get(base)
+        && let Some(saved) = state.sessions.get(key)
+        && matches(key, saved)
+    {
+        return Ok(key.clone());
+    }
+    let mut found = state
+        .sessions
+        .iter()
+        .filter(|(key, saved)| matches(key, saved));
+    match (found.next(), found.next()) {
+        (Some((key, _)), None) => Ok(key.clone()),
+        (None, _) => Ok(base.to_owned()),
+        _ => anyhow::bail!(
+            "several saved contexts match; select both --account <public-id> and --org <organization>"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(account: &str, org: &str) -> StoredSession {
+        StoredSession {
+            session: Session {
+                access_token: Secret::new("access"),
+                refresh_token: Secret::new("refresh"),
+                expires_in: 1800,
+                token_type: "Bearer".into(),
+                scope: String::new(),
+                actor: serde_json::json!({"type":"carbon", "public_id":account}),
+                org_id: Some(org.into()),
+            },
+            org: org.into(),
+            expires_at: 9999999999,
+            pending_refresh_key: None,
+            refresh_started_at: None,
+        }
+    }
+
+    #[test]
+    fn selection_never_reuses_another_account_org_or_environment() -> anyhow::Result<()> {
+        let mut state = State::default();
+        let base = slot("https://remind.example", None);
+        let (a, b) = (format!("{base}#a"), format!("{base}#b"));
+        state
+            .sessions
+            .insert(a.clone(), session("c:alice", "alpha"));
+        state.sessions.insert(b.clone(), session("c:bob", "beta"));
+        state.selected_sessions.insert(base.clone(), a.clone());
+        assert_eq!(selected_slot(&state, &base, None, None)?, a);
+        assert_eq!(
+            selected_slot(&state, &base, Some("beta"), Some("c:bob"))?,
+            b
+        );
+        assert_eq!(
+            selected_slot(&state, &base, Some("beta"), Some("c:alice"))?,
+            base
+        );
+        let test = slot("https://remind.example", Some(uuid::Uuid::nil()));
+        assert_eq!(selected_slot(&state, &test, None, None)?, test);
+        state
+            .sessions
+            .get_mut(&a)
+            .ok_or_else(|| anyhow::anyhow!("missing fixture"))?
+            .session
+            .org_id = None;
+        assert_eq!(selected_slot(&state, &base, Some("alpha"), None)?, base);
+        Ok(())
+    }
 }

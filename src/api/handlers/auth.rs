@@ -19,6 +19,8 @@ use crate::{domain::Actor, error::AppError, infrastructure::iam::IamError};
 #[serde(deny_unknown_fields)]
 pub struct LoginRequest {
     slt: SecretString,
+    /// Selects the organization for a testing actor login; must match issued SLTs.
+    org_id: Option<String>,
 }
 
 /// An existing application refresh token.
@@ -48,7 +50,7 @@ pub async fn login(
     let Json(input) = body.map_err(|error| super::internal::map_json_rejection(&error))?;
     let tokens = state
         .iam
-        .login(&input.slt, &mutation(&headers)?)
+        .login(&input.slt, input.org_id.as_deref(), &mutation(&headers)?)
         .await
         .map_err(|error| map_error(&error))?;
     Ok(no_store(Json(tokens).into_response()))

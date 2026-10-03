@@ -9,12 +9,15 @@ export class ApiError extends Error {
   }
 }
 const pending = new Map<string, string>();
+let accountContext = "signed-out";
+let productionContext = "signed-out";
 export async function request<T>(
   path: string,
   method = "GET",
   body?: unknown,
 ): Promise<T> {
-  const signature = method + path + JSON.stringify(body);
+  const capturedContext = accountContext;
+  const signature = capturedContext + ":" + method + path + JSON.stringify(body);
   let mutation = pending.get(signature);
   if (method !== "GET") {
     mutation ||= crypto.randomUUID();
@@ -27,6 +30,8 @@ export async function request<T>(
       headers: {
         "Content-Type": "application/json",
         "X-Remind-UI": "1",
+        "X-Remind-Account": capturedContext,
+        "X-Remind-Production-Account": productionContext,
         "X-Remind-Telemetry": localStorage.getItem("remind.telemetry") === "off" ? "off" : "on",
         ...(mutation ? { "Idempotency-Key": mutation } : {}),
       },
@@ -46,6 +51,12 @@ export async function request<T>(
     );
   }
   if (response.ok) {
+    if (path.startsWith("api") && capturedContext !== accountContext)
+      throw new ApiError("Account changed while loading. Reload this view.", undefined, undefined, 409);
+    if (["session", "login", "logout", "account", "context", "organization"].includes(path) && result) {
+      accountContext = result.activeAccount || "signed-out";
+      productionContext = result.productionAccount || "signed-out";
+    }
     pending.delete(signature);
     return result;
   }

@@ -248,9 +248,23 @@ impl Client {
         }
     }
     pub async fn login(&self, slt: &Secret, mutation: &Mutation) -> Result<models::Session> {
+        self.login_in_organization(slt, None, mutation).await
+    }
+    /// Exchanges a scoped SLT, or selects one organization for a testing actor.
+    /// An issued SLT must already represent the requested organization.
+    pub async fn login_in_organization(
+        &self,
+        slt: &Secret,
+        org: Option<&str>,
+        mutation: &Mutation,
+    ) -> Result<models::Session> {
+        let mut body = serde_json::json!({"slt":slt});
+        if let Some(org) = org {
+            body["org_id"] = serde_json::json!(org);
+        }
         self.json(
             self.mutation(Method::POST, "/api/v1/auth/login", mutation)?
-                .json(&serde_json::json!({"slt":slt})),
+                .json(&body),
         )
         .await
     }

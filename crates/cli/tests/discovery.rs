@@ -19,6 +19,7 @@ fn cli(home: &Path) -> Command {
         .env_remove("SILICON_HOME")
         .env_remove("REMIND_URL")
         .env_remove("REMIND_ORG")
+        .env_remove("REMIND_ACCOUNT")
         .arg("--no-update");
     command
 }
@@ -37,11 +38,11 @@ fn success(output: Output) -> Result<Value> {
 }
 fn session() -> Value {
     json!({"access_token":"access-fixture", "refresh_token":"refresh-fixture",
-        "expires_in":3600, "token_type":"Bearer", "scope":"", "actor":{}, "org_id":"tos"})
+        "expires_in":3600, "token_type":"Bearer", "scope":"", "actor":{"type":"silicon","public_id":"si:fixture"}, "org_id":"tos"})
 }
 fn identity(actor: &str) -> Value {
     json!({"principal_id":"01992000-0000-7000-8000-000000000001", "actor_type":actor,
-        "public_id":"si:fixture", "org_id":"tos", "membership_id":"01992000-0000-7000-8000-000000000002",
+        "public_id":if actor == "silicon" { "si:fixture" } else { "c:fixture" }, "org_id":"tos", "membership_id":"01992000-0000-7000-8000-000000000002",
         "org_role":"member", "authorization_epoch":1, "can_manage_reminders":actor == "silicon"})
 }
 fn save(home: &Path, url: &str, expired: bool, test: Option<&str>) -> Result<()> {
@@ -172,6 +173,8 @@ async fn iam_discovers_server_configuration_without_credentials() -> Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_status_verifies_both_actor_types_and_preserves_direct_login() -> Result<()> {
     for actor in ["carbon", "silicon"] {
+        let mut tokens = session();
+        tokens["actor"] = json!({"type":actor,"public_id":identity(actor)["public_id"]});
         let home = TempDir::new()?;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -179,7 +182,7 @@ async fn login_status_verifies_both_actor_types_and_preserves_direct_login() -> 
             .and(wiremock::matchers::body_json(
                 json!({"slt":"short-lived-fixture"}),
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(session()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
             .expect(1)
             .mount(&server)
             .await;
@@ -209,7 +212,7 @@ async fn login_status_verifies_both_actor_types_and_preserves_direct_login() -> 
         )?;
         assert_eq!(status["authenticated"], true);
         assert_eq!(status["actor_type"], actor);
-        assert_eq!(status["public_id"], "si:fixture");
+        assert_eq!(status["public_id"], identity(actor)["public_id"]);
         assert!(status.get("access_token").is_none() && status.get("refresh_token").is_none());
     }
     Ok(())
@@ -490,137 +493,149 @@ fn updates_are_honeycomb_managed_and_parse_errors_keep_the_test_footer() -> Resu
     Ok(())
 }
 
-fn session_without_org() -> Value {
-    json!({"access_token":"access-fixture", "refresh_token":"refresh-fixture",
-        "expires_in":3600, "token_type":"Bearer", "scope":"", "actor":{}, "org_id":null})
-}
-
-/// A Silicon logging in through `silicon connect` gets an SLT that names no organization.
-/// One authorized organization is not a choice, so the login must not demand --org.
+/// An organization header cannot turn retired unscoped credentials into an IAM5 session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn login_without_org_uses_the_only_authorized_organization() -> Result<()> {
-    let home = TempDir::new()?;
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/login"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(session_without_org()))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/organizations"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"items":[identity("silicon")]})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/me"))
-        .and(header("x-org-id", "tos"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let result = success(
-        cli(home.path())
-            .args(["--url", &server.uri(), "login", "slt-fixture", "--json"])
-            .output()?,
-    )?;
-    assert_eq!(result["org_id"], json!("tos"));
-    // The resolved organization is persisted, so later commands need no --org either.
-    let state: Value = serde_json::from_slice(&fs::read(home.path().join(".remind/state.json"))?)?;
-    let saved = state["sessions"].as_object().context("sessions")?;
-    assert!(
-        saved.values().any(|entry| entry["org"] == json!("tos")),
-        "the resolved organization must be saved: {state}"
-    );
+async fn unscoped_login_requires_reauthentication_even_with_org_override() -> Result<()> {
+    for explicit_org in [false, true] {
+        let home = TempDir::new()?;
+        let server = MockServer::start().await;
+        let mut tokens = session();
+        tokens["org_id"] = Value::Null;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut command = cli(home.path());
+        command.args(["--url", &server.uri(), "login", "slt-fixture", "--json"]);
+        if explicit_org {
+            command.args(["--org", "tos"]);
+        }
+        let output = command.output()?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Sign in again"));
+        assert_eq!(
+            server.received_requests().await.context("requests")?.len(),
+            1
+        );
+    }
     Ok(())
 }
 
-/// A Silicon ID names no organization. Multiple grants require an explicit choice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn silicon_login_with_multiple_organizations_requires_explicit_choice() -> Result<()> {
+async fn separate_account_org_sessions_survive_later_logins() -> Result<()> {
     let home = TempDir::new()?;
     let server = MockServer::start().await;
-    // The same actor has two organization grants; its handle cannot choose one.
-    let mut granted = identity("silicon");
-    granted["org_id"] = json!("bricks");
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/login"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(session_without_org()))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/organizations"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"items":[granted, identity("silicon")]})),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/me"))
-        .and(header("x-org-id", "tos"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let output = cli(home.path())
-        .args(["--url", &server.uri(), "login", "slt-fixture", "--json"])
-        .output()?;
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--org") && stderr.contains("bricks") && stderr.contains("tos"),
-        "{stderr}"
-    );
-    let result = success(
+    for (name, kind, org) in [("first", "silicon", "tos"), ("second", "carbon", "bricks")] {
+        let mut tokens = session();
+        let mut actor = identity(kind);
+        actor["org_id"] = json!(org);
+        tokens["actor"] = json!({"type":kind,"public_id":actor["public_id"]});
+        tokens["org_id"] = json!(org);
+        tokens["access_token"] = json!(format!("access-{name}"));
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/login"))
+            .and(wiremock::matchers::body_json(json!({"slt":name})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/auth/me"))
+            .and(header("authorization", format!("Bearer access-{name}")))
+            .and(header("x-org-id", org))
+            .respond_with(ResponseTemplate::new(200).set_body_json(actor))
+            .mount(&server)
+            .await;
+        success(
+            cli(home.path())
+                .args(["--url", &server.uri(), "login", name, "--json"])
+                .output()?,
+        )?;
+    }
+    let contexts = success(
+        cli(home.path())
+            .args(["--url", &server.uri(), "auth", "contexts", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(contexts["items"].as_array().context("items")?.len(), 2);
+    assert!(!contexts.to_string().contains("access-first"));
+    let first = success(
         cli(home.path())
             .args([
                 "--url",
                 &server.uri(),
+                "--account",
+                "si:fixture",
                 "--org",
                 "tos",
                 "login",
-                "slt-fixture",
+                "status",
                 "--json",
             ])
             .output()?,
     )?;
-    assert_eq!(result["org_id"], json!("tos"));
+    assert_eq!(first["public_id"], "si:fixture");
+    assert_eq!(first["org_id"], "tos");
+    let wrong = success(
+        cli(home.path())
+            .args([
+                "--url",
+                &server.uri(),
+                "--account",
+                "si:fixture",
+                "--org",
+                "bricks",
+                "login",
+                "status",
+                "--json",
+            ])
+            .output()?,
+    )?;
+    assert_eq!(wrong, json!({"authenticated":false}));
     Ok(())
 }
 
-/// A Carbon's identity names no organization, so several of them is a real question -
-/// and the answer must name the options rather than just demand a flag.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn login_without_org_asks_when_the_organization_is_unknowable() -> Result<()> {
+async fn refresh_cannot_move_a_saved_context_and_retains_retry_identity() -> Result<()> {
     let home = TempDir::new()?;
     let server = MockServer::start().await;
-    let mut first = identity("carbon");
-    first["public_id"] = json!("c:fixture");
-    let mut second = first.clone();
-    second["org_id"] = json!("bricks");
+    save(home.path(), &server.uri(), true, None)?;
+    let mut tokens = session();
+    tokens["org_id"] = json!("bricks");
     Mock::given(method("POST"))
-        .and(path("/api/v1/auth/login"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(session_without_org()))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/organizations"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[first, second]})))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
+        .expect(1)
         .mount(&server)
         .await;
     let output = cli(home.path())
-        .args(["--url", &server.uri(), "login", "slt-fixture"])
+        .args(["login", "status", "--json"])
         .output()?;
-    assert!(!output.status.success(), "an unknowable choice must fail");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--org"), "{stderr}");
+    assert!(!output.status.success());
     assert!(
-        stderr.contains("tos") && stderr.contains("bricks"),
-        "{stderr}"
+        String::from_utf8_lossy(&output.stderr)
+            .contains("changed the selected account or organization")
+    );
+    let state: Value = serde_json::from_slice(&fs::read(home.path().join(".remind/state.json"))?)?;
+    let stored = &state["sessions"][format!("{}#production", server.uri())];
+    assert_eq!(stored["org"], "tos");
+    assert_eq!(stored["session"]["org_id"], "tos");
+    assert!(stored["pending_refresh_key"].is_string());
+    let requests = server.received_requests().await.context("requests")?;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.url.path() == "/api/v1/auth/refresh")
+            .count(),
+        1
+    );
+    assert!(!requests.iter().any(|r| r.url.path() == "/api/v1/auth/me"));
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.headers.get("x-org-id").is_none_or(|org| org != "bricks"))
     );
     Ok(())
 }

@@ -165,16 +165,32 @@ impl IamClient {
     pub async fn login(
         &self,
         slt: &SecretString,
+        org_id: Option<&str>,
         mutation: &Mutation,
     ) -> Result<models::OAuthTokenResponse, IamError> {
         if self.testing_environment_id.is_none() && !slt.expose_secret().starts_with("oac_") {
             return Err(IamError::Unauthenticated);
         }
-        self.client
-            .oauth()
-            .login(&self.app_id, slt.expose_secret(), mutation)
-            .await
-            .map_err(classify)
+        if org_id.is_some_and(|org| !crate::domain::is_valid_iam_label(org)) {
+            return Err(IamError::Unauthenticated);
+        }
+        let tokens = if self.testing_environment_id.is_some()
+            && !slt.expose_secret().starts_with("oac_")
+            && let Some(org) = org_id
+        {
+            self.client
+                .oauth()
+                .login_testing_actor(&self.app_id, slt.expose_secret(), org, mutation)
+                .await
+        } else {
+            self.client
+                .oauth()
+                .login(&self.app_id, slt.expose_secret(), mutation)
+                .await
+        }
+        .map_err(classify)?;
+        validate_session(&tokens, org_id)?;
+        Ok(tokens)
     }
 
     /// Rotates an existing application's refresh token.
@@ -187,11 +203,14 @@ impl IamClient {
         token: &SecretString,
         mutation: &Mutation,
     ) -> Result<models::OAuthTokenResponse, IamError> {
-        self.client
+        let tokens = self
+            .client
             .oauth()
             .refresh(&self.app_id, token.expose_secret(), mutation)
             .await
-            .map_err(classify)
+            .map_err(classify)?;
+        validate_session(&tokens, None)?;
+        Ok(tokens)
     }
 
     /// Revokes the refresh-token family or supplied access token.
@@ -247,31 +266,11 @@ impl IamClient {
         pool: &PgPool,
     ) -> Result<Vec<Actor>, IamError> {
         let inspected = self.inspect(token, None, now).await?;
-        let snapshots = match (&inspected.authorization, &inspected.authorizations) {
-            (Some(snapshot), None) => std::slice::from_ref(snapshot),
-            (None, Some(snapshots)) if inspected.org_id.is_none() => snapshots.as_slice(),
-            _ => return Err(IamError::Unauthenticated),
-        };
-        let mut seen = std::collections::HashSet::new();
-        let mut actors = Vec::with_capacity(snapshots.len());
-        let mut identity = None;
-        for snapshot in snapshots {
-            if !seen.insert(&snapshot.org_id) {
-                return Err(IamError::Unauthenticated);
-            }
-            let actor = self.actor(&inspected, snapshot)?;
-            let current = (actor.kind, actor.public_id.clone());
-            if identity.as_ref().is_some_and(|prior| prior != &current) {
-                return Err(IamError::Unauthenticated);
-            }
-            identity = Some(current);
-            actors.push(actor);
-        }
-        let mut resolved = Vec::with_capacity(actors.len());
-        for actor in actors {
-            resolved.push(actor.resolve(pool).await?);
-        }
-        Ok(resolved)
+        let snapshot = inspected
+            .authorization
+            .as_ref()
+            .ok_or(IamError::Unauthenticated)?;
+        Ok(vec![self.actor(&inspected, snapshot)?.resolve(pool).await?])
     }
 
     async fn inspect(
@@ -300,6 +299,11 @@ impl IamClient {
             .map_err(classify)?;
         if !inspected.active
             || inspected
+                .org_id
+                .as_deref()
+                .is_none_or(|org| !crate::domain::is_valid_iam_label(org))
+            || inspected.authorizations.is_some()
+            || inspected
                 .expires_at
                 .is_none_or(|expiry| expiry <= now.timestamp())
             || inspected.client_id.as_deref() != Some(&self.app_id)
@@ -319,10 +323,7 @@ impl IamClient {
         snapshot: &models::ApplicationAuthorization,
     ) -> Result<CanonicalActor, IamError> {
         if snapshot.audience != self.app_id
-            || inspected
-                .org_id
-                .as_deref()
-                .is_some_and(|org| org != snapshot.org_id)
+            || inspected.org_id.as_deref() != Some(snapshot.org_id.as_str())
             || inspected
                 .public_id
                 .as_ref()
@@ -381,6 +382,34 @@ impl IamClient {
             org_role: snapshot.org_role.clone(),
         })
     }
+}
+
+fn validate_session(
+    tokens: &models::OAuthTokenResponse,
+    requested_org: Option<&str>,
+) -> Result<(), IamError> {
+    let org = tokens.org_id.as_deref().ok_or(IamError::Unauthenticated)?;
+    let actor = tokens.actor.as_ref().ok_or(IamError::Unauthenticated)?;
+    if !crate::domain::is_valid_iam_label(org)
+        || requested_org.is_some_and(|requested| requested != org)
+        || tokens.expires_in <= 0
+        || tokens.access_token.is_empty()
+        || tokens.refresh_token.is_empty()
+        || tokens
+            .scope
+            .split_whitespace()
+            .any(|scope| scope.starts_with("obo:"))
+        || match actor.type_field {
+            models::ActorRefType::Carbon => !crate::domain::is_valid_carbon_id(&actor.public_id),
+            models::ActorRefType::Silicon => {
+                !crate::domain::is_valid_global_silicon_id(&actor.public_id)
+            }
+            _ => true,
+        }
+    {
+        return Err(IamError::Unauthenticated);
+    }
+    Ok(())
 }
 
 fn classify(error: silicon_iam_client::Error) -> IamError {
@@ -540,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn unscoped_authority_preserves_identity_audience_and_plane_boundaries() -> anyhow::Result<()> {
+    fn scoped_authority_preserves_identity_audience_and_plane_boundaries() -> anyhow::Result<()> {
         let client = IamClient {
             client: Client::builder("http://127.0.0.1:8080")?
                 .auto_update(false)
@@ -553,7 +582,7 @@ mod tests {
         let membership = "c:person[alpha]".to_owned();
         let inspected: models::TokenIntrospection = serde_json::from_value(json!({
             "active": true, "public_id": "c:person", "actor_type": "carbon", "principal_id": principal, "client_id": "remind",
-            "org_id": null, "membership_id": null,
+            "org_id": "alpha", "membership_id": null,
         }))?;
         let snapshot: models::ApplicationAuthorization = serde_json::from_value(json!({
             "principal_id": principal, "actor_type": "carbon", "public_id": "c:person",
@@ -562,6 +591,12 @@ mod tests {
             "testing_environment_id": null, "scopes": [], "org_role": "member", "tags": null,
         }))?;
         assert_eq!(client.actor(&inspected, &snapshot)?.org_id, "alpha");
+        let mut unscoped = inspected.clone();
+        unscoped.org_id = None;
+        assert!(matches!(
+            client.actor(&unscoped, &snapshot),
+            Err(IamError::Unauthenticated)
+        ));
         // Deployed IAM may omit the top-level public ID; its scoped snapshot
         // still supplies the canonical identity. Private UUID fields are ignored.
         let mut legacy = inspected.clone();
@@ -600,6 +635,28 @@ mod tests {
                 client.actor(&inspected, &invalid),
                 Err(IamError::Unauthenticated)
             ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_requires_one_account_and_org_without_implicit_obo() -> anyhow::Result<()> {
+        for (kind, id) in [("carbon", "c:person"), ("silicon", "si:worker")] {
+            let tokens: models::OAuthTokenResponse = serde_json::from_value(json!({
+                "access_token":"oat_example", "refresh_token":"ort_example", "token_type":"Bearer",
+                "expires_in":1800, "scope":"", "org_id":"alpha", "actor":{"type":kind, "public_id":id}
+            }))?;
+            assert!(validate_session(&tokens, Some("alpha")).is_ok());
+            assert!(validate_session(&tokens, Some("beta")).is_err());
+            let mut invalid = tokens.clone();
+            invalid.org_id = None;
+            assert!(validate_session(&invalid, None).is_err());
+            invalid = tokens.clone();
+            invalid.scope = "obo:briefcase:files.read".into();
+            assert!(validate_session(&invalid, None).is_err());
+            invalid = tokens.clone();
+            invalid.actor = None;
+            assert!(validate_session(&invalid, None).is_err());
         }
         Ok(())
     }

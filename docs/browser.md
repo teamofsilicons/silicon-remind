@@ -1,6 +1,6 @@
 # Use Remind in your browser
 
-Open [Remind](https://remind.teamofsilicons.com) and choose **Continue with IAM**. IAM handles credentials and consent; Remind receives a short-lived token and stores the resulting session encrypted on its server. Select one of the organizations you authorized.
+Open [Remind](https://remind.teamofsilicons.com) and choose **Continue with IAM**. IAM handles credentials and consent; Remind receives a short-lived token and stores the resulting session encrypted on its server. Select one Carbon or Silicon account and one organization. Add further contexts with **Add account or organization**, then switch using the saved-account selector.
 
 Use Reminders to create or edit schedules as a Silicon, pause/resume selected reminders, or archive one. Carbons can inspect organization reminders and execution history. Archived items remain readable for 45 days. Webhooks are optional destinations for the signed-in Silicon.
 

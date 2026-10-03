@@ -28,7 +28,7 @@ const cookies = (response: Response) =>
 
 test("IAm browser handoff binds the browser, consumes state once, and keeps tokens on the server", async () => {
   let exchanges = 0;
-  let grantedOrgs = ["alpha", "beta"];
+  let grantedOrgs = ["alpha"];
   const envId = "11111111-1111-4111-8111-111111111111";
   const upstream = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -44,7 +44,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
           access_token: "private-access",
           refresh_token: "private-refresh",
           expires_in: 3600,
-          org_id: null,
+          org_id: "alpha", actor: {type:"carbon",public_id:"c:person"},
         }),
       );
     } else if (req.url === "/api/v1/auth/organizations") {
@@ -167,7 +167,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
     assert.ok(!body.includes("private-refresh"));
     assert.equal(JSON.parse(body).identity.public_id, "c:person");
     assert.equal(JSON.parse(body).identity.org_id, "alpha");
-    assert.deepEqual(JSON.parse(body).contexts[0].organizations, ["alpha", "beta"]);
+    assert.deepEqual(JSON.parse(body).contexts[0].organizations, ["alpha"]);
     const changeOrg = (org: string) => fetch(origin + "/ui/organization", {
       method: "POST",
       headers: { Cookie: cookies(success), Origin: origin, "X-Remind-UI": "1", "Content-Type": "application/json" },
@@ -175,8 +175,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
     });
     assert.equal((await changeOrg("unapproved")).status, 403);
     const switched = await changeOrg("beta");
-    assert.equal(switched.status, 200);
-    assert.equal((await switched.json()).identity.org_id, "beta");
+    assert.equal(switched.status, 403);
     grantedOrgs = ["alpha"];
     const refreshed = await fetch(origin + "/ui/session", { headers: { Cookie: cookies(success) } });
     assert.equal((await refreshed.json()).identity.org_id, "alpha");
@@ -190,6 +189,8 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
           Origin: origin,
           "X-Remind-UI": "1",
           "Content-Type": "application/json",
+          "X-Remind-Account": JSON.parse(body).activeAccount,
+          "X-Remind-Production-Account": JSON.parse(body).productionAccount,
         },
         body: "{}",
       },
@@ -250,10 +251,10 @@ test("app_secret discovery keeps testing and production sessions separate and fa
     } else if (req.url === "/api/v1/auth/login") {
       let body = ""; for await (const chunk of req) body += chunk;
       assert.equal(JSON.parse(body).slt, testing ? "test-person" : "production-slt");
-      res.end(JSON.stringify({access_token:testing?"test-access":"production-access",refresh_token:"private-refresh",expires_in:3600}));
+      res.end(JSON.stringify({access_token:testing?"test-access":"production-access",refresh_token:"private-refresh",expires_in:3600,org_id:"tos",actor:{type:"carbon",public_id:testing?"test-person":"production-person"}}));
     } else if (req.url === "/api/v1/auth/organizations") {
       assert.equal(req.headers.authorization, "Bearer " + (testing?"test-access":"production-access"));
-      res.end(JSON.stringify({items:[{org_id:"tos"},{org_id:"beta"}]}));
+      res.end(JSON.stringify({items:[{org_id:"tos"}]}));
     } else if (req.url === "/api/v1/auth/me") {
       res.end(JSON.stringify({public_id:testing?"test-person":"production-person",org_id:"tos",actor_type:"carbon",can_manage_reminders:false}));
     } else { res.writeHead(404); res.end("{}"); }
@@ -296,15 +297,15 @@ test("refresh outage survives restart with its original retry identity and sessi
   const upstream = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json");
     if (req.url === "/api/v1/auth/login") {
-      res.end(JSON.stringify({access_token:"old-access",refresh_token:"old-refresh",expires_in:3600}));
+      res.end(JSON.stringify({access_token:"old-access",refresh_token:"old-refresh",expires_in:3600,org_id:"beta",actor:{type:"carbon",public_id:"actor"}}));
     } else if (req.url === "/api/v1/auth/refresh") {
       refreshes++; keys.push(String(req.headers["idempotency-key"]));
       res.statusCode = refreshStatus;
-      res.end(JSON.stringify(refreshStatus === 200 ? {access_token:"new-access",refresh_token:"new-refresh",expires_in:1800} : {error:{code:"upstream_unavailable"}}));
+      res.end(JSON.stringify(refreshStatus === 200 ? {access_token:"new-access",refresh_token:"new-refresh",expires_in:1800,org_id:"beta",actor:{type:"carbon",public_id:"actor"}} : {error:{code:"upstream_unavailable"}}));
     } else if (rejectAccess && req.headers.authorization === "Bearer old-access") {
       res.statusCode=401;res.end(JSON.stringify({error:{code:"unauthenticated"}}));
     } else if (req.url === "/api/v1/auth/organizations") {
-      res.end(JSON.stringify({items:[{org_id:"tos"},{org_id:"beta"}]}));
+      res.end(JSON.stringify({items:[{org_id:"beta"}]}));
     } else if (req.url === "/api/v1/auth/me") {
       res.end(JSON.stringify({public_id:"actor",org_id:req.headers["x-org-id"],actor_type:"carbon"}));
     } else { res.statusCode=404;res.end("{}"); }
@@ -335,4 +336,77 @@ test("refresh outage survives restart with its original retry identity and sessi
     assert.equal(refreshes,2);assert.equal(keys[0],keys[1]);
     assert.ok(recovered.headers.get("set-cookie")?.includes("Max-Age=604800"));
   } finally {await close(server);await close(upstream);await rm(directory,{recursive:true,force:true});}
+});
+
+test("account contexts survive switching and reject stale writes and changed refresh destinations", async () => {
+  const profiles: Record<string, {type: string; public_id: string; org: string}> = {
+    alice: {type: "carbon", public_id: "c:alice", org: "alpha"},
+    worker: {type: "silicon", public_id: "si:worker", org: "beta"},
+  };
+  let expired = false, moveRefresh = false;
+  const writes: string[] = [], revoked: string[] = [];
+  const upstream = createServer(async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    let input = ""; for await (const chunk of req) input += chunk;
+    const body = input ? JSON.parse(input) : {};
+    const token = String(req.headers.authorization || "").replace("Bearer access-", "");
+    const profile = profiles[token];
+    if (req.url === "/api/v1/auth/login" || req.url === "/api/v1/auth/refresh") {
+      const name = body.slt || String(body.refresh_token).replace("refresh-", "");
+      const p = profiles[name];
+      res.end(JSON.stringify({access_token: "access-" + name, refresh_token: "refresh-" + name,
+        expires_in: 3600, org_id: moveRefresh && !body.slt ? "wrong-org" : p.org,
+        actor: {type: p.type, public_id: p.public_id}}));
+    } else if (req.url === "/api/v1/auth/logout") {
+      revoked.push(body.token); res.statusCode = 204; res.end();
+    } else if (expired) {
+      res.statusCode = 401; res.end(JSON.stringify({error:{message:"Expired"}}));
+    } else if (req.url === "/api/v1/auth/organizations") {
+      res.end(JSON.stringify({items: [{org_id: profile.org}]}));
+    } else if (req.url === "/api/v1/auth/me") {
+      assert.equal(req.headers["x-org-id"], profile.org);
+      res.end(JSON.stringify({public_id: profile.public_id, actor_type: profile.type, org_id: profile.org}));
+    } else if (req.url === "/api/v1/schedules") {
+      assert.equal(req.headers["x-org-id"], profile.org);
+      writes.push(profile.public_id + "@" + profile.org);
+      res.end(JSON.stringify({items:[]}));
+    } else { res.statusCode = 404; res.end("{}"); }
+  });
+  const upstreamUrl = await listen(upstream), directory = await mkdtemp(join(tmpdir(), "remind-contexts-"));
+  let handler: ReturnType<typeof createGateway>;
+  const server = createServer((req,res)=>void handler(req,res));
+  const origin = await listen(server), config = {origin, upstream: upstreamUrl, directory, key: randomBytes(32).toString("base64url")};
+  handler = createGateway(config);
+  let cookie = "";
+  const call = async (path: string, body?: unknown, account = "signed-out") => {
+    const response = await fetch(origin + "/ui/" + path, {method: body === undefined ? "GET" : "POST",
+      headers: {Cookie: cookie, Origin: origin, "Content-Type":"application/json", "X-Remind-UI":"1", "X-Remind-Account":account},
+      body: body === undefined ? undefined : JSON.stringify(body)});
+    cookie = cookies(response) || cookie; return response;
+  };
+  try {
+    const first = await (await call("login", {slt:"alice"})).json();
+    const second = await (await call("login", {slt:"worker"})).json();
+    assert.equal(second.accounts.length, 2);
+    assert.equal(second.identity.actor_type, "silicon");
+    assert.equal((await call("api/schedules", {text:"stale"}, first.activeAccount)).status, 409);
+    assert.deepEqual(writes, []);
+    assert.equal((await call("api/schedules", {text:"current"}, second.activeAccount)).status, 200);
+    handler = createGateway(config);
+    const switched = await (await call("account", {id:first.activeAccount})).json();
+    assert.equal(switched.identity.public_id, "c:alice");
+    assert.equal(switched.identity.org_id, "alpha");
+    assert.equal((await call("api/schedules", {text:"restored"}, first.activeAccount)).status, 200);
+    assert.deepEqual(writes, ["si:worker@beta", "c:alice@alpha"]);
+    assert.equal((await call("logout", {}, second.activeAccount)).status, 409);
+    await call("logout", {}, first.activeAccount);
+    assert.deepEqual(revoked, ["refresh-alice"]);
+    const retained = await (await call("account", {id:second.activeAccount})).json();
+    assert.equal(retained.identity.public_id, "si:worker");
+    expired = true; moveRefresh = true;
+    const invalid = await (await call("session")).json();
+    assert.equal(invalid.identity, null);
+    assert.ok(invalid.authError);
+    assert.deepEqual(writes, ["si:worker@beta", "c:alice@alpha"]);
+  } finally { await close(server); await close(upstream); await rm(directory, {recursive:true, force:true}); }
 });

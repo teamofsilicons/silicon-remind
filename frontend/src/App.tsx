@@ -68,12 +68,16 @@ export default function App() {
         (c) => c.id === active(),
       ),
     test = () => active() !== "production";
+  const account = () => session()?.activeAccount || "signed-out";
+  const dataScope = () => active() + ":" + account();
+  let draftScope = "";
   const [telemetryEnabled, setTelemetryEnabled] = createSignal(localStorage.getItem("remind.telemetry") !== "off");
   createEffect(() => {
     const environment = active();
+    const accountId = account();
     if (!identity() || !telemetryEnabled()) return;
     const sender = createSpaceStationWeb({analyticsTable:"remindtelemetry", eventsTable:"remindtelemetry", endpoint:"/ui/telemetry",
-      fetch: (input, init) => fetch(input, {...init,headers:{"Content-Type":"application/json","X-Remind-UI":"1","X-Remind-Context":environment},body:JSON.stringify(telemetryBatch(JSON.parse(String(init?.body))))}),
+      fetch: (input, init) => fetch(input, {...init,headers:{"Content-Type":"application/json","X-Remind-UI":"1","X-Remind-Context":environment,"X-Remind-Account":accountId},body:JSON.stringify(telemetryBatch(JSON.parse(String(init?.body))))}),
     });
     sender.track("navigation");
     onCleanup(()=>{sender.setEnabled(false);void sender.destroy();});
@@ -129,6 +133,7 @@ export default function App() {
     }
   }
   function open(spec: DialogSpec) {
+    draftScope = dataScope();
     setDialogError("");
     setDialog(spec);
   }
@@ -136,6 +141,7 @@ export default function App() {
     setBusy(true);
     setDialogError("");
     try {
+      if (draftScope !== dataScope()) throw Error("This draft belongs to the previous account and organization. Switch back to complete it.");
       await dialog()!.run(values);
       setDialog(undefined);
       invalidate();
@@ -178,12 +184,13 @@ export default function App() {
     open({
       title: test() ? "Sign in to " + context()?.name : "Sign in to Remind",
       description:
-        "Use a short-lived token from Silicon IAm for remind. Choose your organizations in IAm." +
+        "Use a short-lived token from Silicon IAM for Remind. Choose one account and organization in IAM." +
         (test()
           ? " Use an IAM-issued test SLT or the public ID of an existing active Carbon or Silicon in this sandbox."
           : ""),
       submit: "Sign in",
       fields: [
+        ...(test() ? [{ name: "org", label: "Organization", required: true, placeholder: "Organization handle" }] : []),
         {
           name: "slt",
           label: test() ? "Test SLT or public identity ID" : "IAm short-lived token",
@@ -239,7 +246,7 @@ export default function App() {
   }
   const source = () => ({
     view: view(),
-    scope: active(),
+    scope: dataScope(),
     user: identity()?.principal_id,
     production: (session.error ? undefined : session())?.productionIdentity
       ?.principal_id,
@@ -277,13 +284,13 @@ export default function App() {
     return { items: [], next_cursor: null };
   });
   const [detail] = createResource(
-    () => ({ id: detailId(), scope: active(), revision: revision() }),
+    () => ({ id: detailId(), scope: dataScope(), revision: revision() }),
     async (s) => (s.id ? api<Schedule>("/schedules/" + s.id) : null),
   );
   const [executions] = createResource(
     () => ({
       id: detailId(),
-      scope: active(),
+      scope: dataScope(),
       cursor: execCursor(),
       revision: revision(),
     }),
@@ -300,7 +307,7 @@ export default function App() {
   const [destinations] = createResource(
     () => ({
       enabled: view() === "webhook" && !!identity()?.can_manage_reminders,
-      scope: active(),
+      scope: dataScope(),
       revision: revision(),
     }),
     async (s) => {
@@ -588,23 +595,24 @@ export default function App() {
               </For>
             </select>
           </label>
-          <Show when={context()?.org}>
+          <Show when={session()?.accounts.length}>
             <label>
-              Organization
-              <select aria-label="Organization" value={context()?.org}
+              Account and organization
+              <select aria-label="Account and organization" value={account()}
                 onChange={(e) => {
-                  const org = e.currentTarget.value;
+                  const id = e.currentTarget.value;
                   void perform(async () => {
-                    await request("organization", "POST", { org });
+                    await request("account", "POST", { id });
                     await switchContext(active());
                   });
                 }}>
-                <For each={context()?.organizations || []}>
-                  {(org) => <option value={org}>{org}</option>}
+                <For each={session()?.accounts || []}>
+                  {(c) => <option value={c.id}>{c.identity?.public_id} · {c.org}</option>}
                 </For>
               </select>
             </label>
           </Show>
+          <button class="text-button" onClick={login}>Add account or organization</button>
         </div>
         <nav aria-label="Main navigation">
           <For each={navigation}>

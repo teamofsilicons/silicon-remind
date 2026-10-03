@@ -72,8 +72,8 @@ tokens. For example:
 No saved session or an HTTP 401 from verification/refresh returns
 `{"authenticated":false}` with exit status 0. A permission denial, unavailable
 server, or malformed response remains an error with a nonzero exit status; it is
-not reported as a successful authentication check. `--org` selects the organization
-to verify. `auth whoami` remains available with its existing identity/error output.
+not reported as a successful authentication check. `--account` and `--org` select an already saved account/organization context
+to verify. They cannot retarget an existing credential. `auth whoami` remains available with its existing identity/error output.
 
 ## Home directory selection
 
@@ -134,8 +134,9 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 
 | Command | Purpose / useful options |
 | --- | --- |
+| `auth contexts` | List saved account and organization contexts without credentials |
 | `auth login` | Secure SLT prompt; `--org`, `--slt-stdin` |
-| `login <slt>` | Direct IAM SLT login; `--org` may select the organization |
+| `login <slt>` | Direct IAM SLT login; `--org` must match the SLT; testing actor IDs may select an org |
 | `iam` | Public `app_id`, IAM URL and linked IAM environment; no login needed |
 | `login status` | Live authentication result and Carbon/Silicon identity; supports `--json` |
 | `auth whoami` | Live IAM identity and permissions |
@@ -176,7 +177,7 @@ Silicon in its organization. Archiving retains a reminder for 45 days.
 | `health` | Liveness; `--ready` checks database readiness |
 
 Every command accepts `-h`/`--help`. Missing required flags produce the relevant
-usage. Global flags are `--url`, `--org`, `--test <id>`, `--json`, `--no-update`, and
+usage. Global flags are `--url`, `--account`, `--org`, `--test <id>`, `--json`, `--no-update`, and
 `--idempotency-key`. `REMIND_URL` and `REMIND_ORG` supply URL/org defaults for an
 invocation. They do not move existing sessions between contexts.
 

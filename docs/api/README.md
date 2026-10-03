@@ -31,11 +31,11 @@ and rejects this test header. See [testing environments](../testing-environments
 | Method and path | Request | Result |
 | --- | --- | --- |
 | `GET /auth/iam` | No session; optional test key | Public `app_id`, `iam_url`, and `iam_environment_id` (null in production); no credentials |
-| `POST /auth/login` | `{"slt":"…"}` | Access/refresh tokens, expiry seconds, actor and optional org |
+| `POST /auth/login` | `{"slt":"…","org_id":"optional-for-testing-actor"}` | Access/refresh tokens, expiry seconds, actor and exactly one org |
 | `POST /auth/refresh` | `{"refresh_token":"…"}` | Successor access and rotating refresh tokens |
 | `POST /auth/logout` | `{"token":"…"}` | `204`; refresh token revokes the whole family |
 | `GET /auth/me` | Bearer and org headers | Current identity, disclosed org role and reminder-write capability |
-| `GET /auth/organizations` | Bearer; no org header required | `items` containing identities for organizations currently authorized through IAM |
+| `GET /auth/organizations` | Bearer; no org header required | `items` containing the single account and organization selected during login |
 
 The three POST endpoints accept a token in their JSON body. Remind's Application
 secret stays on the server. They do not ask for an IAM password, email, phone,
@@ -43,12 +43,14 @@ OTP, or a browser redirect. Pass an `Idempotency-Key` on login and refresh when 
 retry must replay the same logical exchange. It must be 16–255 visible ASCII
 characters. Session responses use `Cache-Control: no-store`.
 
-Browser sign-in sends only `app_id=remind` and `redirect_uri` to IAM; it must
-not send `org_id` or `org_ids`. The user chooses the authorized organizations in
-IAM. After exchanging the resulting unscoped SLT, use `/auth/organizations` to
-discover that explicit grant list, then choose one as `X-Org-ID` for ordinary
-requests. Membership alone does not grant application access. Legacy scoped
-sessions remain usable within their original organization.
+Browser sign-in sends `app_id=remind` and `redirect_uri` to IAM. The user selects
+one Carbon or Silicon account and one organization in IAM. The returned SLT is
+already scoped to that context. `/auth/organizations` confirms the single bound
+organization. Every ordinary request must use that same `X-Org-ID`; sign in
+separately to add another account or organization. Legacy unscoped credentials
+require reauthentication. For a testing actor ID, supply `org_id` explicitly
+when the actor has more than one organization. Production never accepts account
+credentials or public IDs as a substitute for an issued SLT.
 
 Example, with a short-lived token supplied from a protected file:
 
