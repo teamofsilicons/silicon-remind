@@ -22,7 +22,17 @@ interface State {
   contexts: Record<string, Context>;
   accounts?: Record<string, Context>;
   touched: number;
-  login?: { nonce: string; contextId: string; expires: number };
+  login?: LoginAttempt;
+}
+interface LoginAttempt {
+  nonce: string;
+  contextId: string;
+  accountId?: string;
+  kind?: "carbon" | "silicon";
+  popup?: boolean;
+  slt?: string;
+  candidate?: Context;
+  expires: number;
 }
 const MAX = 1_048_576;
 export function createGateway(config: {
@@ -186,7 +196,25 @@ export function createGateway(config: {
     const url = new URL(req.url || "/", origin);
     if (!url.pathname.startsWith("/ui/")) return false;
     const callback =
-      url.pathname === "/ui/auth/callback" && req.method === "GET";
+      ["/ui/auth/callback", "/ui/auth/retry"].includes(url.pathname) && req.method === "GET";
+    let callbackAttempt: LoginAttempt | undefined;
+    let callbackState: State | undefined;
+    function finishPopup(attempt: LoginAttempt, ok: boolean, contextId?: string) {
+      const nonce = randomBytes(24).toString("base64url");
+      const message = JSON.stringify({ type: "remind:sign-in", attempt: attempt.nonce, kind: attempt.kind, ok, contextId }).replace(/</g, "\\u003c");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'none'; base-uri 'none'`);
+      res.writeHead(200);
+      res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Remind sign-in</title><p>${ok ? "Signed in. Return to Remind." : "Sign-in did not finish. Return to Remind and try again."}</p><a href="/">Return to Remind</a><script nonce="${nonce}">history.replaceState(null,'','/ui/auth/callback');if(window.opener){window.opener.postMessage(${message},${JSON.stringify(origin.origin)});window.close()}</script></html>`);
+    }
+    function retryPage(attempt: LoginAttempt) {
+      const nonce = randomBytes(24).toString("base64url");
+      const retry = `/ui/auth/retry?state=${attempt.nonce}`;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`);
+      res.writeHead(200);
+      res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Retry Remind sign-in</title><h1>Sign-in is still pending</h1><p>The connection was interrupted. Retry to finish the same sign-in. Your previous workspace is unchanged.</p><a href="${retry}">Retry this sign-in</a><br><a href="/">Return to Remind</a><script nonce="${nonce}">history.replaceState(null,'',${JSON.stringify(retry)})</script></html>`);
+    }
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "application/json");
@@ -249,13 +277,13 @@ export function createGateway(config: {
         data: any;
       // The browser captures the selected account context when issuing a request.
       // Reject old-tab actions rather than rerouting them after another tab switches.
-      if ((url.pathname === "/ui/logout" || (url.pathname.startsWith("/ui/api/") && !url.pathname.startsWith("/ui/api/health/")))
-        && req.headers["x-remind-account"] !== (ctx.contextId || "signed-out")) {
+      if (["/ui/logout", "/ui/auth/start"].includes(url.pathname) || (url.pathname.startsWith("/ui/api/") && !url.pathname.startsWith("/ui/api/health/"))) {
+      if (req.headers["x-remind-account"] !== (ctx.contextId || "signed-out")) {
         throw Object.assign(Error("Account or organization changed. Reload this view before continuing."), { status: 409 });
       }
-      if ((url.pathname === "/ui/logout" || (url.pathname.startsWith("/ui/api/") && !url.pathname.startsWith("/ui/api/health/")))
-        && req.headers["x-remind-context"] !== state.active) {
+      if (req.headers["x-remind-context"] !== state.active) {
         throw Object.assign(Error("Environment changed. Reload this view before continuing."), { status: 409 });
+      }
       }
       function installTokens(c: Context, tokens: any, expected?: Context) {
         const actor = tokens.actor;
@@ -352,7 +380,9 @@ export function createGateway(config: {
       if (callback) {
         const attempt = state.login;
         const nonce = url.searchParams.get("state");
-        const slt = url.searchParams.get("slt");
+        const incomingSlt = url.searchParams.get("slt");
+        const retry = url.pathname === "/ui/auth/retry";
+        const slt = retry ? attempt?.slt : incomingSlt;
         if (
           !correlationMatch ||
           !attempt ||
@@ -360,23 +390,29 @@ export function createGateway(config: {
           nonce !== attempt.nonce ||
           attempt.expires < Date.now() ||
           attempt.contextId !== state.active ||
-          !slt ||
-          slt.length > 16384 ||
-          url.searchParams.getAll("slt").length !== 1 ||
+          attempt.accountId !== state.contexts[state.active]?.contextId ||
           url.searchParams.getAll("state").length !== 1
         ) {
           throw Object.assign(Error("Login callback could not be verified"), {
             status: 400,
           });
         }
-        // Consume correlation before exchanging the one-use SLT. An interrupted
-        // browser handoff restarts sign-in; it must never replay a callback.
-        delete state.login;
+        callbackAttempt = attempt;
+        callbackState = state;
+        if (url.searchParams.has("error") || !slt || slt.length > 16384
+          || (!retry && url.searchParams.getAll("slt").length !== 1)
+          || (retry && url.searchParams.has("slt"))
+          || (attempt.slt !== undefined && attempt.slt !== slt))
+          throw Object.assign(Error("IAM sign-in was cancelled or could not be verified."), { status: 400 });
+        // Keep the original exchange under the encrypted session store. An
+        // uncertain reply retries this exact code and idempotency key.
+        attempt.slt = slt;
         await save(id, state);
-        const candidate = {
+        const candidate = attempt.candidate || {
           ...state.contexts[attempt.contextId],
           org: "",
         };
+        if (!attempt.candidate) {
         const tokens = await remote(
           "/api/v1/auth/login",
           candidate,
@@ -386,16 +422,29 @@ export function createGateway(config: {
           false,
         );
         installTokens(candidate, tokens);
+        if (attempt.kind && candidate.identity?.actor_type !== attempt.kind)
+          throw Object.assign(Error("IAM returned a different account type. Start sign-in again."), { status: 401 });
         delete candidate.pending;
         delete candidate.refreshStarted;
+        attempt.candidate = candidate;
+        await save(id, state);
+        }
         await selectOrganization(candidate);
+        delete state.login;
         remember(candidate);
         await save(id, state);
         res.setHeader("Set-Cookie", [sessionCookie(id), loginCookie("", 0)]);
+        if (attempt.popup) {
+          finishPopup(attempt, true, candidate.contextId);
+          return true;
+        }
         res.writeHead(303, { Location: "/#reminders" });
         res.end();
         return true;
       } else if (url.pathname === "/ui/auth/start" && req.method === "POST") {
+        const kind = body.identity_kind ?? "carbon";
+        if (!["carbon", "silicon"].includes(kind) || (body.display !== undefined && !["popup", "page"].includes(body.display)))
+          throw Object.assign(Error("Choose Carbon or Silicon sign-in."), { status: 400 });
         if (state.active !== "production")
           throw Object.assign(
             Error(
@@ -407,18 +456,23 @@ export function createGateway(config: {
         state.login = {
           nonce,
           contextId: state.active,
+          accountId: ctx.contextId,
+          kind,
+          popup: body.display === "popup",
           expires: Date.now() + 600000,
         };
         const redirect = new URL("/ui/auth/callback", origin);
         redirect.searchParams.set("state", nonce);
         const destination = new URL("/login", authOrigin);
         destination.searchParams.set("app_id", "remind");
+        destination.searchParams.set("identity_kind", kind);
+        if (body.display === "popup") destination.searchParams.set("display", "popup");
         destination.searchParams.set("redirect_uri", redirect.href);
         res.setHeader("Set-Cookie", [
           sessionCookie(id),
           loginCookie(`${id}.${nonce}`),
         ]);
-        data = { url: destination.href };
+        data = { url: destination.href, attempt: nonce };
       } else if (url.pathname === "/ui/telemetry" && req.method === "POST") {
         if (req.headers["x-remind-context"] !== state.active) throw Object.assign(Error("Telemetry environment changed"), {status:409});
         if (req.headers["x-remind-account"] !== (ctx.contextId || "signed-out")) throw Object.assign(Error("Telemetry account changed"), {status:409});
@@ -635,7 +689,19 @@ export function createGateway(config: {
       res.end(data === null ? undefined : JSON.stringify(data));
     } catch (e: any) {
       if (callback) {
-        res.setHeader("Set-Cookie", loginCookie("", 0));
+        if (callbackAttempt && callbackState) {
+          if (!e.status || e.status >= 500 || e.status === 429) {
+            retryPage(callbackAttempt);
+            return true;
+          }
+          delete callbackState.login;
+          await save(id, callbackState);
+        }
+        if (callbackAttempt) res.setHeader("Set-Cookie", loginCookie("", 0));
+        if (callbackAttempt?.popup) {
+          finishPopup(callbackAttempt, false);
+          return true;
+        }
         res.writeHead(303, { Location: "/?login_error=1#reminders" });
         res.end();
         return true;

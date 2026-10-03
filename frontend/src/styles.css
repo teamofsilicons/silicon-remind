@@ -718,6 +718,7 @@ dialog::backdrop {
   background: #15223659;
 }
 dialog form,
+.iam-sign-in,
 .secret-dialog {
   padding: 26px;
 }
