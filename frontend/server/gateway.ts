@@ -253,6 +253,10 @@ export function createGateway(config: {
         && req.headers["x-remind-account"] !== (ctx.contextId || "signed-out")) {
         throw Object.assign(Error("Account or organization changed. Reload this view before continuing."), { status: 409 });
       }
+      if ((url.pathname === "/ui/logout" || (url.pathname.startsWith("/ui/api/") && !url.pathname.startsWith("/ui/api/health/")))
+        && req.headers["x-remind-context"] !== state.active) {
+        throw Object.assign(Error("Environment changed. Reload this view before continuing."), { status: 409 });
+      }
       function installTokens(c: Context, tokens: any, expected?: Context) {
         const actor = tokens.actor;
         if (typeof tokens.access_token !== "string" || !tokens.access_token

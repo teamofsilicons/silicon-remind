@@ -69,8 +69,17 @@ export default function App() {
       ),
     test = () => active() !== "production";
   const account = () => session()?.activeAccount || "signed-out";
-  const dataScope = () => active() + ":" + account();
+  const dataScope = () => active() + ":" + account() + ":" + (session()?.productionAccount || "signed-out");
   let draftScope = "";
+  let displayedScope = "";
+  createEffect(() => {
+    const scope = dataScope();
+    if (scope === displayedScope) return;
+    displayedScope = scope;
+    setDialog(undefined); setDialogError(""); setGlobalError(""); setNotice(""); setSecret("");
+    setSelected([]); setDetailId(""); setCursor(""); setHistory([]);
+    setExecCursor(""); setExecHistory([]); setSilicon(""); setStatus(""); setIncludeDeleted(false);
+  });
   const [telemetryEnabled, setTelemetryEnabled] = createSignal(localStorage.getItem("remind.telemetry") !== "off");
   createEffect(() => {
     const environment = active();
@@ -125,11 +134,12 @@ export default function App() {
     refresh((x) => x + 1);
   }
   async function perform(fn: () => Promise<void>) {
+    const scope = dataScope();
     setGlobalError("");
     try {
       await fn();
     } catch (e) {
-      setGlobalError(readError(e));
+      if (scope === dataScope()) setGlobalError(readError(e));
     }
   }
   function open(spec: DialogSpec) {
@@ -138,16 +148,18 @@ export default function App() {
     setDialog(spec);
   }
   async function submit(values: Record<string, string>) {
+    const scope = draftScope;
     setBusy(true);
     setDialogError("");
     try {
       if (draftScope !== dataScope()) throw Error("This draft belongs to the previous account and organization. Switch back to complete it.");
       await dialog()!.run(values);
+      if (scope !== dataScope()) return;
       setDialog(undefined);
       invalidate();
       await reloadSession();
     } catch (e) {
-      setDialogError(readError(e));
+      if (scope === dataScope()) setDialogError(readError(e));
     } finally {
       setBusy(false);
     }
@@ -607,7 +619,7 @@ export default function App() {
                   });
                 }}>
                 <For each={session()?.accounts || []}>
-                  {(c) => <option value={c.id}>{c.identity?.public_id} · {c.org}</option>}
+                  {(c) => <option value={c.id} selected={c.id === account()}>{c.identity?.public_id} · {c.org}</option>}
                 </For>
               </select>
             </label>

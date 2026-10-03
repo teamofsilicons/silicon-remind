@@ -189,7 +189,7 @@ test("IAm browser handoff binds the browser, consumes state once, and keeps toke
           Origin: origin,
           "X-Remind-UI": "1",
           "Content-Type": "application/json",
-          "X-Remind-Account": JSON.parse(body).activeAccount,
+          "X-Remind-Context":"production", "X-Remind-Account": JSON.parse(body).activeAccount,
           "X-Remind-Production-Account": JSON.parse(body).productionAccount,
         },
         body: "{}",
@@ -380,7 +380,7 @@ test("account contexts survive switching and reject stale writes and changed ref
   let cookie = "";
   const call = async (path: string, body?: unknown, account = "signed-out") => {
     const response = await fetch(origin + "/ui/" + path, {method: body === undefined ? "GET" : "POST",
-      headers: {Cookie: cookie, Origin: origin, "Content-Type":"application/json", "X-Remind-UI":"1", "X-Remind-Account":account},
+      headers: {Cookie: cookie, Origin: origin, "Content-Type":"application/json", "X-Remind-UI":"1", "X-Remind-Context":"production", "X-Remind-Account":account},
       body: body === undefined ? undefined : JSON.stringify(body)});
     cookie = cookies(response) || cookie; return response;
   };
@@ -409,4 +409,37 @@ test("account contexts survive switching and reject stale writes and changed ref
     assert.ok(invalid.authError);
     assert.deepEqual(writes, ["si:worker@beta", "c:alice@alpha"]);
   } finally { await close(server); await close(upstream); await rm(directory, {recursive:true, force:true}); }
+});
+
+test("a stale signed-out sandbox tab cannot route key-only actions into the selected sandbox", async () => {
+  const worlds = { ["ask_" + "a".repeat(43)]: "sandbox-a", ["ask_" + "b".repeat(43)]: "sandbox-b" };
+  const cleaned: string[] = [];
+  const upstream = createServer(async (req, res) => {
+    const world = worlds[String(req.headers["x-remind-test-key"])];
+    res.setHeader("Content-Type", "application/json");
+    if (req.url === "/api/v1/testing-environment") res.end(JSON.stringify({ id: world, name: world }));
+    else if (req.url === "/api/v1/testing-environment/cleanings") {
+      cleaned.push(world); res.end(JSON.stringify({ id: world }));
+    } else { res.statusCode = 404; res.end("{}"); }
+  });
+  const upstreamUrl = await listen(upstream), directory = await mkdtemp(join(tmpdir(), "remind-world-fence-"));
+  let handler: ReturnType<typeof createGateway>;
+  const server = createServer((req, res) => void handler(req, res));
+  const origin = await listen(server);
+  handler = createGateway({ origin, upstream: upstreamUrl, directory, key: randomBytes(32).toString("base64url") });
+  let cookie = "";
+  const call = async (path: string, body: unknown, world: string) => {
+    const response = await fetch(origin + "/ui/" + path, { method: "POST", headers: {
+      Cookie: cookie, Origin: origin, "Content-Type":"application/json", "X-Remind-UI":"1",
+      "X-Remind-Context":world, "X-Remind-Account":"signed-out",
+    }, body:JSON.stringify(body) });
+    cookie = cookies(response) || cookie; return response;
+  };
+  try {
+    for (const [key] of Object.entries(worlds)) assert.equal((await call("context", {action:"import",key}, "production")).status, 200);
+    assert.equal((await call("api/testing-environment/cleanings", {}, "sandbox-a")).status, 409);
+    assert.deepEqual(cleaned, []);
+    assert.equal((await call("api/testing-environment/cleanings", {}, "sandbox-b")).status, 200);
+    assert.deepEqual(cleaned, ["sandbox-b"]);
+  } finally { await close(server); await close(upstream); await rm(directory, { recursive:true, force:true }); }
 });
