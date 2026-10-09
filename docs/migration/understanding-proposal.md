@@ -1,0 +1,74 @@
+# Remind: proposed changes to UNDERSTANDING.md
+
+`UNDERSTANDING.md` is changed only by Carbons, so the migration did not touch it. Below is wording a Carbon can paste.
+Each heading names the part of the current file it replaces. The service stage wrote the backend parts; later stages
+(CLI, web) may add theirs.
+
+## Glossary (replace the three entries)
+
+`Carbon` - A person's account at Silicon Accounts.
+`Silicon` - A Silicon's account at Silicon Accounts. Every Silicon has a custodian.
+`Custodian` - The Carbon who looks after a Silicon.
+
+## How login works (replace the section)
+
+Signing in and signing up are handled entirely by Silicon Accounts. Remind is the app `remind` there; its app secret
+stays on the server. Carbons sign in on the Silicon Accounts pages and Silicons with a short-lived token from their own
+sign-in. Every request to Remind carries the access token Silicon Accounts issued to Remind, and Remind checks it
+itself. Use the official and latest `silicon-accounts-client` crate everywhere.
+
+Remind's webhook (backend.remind.teamofsilicons.com/webhook/) hears from Silicon Accounts whenever an account Remind
+knows changes its id, name, photo or custodian, signs out of Remind, removes Remind's access, or is deleted. A sign-out
+ends that account's older tokens. Removing access pauses the account's reminders until it signs in again. Deleting the
+account archives its reminders, ends its webhook subscriptions and retires its test environments.
+
+Another app may read reminders for an account with a User verification proof from Silicon Accounts that carries the
+scope `remind.schedules.read`, but only an app Remind trusts for that scope (today the Silicon Interface). Such an app
+reads exactly what that account could read, and never changes anything.
+
+## Who sees what (replace "any carbon in the organisation should be able to view reminders of any silicon in their organisation" and "Any silicon should also be able to list their reminders and other silicons reminders in their org")
+
+The request for setting a reminder always comes from a Silicon, and the reminder belongs to that Silicon. A Carbon
+sees the Silicons it looks after and all their reminders, and only views them. A Silicon lists its own reminders and
+those of the other Silicons with the same custodian.
+
+A Silicon, or its custodian, can share the Silicon's reminders with any other account by its id (`c:…` or `si:…`), and
+end that sharing at any time. Shared reminders are read-only. Silicons are not open to everyone: before a reminder can
+be shared with a Silicon from outside its custodian's Silicons, that Silicon or its custodian must allow the sharing
+account. Anyone can share with a Carbon.
+
+For carbons that log in, "all the silicons they have access to" means the Silicons they look after and the Silicons
+that shared their reminders with them.
+
+## Testing (replace the paragraphs about IAM test environments and the test key of IAM)
+
+Remind has its own test environments, an exact replica of the main application that starts empty. Creating one needs
+only a name and an optional description. Inside a test environment you sign in with your normal Silicon Accounts
+account; only the reminders, deliveries and logs belong to the test environment.
+
+## Creating Test Env (replace the paragraph)
+
+Any Carbon or Silicon can create a test environment; it belongs to the account that created it. It returns the
+32-character alphanumeric key that opens it; anyone with the key has the god view of that test environment. The key is
+stored with the environment and can be retrieved any time by the creator, its custodian and the custodian's other
+Silicons (for a Carbon creator: the Carbon and the Silicons it looks after).
+
+## Rotate Key and Delete Test Env (replace "org_admin/org_head" and "org admins, owners")
+
+The creator, or the creator's custodian when the creator is a Silicon, can rotate the key, delete the test environment
+and recover it within 30 days.
+
+## Logging in via cli (replace the organization resolution list and the paragraph after it)
+
+`remind login <slt>` signs one account in, with nothing else supplied; this is how `silicon connect` signs a Silicon
+in. A login is always exactly one account, so there is nothing to choose and no question to ask.
+
+## Identifier schema (replace the last sentence of the first paragraph)
+
+Every account also has a permanent `uuid` from Silicon Accounts: short, case-sensitive letters and digits (for example
+`8HV`). Remind keys everything on the uuid; ids can change, the uuid never does. Delete "Organisation membership and
+application ownership are stored separately under `org_id`."
+
+## Docs (replace "IAM integration")
+
+The API, Rust-client, CLI, Silicon Accounts sign-in and testing-environment guides are maintained in [docs/].

@@ -705,3 +705,15 @@ Session reload rechecks the grants, dropping a removed selection. Access tokens
 remain server-side, and every API request retains live IAM authorization checks.
 The login page no longer asks for an organization handle or offers a production
 SLT form. The sandbox SLT form remains for testing-environment credentials.
+
+## 2026-10-10 — D-040 — Remind signs in with Silicon Accounts
+
+**Status:** Accepted. Supersedes D-004, D-005, D-013 (idempotency is now per account), D-020, D-021, D-025, D-030,
+D-033, D-035 and both 2026-09-08 entries; amends D-026 (destination secrets now bind to the owner's storage key, AAD version
+2, with version 1 rows still readable).
+
+Remind now signs every request in with Silicon Accounts: one account per request with no shared groups, visibility
+from custodian data (a Silicon, its custodian and the custodian's other Silicons), explicit viewer grants and Silicon
+allow-lists for sharing, verification proofs for the Silicon Interface, contract 2 at `/api/v2`, and all existing
+data kept and re-keyed by `remind-migrate link-identities`. The full record of these decisions is
+`docs/migration/decisions.md`; the production steps are in `docs/migration/cutover.md`.
