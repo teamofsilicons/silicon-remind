@@ -65,12 +65,12 @@ pub async fn apply(
     if let Some(uuid) = subject
         && !is_valid_account_uuid(uuid)
     {
-        return Err(AppError::invalid(
-            "webhook_subject_invalid",
+        return Err(body_invalid(
             "The event names an account uuid Remind cannot read.",
         ));
     }
-    let payload: Value = serde_json::from_slice(raw_body).map_err(|_| AppError::Validation)?;
+    let payload: Value = serde_json::from_slice(raw_body)
+        .map_err(|_| body_invalid("The signed body is not a JSON object."))?;
     let receipt = NewInternalEvent {
         id: Uuid::now_v7(),
         source: SOURCE.to_owned(),
@@ -414,4 +414,12 @@ async fn keys_in(transaction: &mut Tx<'_>, uuid: &str) -> Result<Vec<Uuid>, AppE
     .bind(uuid)
     .fetch_all(&mut **transaction)
     .await?)
+}
+
+fn body_invalid(message: &'static str) -> AppError {
+    AppError::described(
+        axum::http::StatusCode::BAD_REQUEST,
+        "webhook_body_invalid",
+        message,
+    )
 }

@@ -235,8 +235,8 @@ impl TestEnvironments {
     ) -> Result<(TestEnvironment, SecretString), AppError> {
         if input.iam_test_key.is_some() || input.iam_app_secret.is_some() {
             return Err(AppError::invalid(
-                "iam_test_key_retired",
-                "iam_test_key and iam_app_secret are no longer used: a test environment uses your Silicon Accounts sign-in. Send only name and description.",
+                "test_key_field_retired",
+                "A test environment no longer takes a key from another service: it uses your Silicon Accounts sign-in. Send only name and description.",
             ));
         }
         if input.name.trim().is_empty()

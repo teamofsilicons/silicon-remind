@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
     for name in silicon_remind::config::retired_variables_present() {
         tracing::warn!(
             variable = name,
-            "ignoring a Silicon IAM or Honeycomb variable; Remind uses Silicon Accounts now"
+            "ignoring a retired variable; Remind signs in with Silicon Accounts now"
         );
     }
     api::serve(settings).await

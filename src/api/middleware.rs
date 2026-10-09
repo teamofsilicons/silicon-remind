@@ -279,8 +279,8 @@ pub(crate) fn presented_credential(headers: &http::HeaderMap) -> Result<Presente
         )),
         "bearer" if token.starts_with("oat_") || token.starts_with("ort_") => {
             Err(AppError::unauthenticated(
-                "iam_token_rejected",
-                "Remind no longer accepts Silicon IAM tokens. Sign in with Silicon Accounts (`remind login`) and send its access token.",
+                "legacy_token_rejected",
+                "Remind no longer accepts this kind of token. Sign in with Silicon Accounts (`remind login`) and send its access token.",
             ))
         }
         "bearer" => Ok(Presented::Bearer(SecretString::from(token))),
@@ -346,7 +346,7 @@ mod tests {
             (vec!["Bearer"], "unauthenticated"),
             (vec!["Basic dXNlcjpwYXNz"], "unauthenticated"),
             (vec!["Bearer sap_proof"], "proof_as_bearer"),
-            (vec!["Bearer oat_legacy"], "iam_token_rejected"),
+            (vec!["Bearer oat_legacy"], "legacy_token_rejected"),
         ] {
             let error = presented_credential(&headers(&values)).err();
             assert_eq!(

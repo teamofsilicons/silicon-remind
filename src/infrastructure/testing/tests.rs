@@ -72,7 +72,7 @@ async fn an_owned_environment_lives_through_key_clean_retire_and_restore() -> an
         .await
         .err()
         .map(|error| error.code());
-    assert_eq!(retired_iam, Some("iam_test_key_retired".into()));
+    assert_eq!(retired_iam, Some("test_key_field_retired".into()));
 
     let (environment, key) = tests.create("Own", input("staging")).await?;
     assert_eq!(environment.owner_uuid.as_deref(), Some("Own"));

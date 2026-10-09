@@ -58,7 +58,7 @@ async fn valid_tokens_pass_and_bad_ones_get_precise_401s() -> anyhow::Result<()>
 
     for (authorization, expected) in [
         (None, "unauthenticated"),
-        (Some("Bearer oat_legacy_iam_token"), "iam_token_rejected"),
+        (Some("Bearer oat_legacy_iam_token"), "legacy_token_rejected"),
         (Some("Bearer not-a-jwt"), "token_malformed"),
         (Some("Basic YWRhOnB3"), "unauthenticated"),
     ] {
