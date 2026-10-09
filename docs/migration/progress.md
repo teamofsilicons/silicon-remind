@@ -56,7 +56,9 @@ d2edc42 Test the API end to end against a stub Silicon Accounts ·
 a3a5ab7 Describe API contract v2 in openapi.yaml ·
 f4a3f2e List the Silicon Accounts settings in .env.example ·
 9fe955b Read display names from Remind's user base, not from lookups ·
-plus the docs commit that adds this section.
+d30122c Record the Silicon Accounts migration decisions and cutover steps ·
+9589d37 Keep the access token's scopes and sign-in family on the actor ·
+and the commit that completes this list.
 
 ### Tests (final run, all with `REMIND_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5460/postgres`)
 
