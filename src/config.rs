@@ -767,6 +767,47 @@ fn accounts_webhook_secrets(
     Ok(secrets)
 }
 
+/// Accounts settings for operator tooling that only looks accounts up
+/// (`remind-migrate link-identities`). `None` when `REMIND_APP_SECRET` is
+/// unset: the tool then works offline.
+///
+/// # Errors
+///
+/// Returns a redacted error for a malformed origin or app id.
+pub fn lookup_settings_from_env(
+    environment: RuntimeEnvironment,
+) -> Result<Option<AccountsSettings>, SettingsError> {
+    let source = ProcessEnvironment;
+    if optional(&source, "REMIND_APP_SECRET").is_none() {
+        return Ok(None);
+    }
+    let url = accounts_origin(
+        &source,
+        "ACCOUNTS_URL",
+        Some(DEFAULT_ACCOUNTS_URL),
+        environment,
+    )?;
+    let api_url = if optional(&source, "ACCOUNTS_API_URL").is_some() {
+        accounts_origin(&source, "ACCOUNTS_API_URL", None, environment)?
+    } else {
+        url.clone()
+    };
+    let app_id = value_or(&source, "REMIND_APP_ID", DEFAULT_APP_ID);
+    if !is_app_id(&app_id) {
+        return Err(invalid("REMIND_APP_ID", "must be an app id"));
+    }
+    Ok(Some(AccountsSettings {
+        url,
+        api_url,
+        app_id,
+        app_secret: required_secret(&source, "REMIND_APP_SECRET")?,
+        webhook_secrets: Vec::new(),
+        request_timeout: duration_millis(&source, "REMIND_ACCOUNTS_REQUEST_TIMEOUT_MS", 3_000)?,
+        lookup_ttl: Duration::from_mins(15),
+        proof_issuers: ProofIssuers::default(),
+    }))
+}
+
 /// Lists the retired IAM and Honeycomb variables still present in this process's environment.
 #[must_use]
 pub fn retired_variables_present() -> Vec<&'static str> {
