@@ -156,12 +156,8 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
         ("get", "/reports/{id}", "getBugReport"),
         ("post", "/telemetry/events", "recordTelemetryEvent"),
         ("get", "/api/versions", "discoverVersions"),
-        ("post", "/auth/login", "authLogin"),
-        ("get", "/auth/iam", "getIamInfo"),
-        ("post", "/auth/refresh", "authRefresh"),
-        ("post", "/auth/logout", "authLogout"),
         ("get", "/auth/me", "getIdentity"),
-        ("get", "/auth/organizations", "listAuthorizedOrganizations"),
+        ("get", "/silicons", "listSilicons"),
         ("get", "/webhook", "getWebhook"),
         ("put", "/webhook", "configureWebhook"),
         ("delete", "/webhook", "disableWebhook"),
@@ -172,7 +168,12 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
             "/webhooks/{subscription_id}",
             "unsubscribeWebhook",
         ),
-        ("get", "/silicons", "listSilicons"),
+        ("get", "/viewers", "listViewers"),
+        ("post", "/viewers", "grantViewer"),
+        ("delete", "/viewers/{viewer}", "revokeViewer"),
+        ("get", "/allowed-accounts", "listAllowedAccounts"),
+        ("post", "/allowed-accounts", "allowAccount"),
+        ("delete", "/allowed-accounts/{account}", "disallowAccount"),
         ("get", "/test-environments", "listTestEnvironments"),
         ("post", "/test-environments", "createTestEnvironment"),
         ("get", "/test-environments/{id}", "getTestEnvironment"),
@@ -190,10 +191,9 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
         ),
         ("get", "/testing-environment", "currentEnvironment"),
         ("post", "/testing-environment/cleanings", "cleanEnvironment"),
-        ("put", "/testing-environment/iam", "configureEnvironmentIam"),
         ("get", "/health/live", "healthLive"),
         ("get", "/health/ready", "healthReady"),
-        ("post", "/webhook/", "receiveIamWebhook"),
+        ("post", "/webhook/", "receiveAccountsWebhook"),
         ("get", "/schedules", "listSchedules"),
         ("patch", "/schedules", "updateScheduleStatuses"),
         ("post", "/schedules", "createSchedule"),
@@ -225,26 +225,34 @@ fn authentication_and_shared_parameter_definitions_are_stable() -> Result<()> {
     let bearer_security = json!([{ "bearerAuth": [] }]);
     ensure!(
         document.get("security") == Some(&bearer_security),
-        "all public operations must inherit IAM bearer authentication"
+        "all public operations must inherit Silicon Accounts bearer authentication"
+    );
+    ensure!(
+        document.pointer("/servers/0/url")
+            == Some(&json!("https://backend.remind.teamofsilicons.com/api/v2")),
+        "the public contract is served under /api/v2"
     );
     ensure!(
         document.pointer("/components/securitySchemes/bearerAuth/type")
             == Some(&Value::String("http".to_owned()))
             && document.pointer("/components/securitySchemes/bearerAuth/scheme")
-                == Some(&Value::String("bearer".to_owned())),
-        "bearerAuth must remain an HTTP bearer scheme"
+                == Some(&Value::String("bearer".to_owned()))
+            && document.pointer("/components/securitySchemes/bearerAuth/bearerFormat")
+                == Some(&Value::String("JWT".to_owned())),
+        "bearerAuth must remain an HTTP bearer scheme carrying a Silicon Accounts JWT"
     );
-
-    let org = object_at(&document, "/components/parameters/OrgId")?;
     ensure!(
-        org.get("name") == Some(&Value::String("X-Org-ID".to_owned()))
-            && org.get("in") == Some(&Value::String("header".to_owned()))
-            && org.get("required") == Some(&Value::Bool(true))
-            && document.pointer("/components/parameters/OrgId/schema/$ref")
-                == Some(&Value::String("#/components/schemas/OrgId".to_owned()))
-            && document.pointer("/components/schemas/OrgId/pattern")
-                == Some(&Value::String("^[a-z0-9_-]{3,50}$".to_owned())),
-        "OrgId must be the required X-Org-ID header"
+        document.pointer("/components/securitySchemes/proofAuth/type")
+            == Some(&Value::String("http".to_owned()))
+            && document.pointer("/components/securitySchemes/proofAuth/scheme")
+                == Some(&Value::String("Proof".to_owned())),
+        "proofAuth must be the HTTP Proof scheme"
+    );
+    ensure!(
+        document.pointer("/components/parameters/OrgId").is_none()
+            && document.pointer("/components/schemas/OrgId").is_none()
+            && !serde_json::to_string(&document)?.contains("X-Org-ID"),
+        "requests no longer name an organization"
     );
     let schedule_id = object_at(&document, "/components/parameters/ScheduleId")?;
     ensure!(
@@ -278,7 +286,6 @@ const OPERATION_PARAMETERS: &[(&str, &str, &[&str])] = &[
         "/schedules",
         "get",
         &[
-            "#/components/parameters/OrgId",
             "#/components/parameters/Cursor",
             "#/components/parameters/Limit",
         ],
@@ -286,32 +293,22 @@ const OPERATION_PARAMETERS: &[(&str, &str, &[&str])] = &[
     (
         "/schedules",
         "patch",
-        &[
-            "#/components/parameters/OrgId",
-            "#/components/parameters/IdempotencyKey",
-        ],
+        &["#/components/parameters/IdempotencyKey"],
     ),
     (
         "/schedules",
         "post",
-        &[
-            "#/components/parameters/OrgId",
-            "#/components/parameters/IdempotencyKey",
-        ],
+        &["#/components/parameters/IdempotencyKey"],
     ),
     (
         "/schedules/{schedule_id}",
         "get",
-        &[
-            "#/components/parameters/OrgId",
-            "#/components/parameters/ScheduleId",
-        ],
+        &["#/components/parameters/ScheduleId"],
     ),
     (
         "/schedules/{schedule_id}",
         "patch",
         &[
-            "#/components/parameters/OrgId",
             "#/components/parameters/ScheduleId",
             "#/components/parameters/IdempotencyKey",
         ],
@@ -319,16 +316,12 @@ const OPERATION_PARAMETERS: &[(&str, &str, &[&str])] = &[
     (
         "/schedules/{schedule_id}",
         "delete",
-        &[
-            "#/components/parameters/OrgId",
-            "#/components/parameters/ScheduleId",
-        ],
+        &["#/components/parameters/ScheduleId"],
     ),
     (
         "/schedules/{schedule_id}/executions",
         "get",
         &[
-            "#/components/parameters/OrgId",
             "#/components/parameters/ScheduleId",
             "#/components/parameters/Cursor",
             "#/components/parameters/Limit",
@@ -336,18 +329,33 @@ const OPERATION_PARAMETERS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+/// The read operations another app may call with a verification proof.
+const PROOF_READ_OPERATIONS: &[(&str, &str)] = &[
+    ("/schedules", "get"),
+    ("/schedules/{schedule_id}", "get"),
+    ("/schedules/{schedule_id}/executions", "get"),
+    ("/silicons", "get"),
+    ("/auth/me", "get"),
+];
+
 #[test]
-fn each_operation_has_expected_auth_tenant_and_mutation_contract() -> Result<()> {
+fn each_operation_has_expected_auth_and_mutation_contract() -> Result<()> {
     let document = load_contract()?;
     let bearer_security = json!([{ "bearerAuth": [] }]);
+    let read_security = json!([{ "bearerAuth": [] }, { "proofAuth": [] }]);
     for &(path, method, expected_references) in OPERATION_PARAMETERS {
         let operation = operation(&document, path, method)?;
         let effective_security = operation
             .get("security")
             .or_else(|| document.get("security"));
+        let expected_security = if PROOF_READ_OPERATIONS.contains(&(path, method)) {
+            &read_security
+        } else {
+            &bearer_security
+        };
         ensure!(
-            effective_security == Some(&bearer_security),
-            "{method} {path} must require bearer authentication"
+            effective_security == Some(expected_security),
+            "{method} {path} must require a Silicon Accounts credential"
         );
         let references = effective_parameter_refs(&document, path, method)?;
         let mut expected_references = expected_references
@@ -371,6 +379,38 @@ fn each_operation_has_expected_auth_tenant_and_mutation_contract() -> Result<()>
             "{method} {path} must use the shared default error response"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn proofs_are_accepted_only_on_the_read_operations() -> Result<()> {
+    let document = load_contract()?;
+    let paths = object_at(&document, "/paths")?;
+    let mut with_proofs = BTreeSet::new();
+    for (path, path_item) in paths {
+        let path_item = path_item
+            .as_object()
+            .with_context(|| format!("path item {path} must be an object"))?;
+        for method in HTTP_METHODS {
+            let Some(security) = path_item
+                .get(method)
+                .and_then(|operation| operation.get("security"))
+            else {
+                continue;
+            };
+            if security.to_string().contains("proofAuth") {
+                with_proofs.insert((path.clone(), method.to_owned()));
+            }
+        }
+    }
+    let expected = PROOF_READ_OPERATIONS
+        .iter()
+        .map(|&(path, method)| (path.to_owned(), method.to_owned()))
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        with_proofs == expected,
+        "verification proofs must stay limited to the read operations: {with_proofs:#?}"
+    );
     Ok(())
 }
 
@@ -429,7 +469,7 @@ fn core_schedule_schemas_are_stable() -> Result<()> {
         string_set(schedule_required, "Schedule required fields")?
             == BTreeSet::from([
                 "id".to_owned(),
-                "org_id".to_owned(),
+                "owner".to_owned(),
                 "silicon_id".to_owned(),
                 "status".to_owned(),
                 "section".to_owned(),

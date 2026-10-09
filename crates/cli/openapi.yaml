@@ -1,25 +1,39 @@
 openapi: 3.1.0
 info:
   title: Silicon Remind API
-  version: 0.1.0
-  description: Durable Silicon reminders with organization-wide read access, owner-Silicon mutations,
-    IAM application sessions and isolated test environments. Test requests use X-Remind-Test-Key plus
-    a test IAM identity; they never fall through to production.
+  version: 2.0.0
+  description: >-
+    Durable reminders for Silicons. Every request signs in with Silicon Accounts: send the
+    access token Silicon Accounts issued to Remind as `Authorization: Bearer <token>`. A Silicon
+    creates and changes its own reminders; its custodian Carbon and the Silicon's siblings (other
+    Silicons of the same custodian) read them, as does any account the Silicon or its custodian
+    shared them with. Carbons read; they never write reminders. Another app may read on an
+    account's behalf with a verification proof (`Authorization: Proof sap_…`) on the read routes
+    marked with proofAuth. Contract version 2: send `X-Remind-API-Version: 2` (or omit it) and use
+    the /api/v2 paths; /api/v1 answers 410 api_version_retired. Test requests add
+    `X-Remind-Test-Key` and never fall through to production data.
 servers:
-- url: https://backend.remind.teamofsilicons.com/api/v1
+- url: https://backend.remind.teamofsilicons.com/api/v2
 security:
 - bearerAuth: []
 tags:
 - name: Schedules
 - name: Executions
+- name: Account
+- name: Sharing
+- name: Webhooks
+- name: Test environments
+- name: Operations
 paths:
   /reports:
     post:
+      tags:
+      - Operations
       operationId: submitBugReport
       summary: Queue a bug report email, or simulate delivery in testing
-      description: Ten reports per actor per hour. Idempotent retries return the original receipt. Requires Postmark configuration in production.
+      description: Ten reports per account per hour. Idempotent retries return the original receipt.
+        Requires Postmark configuration in production. A verification proof cannot send reports.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/TestKey'
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -42,22 +56,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/BugReportResponse'
         default:
-          description: Authentication, validation, rate limit, idempotency or dependency error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+          $ref: '#/components/responses/Error'
   /reports/{id}:
     get:
+      tags:
+      - Operations
       operationId: getBugReport
-      summary: Read your own bug report delivery status
+      summary: Read the delivery status of a bug report you sent
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/TestKey'
       - name: id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
       responses:
         '200':
           description: Queued, sending, sent, failed, or simulated
@@ -66,22 +79,24 @@ paths:
               schema:
                 $ref: '#/components/schemas/BugReportResponse'
         default:
-          description: Standard API error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+          $ref: '#/components/responses/Error'
   /telemetry/events:
     post:
+      tags:
+      - Operations
       operationId: recordTelemetryEvent
       summary: Record an operational event in the selected environment
-      description: Best effort, enabled by default. Testing records remain in the sandbox. Credentials, text, URLs and arbitrary context are rejected.
+      description: Best effort, enabled by default. Testing records remain in the sandbox. Credentials,
+        text, URLs and arbitrary context are rejected.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/TestKey'
       - name: X-Remind-Telemetry
         in: header
-        schema: {type: string, enum: ['on', 'off']}
+        schema:
+          type: string
+          enum:
+          - 'on'
+          - 'off'
       requestBody:
         required: true
         content:
@@ -92,15 +107,13 @@ paths:
         '204':
           description: Event processed, or ignored after opt-out
         default:
-          description: Standard API error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+          $ref: '#/components/responses/Error'
   /api/versions:
     servers:
     - url: https://backend.remind.teamofsilicons.com
     get:
+      tags:
+      - Operations
       operationId: discoverVersions
       summary: Discover implemented wire versions and deprecation state
       security: []
@@ -110,22 +123,28 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: '#/components/schemas/VersionDiscovery'
   /schedules:
     get:
       tags:
       - Schedules
       operationId: listSchedules
-      summary: List schedules visible to the current actor
-      description: Current or archived reminders in the authenticated organization, filtered before cursor
-        pagination. Carbons are read-only; only an owning Silicon may mutate reminders.
+      summary: List the reminders the caller can read
+      description: Current or archived reminders of every Silicon the caller can read (itself, the
+        Silicons it looks after, its siblings, and Silicons that shared with it), filtered before cursor
+        pagination. Accepts a verification proof with the remind.schedules.read scope.
+      security:
+      - bearerAuth: []
+      - proofAuth: []
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - name: silicon_id
         in: query
+        description: Narrow the list to one Silicon, by `si:` id or Silicon Accounts uuid. A Silicon
+          the caller cannot read gives an empty list.
         schema:
-          $ref: '#/components/schemas/SiliconGlobalId'
+          type: string
+          minLength: 1
+          maxLength: 64
       - name: section
         in: query
         description: Product-facing reminder section; current is the default.
@@ -142,7 +161,7 @@ paths:
       - $ref: '#/components/parameters/TestKey'
       responses:
         '200':
-          description: Schedules
+          description: Reminders, newest first
           content:
             application/json:
               schema:
@@ -164,13 +183,12 @@ paths:
       tags:
       - Schedules
       operationId: updateScheduleStatuses
-      summary: Atomically pause or resume owned current schedules
+      summary: Atomically pause or resume the caller's current reminders
       description: Applies one active or paused status to every requested schedule in the supplied order.
-        The authenticated Silicon must own every schedule, and every schedule must still be current. Validation
+        The calling Silicon must own every schedule, and every schedule must still be current. Validation
         is all-or-nothing; failures leave the complete batch unchanged. The response contains one compact
         status result per requested schedule in request order.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       - $ref: '#/components/parameters/TestKey'
       requestBody:
@@ -192,10 +210,12 @@ paths:
       tags:
       - Schedules
       operationId: createSchedule
-      summary: Create a one-time or recurring schedule for the authenticated Silicon
-      description: An IANA timezone is mandatory. Provide the timezone field in the JSON request body, for example "timezone":"Asia/Kolkata". There is no default timezone. Missing, null, or blank values return 422 timezone_required with guidance to provide this field.
+      summary: Create a one-time or recurring reminder for the calling Silicon
+      description: Only a Silicon creates reminders, and only for itself. An IANA timezone is mandatory.
+        Provide the timezone field in the JSON request body, for example "timezone":"Asia/Kolkata". There is
+        no default timezone. Missing, null, or blank values return 422 timezone_required with guidance to
+        provide this field.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       - $ref: '#/components/parameters/TestKey'
       requestBody:
@@ -215,14 +235,19 @@ paths:
           $ref: '#/components/responses/Error'
   /schedules/{schedule_id}:
     parameters:
-    - $ref: '#/components/parameters/OrgId'
     - $ref: '#/components/parameters/ScheduleId'
     get:
       tags:
       - Schedules
       operationId: getSchedule
-      summary: Get an IAM-visible schedule
-      description: Inaccessible identifiers return the same not-found response as absent identifiers.
+      summary: Get a reminder the caller can read
+      description: Reminders the caller cannot read return the same not-found response as absent
+        identifiers. Accepts a verification proof with the remind.schedules.read scope.
+      security:
+      - bearerAuth: []
+      - proofAuth: []
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
       responses:
         '200':
           description: Schedule
@@ -232,13 +257,12 @@ paths:
                 $ref: '#/components/schemas/Schedule'
         default:
           $ref: '#/components/responses/Error'
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
     patch:
       tags:
       - Schedules
       operationId: updateSchedule
-      summary: Update a schedule owned by the authenticated Silicon
+      summary: Update a reminder of the calling Silicon
+      description: A readable reminder of another Silicon returns 403 not_reminder_owner.
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       - $ref: '#/components/parameters/TestKey'
@@ -278,30 +302,34 @@ paths:
       tags:
       - Schedules
       operationId: archiveSchedule
-      summary: Archive a schedule owned by the authenticated Silicon for 45 days
+      summary: Archive a reminder of the calling Silicon for 45 days
+      description: The access token is checked with Silicon Accounts before the reminder is archived.
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
       responses:
         '204':
           description: Archived, or already archived
         default:
           $ref: '#/components/responses/Error'
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
   /schedules/{schedule_id}/executions:
     get:
       tags:
       - Executions
       operationId: listScheduleExecutions
-      summary: List execution history for an IAM-visible schedule
-      description: The parent schedule's IAM-projected owner visibility is enforced before pagination.
+      summary: List the delivery history of a reminder the caller can read
+      description: Visibility of the parent reminder is enforced before pagination. Accepts a
+        verification proof with the remind.schedules.read scope.
+      security:
+      - bearerAuth: []
+      - proofAuth: []
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/ScheduleId'
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
       - $ref: '#/components/parameters/TestKey'
       responses:
         '200':
-          description: Execution history
+          description: Execution history, newest first
           content:
             application/json:
               schema:
@@ -319,222 +347,106 @@ paths:
                     - 'null'
         default:
           $ref: '#/components/responses/Error'
-  /auth/login:
-    post:
-      operationId: authLogin
-      summary: Exchange an IAM short-lived token
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Session'
-        default: &id001
-          $ref: '#/components/responses/Error'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                slt: &id002
-                  type: string
-                  writeOnly: true
-                org_id:
-                  type: string
-                  description: Select one organization for a testing actor. An issued SLT must already represent this organization.
-              required:
-              - slt
-      security: []
-      description: 'App credentials remain on the server. Responses containing tokens use Cache-Control:
-        no-store. In a sandbox all IAM requests carry the linked IAM environment key and test Application
-        credential.'
-  /auth/iam:
-    get:
-      operationId: getIamInfo
-      summary: Discover public IAM application configuration before login
-      description: Returns the selected deployment's app ID, IAM URL and linked IAM test environment UUID (null in production). No app secrets or environment keys are returned. Uses Cache-Control no-store.
-      security: []
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '200':
-          description: Public IAM configuration
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [app_id, iam_url, iam_environment_id]
-                properties:
-                  app_id:
-                    type: string
-                  iam_url:
-                    type: string
-                    format: uri
-                  iam_environment_id:
-                    type: [string, 'null']
-                    format: uuid
-        default:
-          $ref: '#/components/responses/Error'
-  /auth/refresh:
-    post:
-      operationId: authRefresh
-      summary: Rotate an application refresh token
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Session'
-        default: *id001
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                refresh_token: *id002
-              required:
-              - refresh_token
-      security: []
-      description: 'App credentials remain on the server. Responses containing tokens use Cache-Control:
-        no-store. In a sandbox all IAM requests carry the linked IAM environment key and test Application
-        credential.'
-  /auth/logout:
-    post:
-      operationId: authLogout
-      summary: Revoke an application token or refresh family
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '204':
-          description: Success
-        default: *id001
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                token: *id002
-              required:
-              - token
-      security: []
-      description: 'App credentials remain on the server. Responses containing tokens use Cache-Control:
-        no-store. In a sandbox all IAM requests carry the linked IAM environment key and test Application
-        credential.'
-  /auth/organizations:
-    get:
-      operationId: listAuthorizedOrganizations
-      summary: List organizations currently authorized through IAM
-      description: Lists only IAM-selected organizations with active membership. No X-Org-ID is required. Unscoped access tokens can use an organization from this list as X-Org-ID for ordinary reminder requests. Legacy scoped sessions return their single authorized organization.
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '200':
-          description: Current authorized organization identities; empty when none are authorized
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Identity'
-        default: *id001
   /auth/me:
     get:
+      tags:
+      - Account
       operationId: getIdentity
-      summary: Read current IAM organization authority
+      summary: Describe the calling account as Remind sees it
+      description: 'Returns the signed-in account, its custodian, whether it may write reminders and how
+        many Silicons it can read. Accepts a verification proof with the remind.schedules.read scope,
+        in which case credential is proof and issuing_app names the app that holds it. Responses use
+        Cache-Control: no-store.'
+      security:
+      - bearerAuth: []
+      - proofAuth: []
       parameters:
-      - &id003
-        $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/TestKey'
       responses:
         '200':
-          description: Success
+          description: The calling account
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Identity'
-        default: *id001
-  /webhook:
+        default:
+          $ref: '#/components/responses/Error'
+  /silicons:
     get:
-      operationId: getWebhook
-      summary: Read the owning Silicon delivery endpoint
+      tags:
+      - Account
+      operationId: listSilicons
+      summary: List the Silicons whose reminders the caller can read
+      description: The caller itself (a Silicon), the Silicons it looks after (a Carbon), its siblings,
+        and Silicons that shared their reminders with it, ordered by uuid, with each one's retained
+        reminder count. Accepts a verification proof with the remind.schedules.read scope.
+      security:
+      - bearerAuth: []
+      - proofAuth: []
       parameters:
-      - *id003
+      - name: after
+        in: query
+        description: The next_cursor of the previous page.
+        schema:
+          $ref: '#/components/schemas/AccountUuid'
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
       - $ref: '#/components/parameters/TestKey'
       responses:
         '200':
-          description: Success
+          description: Readable Silicons
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - items
+                - next_cursor
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VisibleSilicon'
+                  next_cursor:
+                    type:
+                    - string
+                    - 'null'
+        default:
+          $ref: '#/components/responses/Error'
+  /webhook:
+    get:
+      tags:
+      - Webhooks
+      operationId: getWebhook
+      summary: Read the calling Silicon's first delivery endpoint
+      description: Kept for older clients; GET /webhooks lists every subscription. The signing secret is
+        never returned.
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '200':
+          description: The first active subscription
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/DestinationInfo'
-        default: *id001
+        '409':
+          $ref: '#/components/responses/WebhookNotConfigured'
+        default:
+          $ref: '#/components/responses/Error'
     put:
+      tags:
+      - Webhooks
       operationId: configureWebhook
-      summary: Configure the owning configured webhook endpoint
+      summary: Add a delivery endpoint for the calling Silicon
+      description: Kept for older clients; the same as POST /webhooks. The access token is checked with
+        Silicon Accounts first.
       parameters:
-      - *id003
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '201': &id004
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DestinationReceipt'
-        default: *id001
-        '200': *id004
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/DestinationInput'
-    delete:
-      operationId: disableWebhook
-      summary: Disable the owning Silicon delivery endpoint
-      parameters:
-      - *id003
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '204':
-          description: Success
-        default: *id001
-  /webhooks:
-    get:
-      operationId: listWebhooks
-      summary: List the owning Silicon's webhook subscriptions
-      parameters:
-      - *id003
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '200':
-          description: Active subscriptions, possibly empty
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WebhookSubscriptions'
-        default: *id001
-    post:
-      operationId: subscribeWebhook
-      summary: Add a webhook subscription
-      parameters:
-      - *id003
       - $ref: '#/components/parameters/TestKey'
       requestBody:
         required: true
@@ -549,13 +461,80 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DestinationReceipt'
-        default: *id001
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      tags:
+      - Webhooks
+      operationId: disableWebhook
+      summary: Disable every delivery endpoint of the calling Silicon
+      description: The access token is checked with Silicon Accounts first.
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '204':
+          description: Disabled, or none was active
+        default:
+          $ref: '#/components/responses/Error'
+  /webhooks:
+    get:
+      tags:
+      - Webhooks
+      operationId: listWebhooks
+      summary: List webhook subscriptions
+      description: A Silicon lists its own subscriptions. A Carbon lists, read-only, the subscriptions of
+        the Silicons it looks after; silicon_id narrows that to one of them. Signing secrets are never
+        returned.
+      parameters:
+      - name: silicon_id
+        in: query
+        description: The `si:` id or uuid of one Silicon the calling Carbon looks after.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '200':
+          description: Active subscriptions, possibly empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptions'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      tags:
+      - Webhooks
+      operationId: subscribeWebhook
+      summary: Add a webhook subscription for the calling Silicon
+      description: Any number of subscriptions may be active; each due reminder is delivered to all of
+        them. The access token is checked with Silicon Accounts first.
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DestinationInput'
+      responses:
+        '201':
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DestinationReceipt'
+        default:
+          $ref: '#/components/responses/Error'
   /webhooks/{subscription_id}:
     delete:
+      tags:
+      - Webhooks
       operationId: unsubscribeWebhook
-      summary: Disable one webhook subscription
+      summary: Disable one webhook subscription of the calling Silicon
+      description: The access token is checked with Silicon Accounts first.
       parameters:
-      - *id003
       - $ref: '#/components/parameters/TestKey'
       - name: subscription_id
         in: path
@@ -566,55 +545,173 @@ paths:
       responses:
         '204':
           description: Subscription disabled
-        default: *id001
-  /silicons:
+        default:
+          $ref: '#/components/responses/Error'
+  /viewers:
     get:
-      operationId: listSilicons
-      summary: List registered Silicons in the organization
+      tags:
+      - Sharing
+      operationId: listViewers
+      summary: List who may read reminders shared by or with the caller
+      description: granted lists the grants on the caller's reminders (a Silicon) or on the reminders of
+        the Silicons it looks after (a Carbon); received lists the grants that let the caller read someone
+        else's reminders.
+      responses:
+        '200':
+          description: Active viewer grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewerGrants'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      tags:
+      - Sharing
+      operationId: grantViewer
+      summary: Let an account read a Silicon's reminders
+      description: A Silicon shares its own reminders; a Carbon shares the reminders of a Silicon it looks
+        after and names it with silicon_id. Sharing with another Silicon from outside the owner's circle
+        needs that Silicon to allow the owner first (POST /allowed-accounts). Not available inside a test
+        environment. The access token is checked with Silicon Accounts first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountTargetRequest'
+      responses:
+        '201':
+          description: Grant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewerGrant'
+        '200':
+          description: The grant already existed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewerGrant'
+        default:
+          $ref: '#/components/responses/Error'
+  /viewers/{viewer}:
+    delete:
+      tags:
+      - Sharing
+      operationId: revokeViewer
+      summary: Stop sharing a Silicon's reminders with an account
+      description: The viewer is a `c:` or `si:` id or a Silicon Accounts uuid. A Carbon names the Silicon
+        with silicon_id. Not available inside a test environment. The access token is checked with
+        Silicon Accounts first.
       parameters:
-      - *id003
-      - &id005
-        name: after
-        in: query
-        schema: &id007
+      - name: viewer
+        in: path
+        required: true
+        schema:
           type: string
-          format: uuid
-      - &id006
-        name: limit
+          minLength: 1
+          maxLength: 64
+      - $ref: '#/components/parameters/SiliconSelector'
+      responses:
+        '204':
+          description: Grant ended
+        default:
+          $ref: '#/components/responses/Error'
+  /allowed-accounts:
+    get:
+      tags:
+      - Sharing
+      operationId: listAllowedAccounts
+      summary: List the accounts allowed to share reminders with a Silicon
+      description: Silicons are not open to everyone. A Silicon's allow-list names the accounts from
+        outside its circle that may share reminders with it. A Silicon lists its own; a Carbon lists those
+        of the Silicons it looks after, or of one named with silicon_id.
+      parameters:
+      - $ref: '#/components/parameters/SiliconSelector'
+      responses:
+        '200':
+          description: Active allow-list entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Allowance'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      tags:
+      - Sharing
+      operationId: allowAccount
+      summary: Allow an account to share reminders with a Silicon
+      description: A Silicon allows for itself; its custodian names the Silicon with silicon_id. Not
+        available inside a test environment. The access token is checked with Silicon Accounts first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountTargetRequest'
+      responses:
+        '201':
+          description: Entry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Allowance'
+        '200':
+          description: The entry already existed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Allowance'
+        default:
+          $ref: '#/components/responses/Error'
+  /allowed-accounts/{account}:
+    delete:
+      tags:
+      - Sharing
+      operationId: disallowAccount
+      summary: Remove an account from a Silicon's allow-list
+      description: Also ends the grants that entry made possible. Not available inside a test environment.
+        The access token is checked with Silicon Accounts first.
+      parameters:
+      - name: account
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+      - $ref: '#/components/parameters/SiliconSelector'
+      responses:
+        '204':
+          description: Entry removed
+        default:
+          $ref: '#/components/responses/Error'
+  /test-environments:
+    get:
+      tags:
+      - Test environments
+      operationId: listTestEnvironments
+      summary: List the test environments of the caller's circle
+      description: Environments the caller owns, those of the Silicons it looks after, of its siblings and
+        of its custodian. Send these requests without X-Remind-Test-Key.
+      parameters:
+      - $ref: '#/components/parameters/EnvironmentCursor'
+      - name: limit
         in: query
         schema:
           type: integer
           minimum: 1
           maximum: 100
           default: 50
-      - $ref: '#/components/parameters/TestKey'
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Silicon'
-                  next_cursor:
-                    type:
-                    - string
-                    - 'null'
-                required:
-                - items
-        default: *id001
-  /test-environments:
-    get:
-      operationId: listTestEnvironments
-      summary: List organization-owned environments
-      parameters:
-      - *id003
-      - *id005
-      - *id006
       - name: include_deleted
         in: query
         schema:
@@ -622,11 +719,14 @@ paths:
           default: false
       responses:
         '200':
-          description: Success
+          description: Environments, oldest first
           content:
             application/json:
               schema:
                 type: object
+                required:
+                - items
+                - next_cursor
                 properties:
                   items:
                     type: array
@@ -636,244 +736,232 @@ paths:
                     type:
                     - string
                     - 'null'
-                required:
-                - items
-        default: *id001
+                    format: uuid
+        default:
+          $ref: '#/components/responses/Error'
     post:
+      tags:
+      - Test environments
       operationId: createTestEnvironment
-      summary: Create an empty IAM-bound test environment
-      parameters:
-      - *id003
-      responses:
-        '201':
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EnvironmentCreated'
-        default: *id001
+      summary: Create an empty test environment owned by the caller
+      description: 'The environment uses the caller''s Silicon Accounts sign-in; only its 32-character key
+        selects it. The key is returned once here and later from GET /test-environments/{id}/key, with
+        Cache-Control: no-store.'
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateTestEnvironment'
+      responses:
+        '201':
+          description: Environment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvironmentCreated'
+        default:
+          $ref: '#/components/responses/Error'
   /test-environments/{id}:
+    parameters:
+    - $ref: '#/components/parameters/EnvironmentId'
     get:
+      tags:
+      - Test environments
       operationId: getTestEnvironment
       summary: Read environment metadata
-      parameters:
-      - *id003
-      - &id008
-        name: id
-        in: path
-        required: true
-        schema: *id007
+      description: Any account of the owner's circle may read it, including during the 30-day recovery
+        window.
       responses:
         '200':
-          description: Success
+          description: Environment
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TestEnvironment'
-        default: *id001
+        default:
+          $ref: '#/components/responses/Error'
     delete:
+      tags:
+      - Test environments
       operationId: deleteTestEnvironment
       summary: Retire an environment for 30-day recovery
-      parameters:
-      - *id003
-      - *id008
+      description: Only the owner or the owner's custodian. The access token is checked with Silicon
+        Accounts first.
       responses:
         '204':
-          description: Success
-        default: *id001
+          description: Retired
+        default:
+          $ref: '#/components/responses/Error'
   /test-environments/{id}/key:
     get:
+      tags:
+      - Test environments
       operationId: getEnvironmentKey
       summary: Retrieve the active key
+      description: 'Any account of the owner''s circle. Keys are encrypted at rest and returned with
+        Cache-Control: no-store. The access token is checked with Silicon Accounts first.'
       parameters:
-      - *id003
-      - *id008
+      - $ref: '#/components/parameters/EnvironmentId'
       responses:
         '200':
-          description: Success
+          description: The active key
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/EnvironmentKey'
-        default: *id001
-      description: 'Restricted to the creator or a current organization owner/admin. Keys are retrievable,
-        encrypted at rest and returned with Cache-Control: no-store.'
+        default:
+          $ref: '#/components/responses/Error'
   /test-environments/{id}/key-rotations:
     post:
+      tags:
+      - Test environments
       operationId: rotateEnvironmentKey
       summary: Rotate and revoke the previous key
+      description: 'Only the owner or the owner''s custodian. Returned with Cache-Control: no-store. The
+        access token is checked with Silicon Accounts first.'
       parameters:
-      - *id003
-      - *id008
+      - $ref: '#/components/parameters/EnvironmentId'
       responses:
         '200':
-          description: Success
+          description: The new key
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/EnvironmentKey'
-        default: *id001
-      description: 'Restricted to the creator or a current organization owner/admin. Keys are retrievable,
-        encrypted at rest and returned with Cache-Control: no-store.'
+        default:
+          $ref: '#/components/responses/Error'
   /test-environments/{id}/restorations:
     post:
+      tags:
+      - Test environments
       operationId: restoreEnvironment
-      summary: Recover a deleted environment with a new key
+      summary: Recover a retired environment with a new key
+      description: 'Only the owner or the owner''s custodian, within 30 days of retirement. Returned with
+        Cache-Control: no-store. The access token is checked with Silicon Accounts first.'
       parameters:
-      - *id003
-      - *id008
+      - $ref: '#/components/parameters/EnvironmentId'
       responses:
         '200':
-          description: Success
+          description: The new key
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/EnvironmentKey'
-        default: *id001
-      description: 'Restricted to the creator or a current organization owner/admin. Keys are retrievable,
-        encrypted at rest and returned with Cache-Control: no-store.'
+        default:
+          $ref: '#/components/responses/Error'
   /testing-environment:
     get:
+      tags:
+      - Test environments
       operationId: currentEnvironment
-      summary: Describe the selected sandbox
-      parameters: []
+      summary: Describe the selected test environment
+      description: Requires the environment key only. Omitting it returns test_environment_required. A
+        test environment holds at most 100 retained reminders; inactivity retires it after 15 days.
+      security:
+      - testKeyAuth: []
       responses:
         '200':
-          description: Success
+          description: Environment
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TestEnvironment'
-        default: *id001
-      security:
-      - testKeyAuth: []
-      description: Requires the Remind environment key only. Omitting it returns test_environment_required.
-        Cleaning does not clean the linked IAM environment. A sandbox permits at most 100 retained reminders;
-        inactivity retires it after 15 days.
+        default:
+          $ref: '#/components/responses/Error'
   /testing-environment/cleanings:
     post:
+      tags:
+      - Test environments
       operationId: cleanEnvironment
-      summary: Atomically clear all sandbox data, keeping the IAM binding and root key
-      parameters: []
-      responses:
-        '204':
-          description: Success
-        default: *id001
+      summary: Atomically clear all data of the selected test environment, keeping its key
+      description: Requires the environment key only. Omitting it returns test_environment_required.
       security:
       - testKeyAuth: []
-      description: Requires the Remind environment key only. Omitting it returns test_environment_required.
-        Cleaning does not clean the linked IAM environment. A sandbox permits at most 100 retained reminders;
-        inactivity retires it after 15 days.
-  /health/live:
-    get:
-      operationId: healthLive
-      summary: Check live status
-      parameters: []
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Health'
-        default: *id001
-      security: []
-      servers:
-      - url: https://backend.remind.teamofsilicons.com
-  /health/ready:
-    get:
-      operationId: healthReady
-      summary: Check ready status
-      parameters: []
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Health'
-        default: *id001
-      security: []
-      servers:
-      - url: https://backend.remind.teamofsilicons.com
-  /webhook/:
-    post:
-      operationId: receiveIamWebhook
-      summary: Receive exact-byte signed IAM lifecycle events
-      parameters:
-      - name: X-Silicon-IAM-Event-Id
-        in: header
-        required: true
-        schema: &id009
-          type: string
-      - name: X-Silicon-IAM-Timestamp
-        in: header
-        required: true
-        schema: *id009
-      - name: X-Silicon-IAM-Key-Version
-        in: header
-        required: true
-        schema: *id009
-      - name: X-Silicon-IAM-Signature
-        in: header
-        required: true
-        schema: *id009
-      responses:
-        '202':
-          description: Success
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  receipt_id: *id007
-                  status: *id009
-                required:
-                - receipt_id
-                - status
-        default: *id001
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-      security: []
-      servers:
-      - url: https://backend.remind.teamofsilicons.com
-      description: Authenticates X-Silicon-IAM-Event-Id, X-Silicon-IAM-Timestamp, X-Silicon-IAM-Key-Version
-        and X-Silicon-IAM-Signature through the official verifier. Testing envelopes route only to linked
-        active Remind sandboxes after signature and IAM-key verification. Root keys are never persisted
-        in event payloads.
-  /testing-environment/iam:
-    put:
-      operationId: configureEnvironmentIam
-      summary: Install or rotate the sandbox IAM Application credential
-      security: []
-      parameters:
-      - $ref: '#/components/parameters/TestKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required:
-              - iam_app_secret
-              properties:
-                iam_app_secret:
-                  type: string
-                  writeOnly: true
       responses:
         '204':
-          description: Credential verified in the bound IAM test world and encrypted at rest
+          description: Cleaned
+        default:
+          $ref: '#/components/responses/Error'
+  /health/live:
+    servers:
+    - url: https://backend.remind.teamofsilicons.com
+    get:
+      tags:
+      - Operations
+      operationId: healthLive
+      summary: Check live status
+      security: []
+      responses:
+        '200':
+          description: The process is serving
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        default:
+          $ref: '#/components/responses/Error'
+  /health/ready:
+    servers:
+    - url: https://backend.remind.teamofsilicons.com
+    get:
+      tags:
+      - Operations
+      operationId: healthReady
+      summary: Check ready status
+      security: []
+      responses:
+        '200':
+          description: Dependencies are reachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        default:
+          $ref: '#/components/responses/Error'
+  /webhook/:
+    servers:
+    - url: https://backend.remind.teamofsilicons.com
+    post:
+      tags:
+      - Operations
+      operationId: receiveAccountsWebhook
+      summary: Receive Silicon Accounts app webhook deliveries
+      description: Silicon Accounts calls this route (POST /webhook works too) when an account Remind knows
+        changes its id, profile or custodian, signs out of Remind, loses access, or is deleted. The
+        signature is an HMAC-SHA256 of "{timestamp}.{raw body}" with Remind's webhook secret, checked over
+        the exact bytes with a five-minute tolerance. A missing, wrong or stale signature returns 401
+        webhook_signature_invalid; a signed body that is not an event returns 400 webhook_body_invalid.
+        Each event_id applies once; a repeat returns duplicate. Event types Remind does not use, and ping,
+        return ignored.
+      security: []
+      parameters:
+      - name: X-Accounts-Timestamp
+        in: header
+        required: true
+        description: Unix seconds when Silicon Accounts signed the delivery.
+        schema:
+          type: string
+          pattern: ^[0-9]{1,12}$
+      - name: X-Accounts-Signature
+        in: header
+        required: true
+        description: v1=<hex HMAC-SHA256>; several comma-separated values during a secret rotation.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountsEvent'
+      responses:
+        '200':
+          description: Applied, recognised as a duplicate, or ignored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountsEventAccepted'
         default:
           $ref: '#/components/responses/Error'
 components:
@@ -881,20 +969,37 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: IAM Remind-audience application token
+      bearerFormat: JWT
+      description: >-
+        A Silicon Accounts access token issued to Remind (an EdDSA-signed JWT with audience remind and
+        the Silicon Accounts issuer). Sign in with `remind login`, or exchange a Silicon sign-in token
+        for Remind with Silicon Accounts. Remind verifies the signature against the published keys,
+        the audience, the issuer and the expiry; routes that change sharing, delivery endpoints, test
+        environment keys or archive reminders also ask Silicon Accounts whether the token is still
+        active. A token issued before the account signed out of Remind, lost access, or was deleted
+        is refused with token_revoked or account_deleted. Errors (401): unauthenticated, token_expired,
+        token_wrong_audience, token_wrong_issuer, token_unknown_key, token_bad_signature,
+        token_malformed, token_missing_claim, token_invalid, token_kind_mismatch, token_revoked,
+        account_deleted, legacy_token_rejected and proof_as_bearer; 503 when Silicon Accounts cannot
+        be reached to check a token.
+    proofAuth:
+      type: http
+      scheme: Proof
+      description: >-
+        `Authorization: Proof sap_…`: a verification proof another app obtained from Silicon Accounts
+        for Remind, with the remind.schedules.read scope. Remind verifies it with Silicon Accounts and
+        then answers with what the account the proof names can read. Proofs are accepted only on
+        GET /schedules, GET /schedules/{schedule_id}, GET /schedules/{schedule_id}/executions,
+        GET /silicons and GET /auth/me, only from the apps this Remind deployment trusts, and never
+        change anything. Errors: proof_not_accepted, proof_invalid, proof_scope_missing,
+        proof_issuer_not_allowed, proof_kind_not_accepted.
     testKeyAuth:
       type: apiKey
       in: header
       name: X-Remind-Test-Key
-      description: Imported IAM application secret or legacy 32-character Remind root key. Selects an isolated test environment; ordinary actions
-        still require a test IAM access token.
+      description: The 32-character key of a test environment. It selects the environment; ordinary
+        actions inside it still need a Silicon Accounts access token.
   parameters:
-    OrgId:
-      name: X-Org-ID
-      in: header
-      required: true
-      schema:
-        $ref: '#/components/schemas/OrgId'
     ScheduleId:
       name: schedule_id
       in: path
@@ -902,6 +1007,29 @@ components:
       schema:
         type: string
         format: uuid
+    EnvironmentId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    EnvironmentCursor:
+      name: after
+      in: query
+      description: The next_cursor of the previous page.
+      schema:
+        type: string
+        format: uuid
+    SiliconSelector:
+      name: silicon_id
+      in: query
+      description: Which Silicon this is about, by `si:` id or uuid. A Carbon must name one of the
+        Silicons it looks after; a Silicon may omit it or name itself.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -927,14 +1055,14 @@ components:
       name: X-Remind-Test-Key
       in: header
       required: false
-      description: IAM sandbox application app_secret (ask_...) or legacy Remind key. Invalid, expired or revoked keys fail closed. Environment
-        management routes reject this header.
+      description: Selects a test environment by its 32-character key. Invalid, expired or revoked keys
+        fail closed with test_key_invalid. Environment management routes reject this header.
       schema:
         type: string
-        pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
+        pattern: ^[a-zA-Z0-9]{32}$
   responses:
     WebhookNotConfigured:
-      description: The requested legacy subscription does not exist or is inactive.
+      description: The calling Silicon has no active webhook subscription.
       content:
         application/json:
           schema:
@@ -954,7 +1082,8 @@ components:
     BugReportRequest:
       type: object
       additionalProperties: false
-      required: [message]
+      required:
+      - message
       properties:
         message:
           type: string
@@ -962,32 +1091,172 @@ components:
           maxLength: 16384
           description: Reproduction details, maximum 16384 UTF-8 bytes. Exclude credentials.
         pr:
-          type: [string, 'null']
-          pattern: '^https://github.com/teamofsilicons/silicon-remind/pull/[1-9][0-9]*$'
+          type:
+          - string
+          - 'null'
+          pattern: ^https://github.com/teamofsilicons/silicon-remind/pull/[1-9][0-9]*$
     BugReportResponse:
       type: object
-      required: [id, status, failure_reason]
+      required:
+      - id
+      - status
+      - failure_reason
       properties:
-        id: {type: string, format: uuid}
-        status: {type: string, enum: [queued, sending, sent, failed, simulated]}
-        failure_reason: {type: [string, 'null']}
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - queued
+          - sending
+          - sent
+          - failed
+          - simulated
+        failure_reason:
+          type:
+          - string
+          - 'null'
     TelemetryEvent:
       type: object
       additionalProperties: false
-      required: [source, event, step, success, duration_ms]
+      required:
+      - source
+      - event
+      - step
+      - success
+      - duration_ms
       properties:
-        source: {type: string, enum: [rust_client, cli, daemon, web]}
-        event: {type: string, enum: [request_completed, command_completed, update_completed, heartbeat, page_view, navigation, interaction, error, performance]}
-        step: {type: string, enum: [response, command, maintenance, browser]}
-        success: {type: boolean}
-        duration_ms: {type: integer, minimum: 0, maximum: 86400000}
-        status_code: {type: [integer, 'null'], minimum: 100, maximum: 599}
-    OrgId:
+        source:
+          type: string
+          enum:
+          - rust_client
+          - cli
+          - daemon
+          - web
+        event:
+          type: string
+          enum:
+          - request_completed
+          - command_completed
+          - update_completed
+          - heartbeat
+          - page_view
+          - navigation
+          - interaction
+          - error
+          - performance
+        step:
+          type: string
+          enum:
+          - response
+          - command
+          - maintenance
+          - browser
+        success:
+          type: boolean
+        duration_ms:
+          type: integer
+          minimum: 0
+          maximum: 86400000
+        status_code:
+          type:
+          - integer
+          - 'null'
+          minimum: 100
+          maximum: 599
+    VersionDiscovery:
+      type: object
+      required:
+      - service
+      - current
+      - supported
+      - selection_header
+      - versions
+      properties:
+        service:
+          type: string
+        current:
+          type: integer
+          const: 2
+        supported:
+          type: array
+          items:
+            type: integer
+        protocol:
+          type: string
+        selection_header:
+          type: string
+          const: X-Remind-API-Version
+        versions:
+          type: array
+          items:
+            type: object
+            required:
+            - version
+            - status
+            - sunset_at
+            - implemented
+            properties:
+              version:
+                type: integer
+              status:
+                type: string
+                enum:
+                - active
+                - deprecated
+                - sunset
+              sunset_at:
+                type:
+                - string
+                - 'null'
+                format: date-time
+              implemented:
+                type: boolean
+        sunset_idle_days:
+          type: integer
+        policy:
+          type: string
+          format: uri
+    AccountUuid:
       type: string
-      pattern: ^[a-z0-9_-]{3,50}$
-    SiliconGlobalId:
+      pattern: ^[A-Za-z0-9]{1,64}$
+      description: Permanent Silicon Accounts identifier of an account; short, case-sensitive base62.
+    SiliconId:
       type: string
-      pattern: ^[a-z0-9_-]{3,50}:[a-z0-9_-]{3,50}$
+      pattern: ^si:[a-z0-9_-]{3,50}$
+      description: Public id of a Silicon. It can change; the uuid never does.
+    AccountKind:
+      type: string
+      enum:
+      - carbon
+      - silicon
+    AccountRef:
+      type: object
+      required:
+      - uuid
+      - id
+      - kind
+      properties:
+        uuid:
+          $ref: '#/components/schemas/AccountUuid'
+        id:
+          type: string
+          description: Current public id (c:handle or si:handle); empty when Remind does not know it yet.
+        kind:
+          oneOf:
+          - $ref: '#/components/schemas/AccountKind'
+          - type: 'null'
+    Relation:
+      type: string
+      description: Why the caller can read an account's reminders. self is the caller; custodian marks
+        a Silicon the calling Carbon looks after; sibling marks another Silicon of the calling Silicon's
+        custodian; shared marks a Silicon that granted the caller view.
+      enum:
+      - self
+      - custodian
+      - sibling
+      - shared
     ScheduleStatus:
       type: string
       enum:
@@ -1081,7 +1350,8 @@ components:
         timezone:
           type: string
           minLength: 1
-          description: Required IANA time-zone identifier. Provide timezone explicitly, for example Asia/Kolkata or UTC; there is no default.
+          description: Required IANA time-zone identifier. Provide timezone explicitly, for example
+            Asia/Kolkata or UTC; there is no default.
           examples:
           - Asia/Kolkata
     Schedule:
@@ -1090,7 +1360,7 @@ components:
       - type: object
         required:
         - id
-        - org_id
+        - owner
         - silicon_id
         - timezone
         - status
@@ -1104,10 +1374,14 @@ components:
           id:
             type: string
             format: uuid
-          org_id:
-            $ref: '#/components/schemas/OrgId'
+          owner:
+            description: The Silicon that owns the reminder. null only for a reminder kept from before
+              Remind signed in with Silicon Accounts whose owner has not been matched to an account yet.
+            oneOf:
+            - $ref: '#/components/schemas/AccountRef'
+            - type: 'null'
           silicon_id:
-            $ref: '#/components/schemas/SiliconGlobalId'
+            $ref: '#/components/schemas/SiliconId'
           status:
             $ref: '#/components/schemas/ScheduleStatus'
           section:
@@ -1195,215 +1469,380 @@ components:
               type: string
             request_id:
               type: string
-    Session:
-      type: object
-      properties:
-        access_token: *id009
-        refresh_token: *id009
-        expires_in:
-          type: integer
-        token_type: *id009
-        scope: *id009
-        actor:
-          type: object
-        org_id:
-          type: string
-          description: The single organization selected during IAM login. Refresh preserves this context.
-      required:
-      - access_token
-      - refresh_token
-      - expires_in
-      - token_type
-      - scope
-      - actor
-      - org_id
     Identity:
       type: object
+      required:
+      - uuid
+      - kind
+      - id
+      - display_name
+      - pfp_url
+      - custodian
+      - can_manage_reminders
+      - credential
+      - issuing_app
+      - visible_silicons
       properties:
-        principal_id: *id007
-        actor_type:
+        uuid:
+          $ref: '#/components/schemas/AccountUuid'
+        kind:
+          $ref: '#/components/schemas/AccountKind'
+        id:
           type: string
-          enum:
-          - carbon
-          - silicon
-        public_id:
-          type:
-          - string
-          - 'null'
-        org_id: *id009
-        membership_id: *id007
-        org_role:
-          type:
-          - string
-          - 'null'
-        authorization_epoch:
-          type: integer
-          minimum: 0
+          description: Current public id (c:handle or si:handle).
+        display_name:
+          type: string
+        pfp_url:
+          type: string
+        custodian:
+          description: The Carbon who looks after the calling Silicon; null for a Carbon.
+          oneOf:
+          - $ref: '#/components/schemas/AccountRef'
+          - type: 'null'
         can_manage_reminders:
           type: boolean
+          description: True for a Silicon signed in with an access token.
+        credential:
+          type: string
+          enum:
+          - access_token
+          - proof
+        issuing_app:
+          type:
+          - string
+          - 'null'
+          description: The app that holds the verification proof; null for an access token.
+        visible_silicons:
+          type: integer
+          minimum: 0
+    VisibleSilicon:
+      type: object
       required:
-      - principal_id
-      - actor_type
-      - public_id
-      - org_id
-      - membership_id
-      - org_role
-      - authorization_epoch
-      - can_manage_reminders
+      - uuid
+      - silicon_id
+      - display_name
+      - pfp_url
+      - relation
+      - reminder_count
+      properties:
+        uuid:
+          $ref: '#/components/schemas/AccountUuid'
+        silicon_id:
+          type: string
+          description: Current si:handle id; empty when Remind does not know it yet.
+        display_name:
+          type: string
+        pfp_url:
+          type: string
+        relation:
+          $ref: '#/components/schemas/Relation'
+        reminder_count:
+          type: integer
+          minimum: 0
+    AccountTargetRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: The other account, by c:handle, si:handle or Silicon Accounts uuid.
+        silicon_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Which Silicon this is about. Required for a Carbon (one of the Silicons it looks
+            after); a Silicon may omit it.
+    ViewerGrant:
+      type: object
+      required:
+      - id
+      - owner
+      - viewer
+      - granted_by
+      - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        owner:
+          $ref: '#/components/schemas/AccountRef'
+        viewer:
+          $ref: '#/components/schemas/AccountRef'
+        granted_by:
+          $ref: '#/components/schemas/AccountUuid'
+        created_at:
+          type: string
+          format: date-time
+    ViewerGrants:
+      type: object
+      required:
+      - granted
+      - received
+      properties:
+        granted:
+          type: array
+          items:
+            $ref: '#/components/schemas/ViewerGrant'
+        received:
+          type: array
+          items:
+            $ref: '#/components/schemas/ViewerGrant'
+    Allowance:
+      type: object
+      required:
+      - id
+      - silicon
+      - allowed
+      - created_by
+      - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        silicon:
+          $ref: '#/components/schemas/AccountRef'
+        allowed:
+          $ref: '#/components/schemas/AccountRef'
+        created_by:
+          $ref: '#/components/schemas/AccountUuid'
+        created_at:
+          type: string
+          format: date-time
     DestinationInput:
       type: object
+      additionalProperties: false
+      required:
+      - endpoint_url
       properties:
         endpoint_url:
           type: string
           format: uri
+          description: Absolute https URL without credentials (http only for this machine outside
+            production).
         signing_secret:
           type: string
           maxLength: 4096
-          description: Optional HMAC signing secret; omit for unsigned delivery.
-      required:
-      - endpoint_url
+          writeOnly: true
+          description: Optional HMAC signing secret; omit for unsigned delivery. Never returned.
     DestinationReceipt:
       type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-        silicon_id: *id009
-        version: &id010
-          type: integer
-        updated_at: &id011
-          type: string
-          format: date-time
       required:
       - id
       - silicon_id
+      - silicon_uuid
       - version
       - updated_at
-    DestinationInfo:
-      type: object
       properties:
         id:
           type: string
           format: uuid
-        silicon_id: *id009
-        version: *id010
-        updated_at: *id011
+        silicon_id:
+          $ref: '#/components/schemas/SiliconId'
+        silicon_uuid:
+          $ref: '#/components/schemas/AccountUuid'
+        version:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+    DestinationInfo:
+      type: object
+      required:
+      - id
+      - silicon_id
+      - endpoint_url
+      - version
+      - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        silicon_id:
+          $ref: '#/components/schemas/SiliconId'
         endpoint_url:
           type: string
           format: uri
+        version:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+    WebhookSubscription:
+      type: object
       required:
       - id
       - silicon_id
+      - owner
+      - endpoint_url
       - version
       - updated_at
-      - endpoint_url
+      properties:
+        id:
+          type: string
+          format: uuid
+        silicon_id:
+          $ref: '#/components/schemas/SiliconId'
+        owner:
+          oneOf:
+          - $ref: '#/components/schemas/AccountRef'
+          - type: 'null'
+        endpoint_url:
+          type: string
+          format: uri
+        version:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
     WebhookSubscriptions:
       type: object
+      required:
+      - items
       properties:
         items:
           type: array
           items:
-            $ref: '#/components/schemas/DestinationInfo'
-      required:
-      - items
-    Silicon:
-      type: object
-      properties:
-        principal_id: *id007
-        silicon_id: *id009
-        reminder_count:
-          type: integer
-          minimum: 0
-      required:
-      - principal_id
-      - silicon_id
-      - reminder_count
+            $ref: '#/components/schemas/WebhookSubscription'
     TestEnvironment:
       type: object
-      properties:
-        id: *id007
-        org_id: *id009
-        creator_id:
-          type: string
-        name: *id009
-        description:
-          type:
-          - string
-          - 'null'
-        iam_environment_id: *id007
-        iam_control_version:
-          type: [integer, "null"]
-          description: Current IAM lifecycle revision for automatically discovered environments.
-        version:
-          type: integer
-        created_at: *id011
-        last_activity_at: *id011
-        deleted_at: &id012
-          type:
-          - string
-          - 'null'
-          format: date-time
-        purge_after: *id012
       required:
       - id
-      - org_id
-      - creator_id
+      - owner_uuid
+      - owner
       - name
       - description
-      - iam_environment_id
       - version
       - created_at
       - last_activity_at
       - deleted_at
       - purge_after
+      properties:
+        id:
+          type: string
+          format: uuid
+        owner_uuid:
+          oneOf:
+          - $ref: '#/components/schemas/AccountUuid'
+          - type: 'null'
+        owner:
+          oneOf:
+          - $ref: '#/components/schemas/AccountRef'
+          - type: 'null'
+        name:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        last_activity_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        purge_after:
+          type:
+          - string
+          - 'null'
+          format: date-time
     CreateTestEnvironment:
       type: object
+      additionalProperties: false
+      required:
+      - name
       properties:
         name:
           type: string
           minLength: 1
           maxLength: 100
+          description: Unique among the caller's active environments.
         description:
           type:
           - string
           - 'null'
           maxLength: 10000
-        iam_test_key:
-          type: string
-          pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
-          writeOnly: true
-        iam_app_secret: *id002
-      required:
-      - name
-      - iam_test_key
     EnvironmentCreated:
       type: object
+      required:
+      - environment
+      - key
       properties:
         environment:
           $ref: '#/components/schemas/TestEnvironment'
         key:
           type: string
-          pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
-      required:
-      - environment
-      - key
+          pattern: ^[a-zA-Z0-9]{32}$
     EnvironmentKey:
       type: object
-      properties:
-        environment_id: *id007
-        key:
-          type: string
-          pattern: ^(?:[a-zA-Z0-9]{32}|ask_[a-zA-Z0-9_-]{43})$
       required:
       - environment_id
       - key
+      properties:
+        environment_id:
+          type: string
+          format: uuid
+        key:
+          type: string
+          pattern: ^[a-zA-Z0-9]{32}$
     Health:
       type: object
-      properties:
-        service: *id009
-        status: *id009
-        version: *id009
       required:
       - service
       - status
       - version
+      properties:
+        service:
+          type: string
+        status:
+          type: string
+        version:
+          type: string
+    AccountsEvent:
+      type: object
+      required:
+      - event_id
+      - type
+      - data
+      properties:
+        event_id:
+          type: string
+        type:
+          type: string
+          description: account.id_changed, account.updated, account.deleted, membership.signed_out,
+            membership.access_removed, silicon.custodian_changed or ping; others are ignored.
+        occurred_at:
+          type: string
+          format: date-time
+        app_id:
+          type: string
+        silicon:
+          type:
+          - string
+          - 'null'
+        data:
+          type: object
+    AccountsEventAccepted:
+      type: object
+      required:
+      - event_id
+      - status
+      properties:
+        event_id:
+          type: string
+        status:
+          type: string
+          enum:
+          - processed
+          - duplicate
+          - ignored
