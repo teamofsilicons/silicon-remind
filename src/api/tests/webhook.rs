@@ -132,3 +132,54 @@ async fn deliveries_need_a_fresh_valid_signature_and_apply_once() -> anyhow::Res
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn profiles_come_from_the_user_base_not_from_lookups() -> anyhow::Result<()> {
+    let harness = Harness::new().await?;
+    harness
+        .lookup("Ada", ActorKind::Carbon, "c:ada", None)
+        .await;
+    harness
+        .member("Ada", ActorKind::Carbon, "c:ada", "Ada Lovelace")
+        .await;
+    // First sight of the account reads the lookup and the user base.
+    let token = harness.bearer("Ada", ActorKind::Carbon, "c:ada")?;
+    let (status, me) = harness
+        .send("GET", "/api/v2/auth/me", Some(&token), None, &[])
+        .await?;
+    assert_eq!(
+        (status, me["display_name"].as_str(), me["pfp_url"].as_str()),
+        (
+            StatusCode::OK,
+            Some("Ada Lovelace"),
+            Some("https://example.test/pfp.png")
+        )
+    );
+
+    // A late account.updated describing an older moment does not win over
+    // what the user base shows now.
+    let stale = body(
+        "evt-stale-name",
+        "account.updated",
+        &json!({"uuid": "Ada", "membership_id": "remind:Ada", "changed": ["display_name"],
+                "account": {"uuid": "Ada", "membership_id": "remind:Ada", "kind": "carbon", "id": "c:ada",
+                            "display_name": "Ada (old)", "pfp_url": "", "version": 7,
+                            "updated_at": "2026-10-01T00:00:00.000Z"}}),
+    );
+    let (status, response) = deliver(
+        &harness,
+        &stale,
+        TEST_WEBHOOK_SECRET,
+        chrono::Utc::now().timestamp(),
+    )
+    .await?;
+    assert_eq!(
+        (status, response["status"].as_str()),
+        (StatusCode::OK, Some("processed"))
+    );
+    let (_, me) = harness
+        .send("GET", "/api/v2/auth/me", Some(&token), None, &[])
+        .await?;
+    assert_eq!(me["display_name"], "Ada Lovelace");
+    Ok(())
+}

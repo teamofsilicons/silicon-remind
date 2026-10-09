@@ -470,3 +470,38 @@ async fn legacy_rows_keep_firing_unseen_until_linked_then_follow_the_account() -
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn profile_updates_apply_by_version_when_the_user_base_is_unreachable() -> anyhow::Result<()>
+{
+    let database = test_database().await?;
+    let now = fixture_now();
+    seed_account(&database.pool, "Ada", ActorKind::Carbon, "c:ada", None).await?;
+    let updated = |event_id: &str, version: i64, name: &str| {
+        event(
+            event_id,
+            "account.updated",
+            now,
+            &json!({"uuid": "Ada", "membership_id": "remind:Ada", "changed": ["display_name"],
+                    "account": {"uuid": "Ada", "membership_id": "remind:Ada", "kind": "carbon",
+                                "id": "c:ada", "display_name": name, "pfp_url": "",
+                                "version": version, "updated_at": now.to_rfc3339()}}),
+        )
+    };
+    // Silicon Accounts is unreachable here, so the event's own account is used.
+    let (newer, body) = updated("evt-name-3", 3, "Ada Three")?;
+    assert_eq!(
+        apply(&database.identity, None, &newer, &body).await?,
+        EventOutcome::Processed
+    );
+    let (older, body) = updated("evt-name-2", 2, "Ada Two")?;
+    apply(&database.identity, None, &older, &body).await?;
+    let name: String = sqlx::query_scalar("SELECT display_name FROM accounts WHERE uuid = 'Ada'")
+        .fetch_one(&database.pool)
+        .await?;
+    assert_eq!(
+        name, "Ada Three",
+        "a delayed older profile does not undo a newer one"
+    );
+    Ok(())
+}

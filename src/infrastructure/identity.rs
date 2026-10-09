@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, TimeZone as _, Utc};
-use silicon_accounts_client::{AccountSummary, Claims, ValidProof};
+use silicon_accounts_client::{AccountSummary, AppUser, Claims, ValidProof};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
@@ -77,6 +77,16 @@ impl AccountRow {
             kind: self.kind(),
         }
     }
+}
+
+/// One account as Silicon Accounts shows it to Remind right now.
+#[derive(Debug, Default)]
+pub struct Reread {
+    /// The lookup: current id, status and a Silicon's custodian.
+    pub summary: Option<AccountSummary>,
+    /// The user base entry: display name and photo; `None` when the account
+    /// never signed in to Remind.
+    pub member: Option<AppUser>,
 }
 
 const ACCOUNT_COLUMNS: &str = "uuid, kind, public_id, display_name, pfp_url, custodian_uuid, \
@@ -269,9 +279,8 @@ impl IdentityStore {
         self.require_row(uuid).await
     }
 
-    /// Refreshes profile and custodian from Silicon Accounts when the cached
-    /// copy has never been looked up or is older than the lookup TTL. A failed
-    /// lookup keeps the cached copy.
+    /// Refreshes the cached account when it was never read or is older than the
+    /// lookup TTL. A failed read keeps the cached copy.
     async fn refresh_if_stale(&self, row: AccountRow) -> Result<AccountRow, AppError> {
         let ttl = chrono::Duration::from_std(self.lookup_ttl)
             .map_err(|error| AppError::internal("lookup_ttl", error))?;
@@ -281,17 +290,45 @@ impl IdentityStore {
         {
             return Ok(row);
         }
-        match self.gateway.lookup(&row.uuid).await {
-            Ok(Some(summary)) => {
-                self.apply_summary(&summary).await?;
-                self.require_row(&row.uuid).await
-            }
-            Ok(None) => Ok(row),
-            Err(error) => {
-                tracing::warn!(error = %error, "Silicon Accounts lookup failed; using the cached account");
-                Ok(row)
-            }
+        let reread = self.reread(&row.uuid).await;
+        if reread.summary.is_none() && reread.member.is_none() {
+            return Ok(row);
         }
+        self.store_reread(&reread).await?;
+        self.require_row(&row.uuid).await
+    }
+
+    /// Reads an account from Silicon Accounts now, in parallel: the lookup gives
+    /// its current id, status and (for a Silicon) custodian; the user base read
+    /// gives what it shares with Remind by signing in to it (display name and
+    /// photo), which a lookup never shows. Failures are logged and leave that
+    /// half empty.
+    pub async fn reread(&self, uuid: &str) -> Reread {
+        let (summary, member) = tokio::join!(self.gateway.lookup(uuid), self.gateway.member(uuid));
+        let summary = summary.unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "Silicon Accounts lookup failed; keeping the cached account");
+            None
+        });
+        let member = member.unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "Silicon Accounts user base read failed; keeping the cached profile");
+            None
+        });
+        Reread { summary, member }
+    }
+
+    /// Writes what [`Self::reread`] found.
+    ///
+    /// # Errors
+    ///
+    /// Returns database errors.
+    pub async fn store_reread(&self, reread: &Reread) -> Result<(), AppError> {
+        if let Some(summary) = &reread.summary {
+            apply_summary(&self.pool, summary).await?;
+        }
+        if let Some(member) = &reread.member {
+            apply_member(&self.pool, member).await?;
+        }
+        Ok(())
     }
 
     /// Writes the authoritative state Silicon Accounts returned for an account.
@@ -611,27 +648,51 @@ pub(crate) async fn apply_summary(pool: &PgPool, summary: &AccountSummary) -> Re
         .filter(|_| kind == "silicon")
         .filter(|custodian| is_valid_account_uuid(&custodian.uuid));
     let deleted = summary.status == "deleted";
+    // A lookup never carries the display name or photo: those come from the
+    // user base (`apply_member`) and from `account.updated`.
     sqlx::query(
-        "INSERT INTO accounts (uuid, kind, public_id, display_name, pfp_url, custodian_uuid, \
-             custodian_id, status, looked_up_at, id_observed_at, custodian_observed_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $8 THEN 'deleted' ELSE 'active' END, \
+        "INSERT INTO accounts (uuid, kind, public_id, custodian_uuid, custodian_id, status, \
+             looked_up_at, id_observed_at, custodian_observed_at) \
+         VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN 'deleted' ELSE 'active' END, \
              clock_timestamp(), clock_timestamp(), clock_timestamp()) \
          ON CONFLICT (uuid) DO UPDATE SET \
              kind = EXCLUDED.kind, public_id = EXCLUDED.public_id, \
-             display_name = EXCLUDED.display_name, pfp_url = EXCLUDED.pfp_url, \
              custodian_uuid = EXCLUDED.custodian_uuid, custodian_id = EXCLUDED.custodian_id, \
-             status = CASE WHEN $8 THEN 'deleted' ELSE accounts.status END, \
+             status = CASE WHEN $6 THEN 'deleted' ELSE accounts.status END, \
              looked_up_at = clock_timestamp(), id_observed_at = clock_timestamp(), \
              custodian_observed_at = clock_timestamp(), updated_at = clock_timestamp()",
     )
     .bind(&summary.uuid)
     .bind(kind)
     .bind(public_id_or_empty(&summary.id))
-    .bind(truncate(&summary.display_name, 1000))
-    .bind(truncate(&summary.pfp_url, 4096))
     .bind(custodian.map(|custodian| custodian.uuid.as_str()))
     .bind(custodian.map(|custodian| public_id_or_empty(&custodian.id)))
     .bind(deleted)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Stores what an account shares with Remind, from Remind's user base: its
+/// display name and photo. A deleted account stays anonymised.
+pub(crate) async fn apply_member(pool: &PgPool, member: &AppUser) -> Result<(), AppError> {
+    if !is_valid_account_uuid(&member.uuid) {
+        return Err(AppError::internal(
+            "account_member",
+            anyhow::anyhow!("Silicon Accounts returned an unreadable uuid"),
+        ));
+    }
+    sqlx::query(
+        "UPDATE accounts SET display_name = $2, pfp_url = $3, updated_at = clock_timestamp() \
+         WHERE uuid = $1 AND status <> 'deleted' \
+           AND (display_name IS DISTINCT FROM $2 OR pfp_url IS DISTINCT FROM $3)",
+    )
+    .bind(&member.uuid)
+    .bind(truncate(&member.display_name, 1000))
+    .bind(truncate(
+        member.pfp_url.as_deref().unwrap_or_default(),
+        4096,
+    ))
     .execute(pool)
     .await?;
     Ok(())

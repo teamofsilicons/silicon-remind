@@ -2,9 +2,10 @@
 //!
 //! Access tokens are verified locally against a cached JWKS (refetched, at most
 //! every 30 seconds, when a token names an unknown key). Introspection, User
-//! verification proofs and account lookups go to Silicon Accounts with Remind's
-//! app credentials and are cached briefly; lookups also stay inside Remind's
-//! own budget, below the 600 a minute Silicon Accounts allows per app.
+//! verification proofs, account lookups and user base reads go to Silicon
+//! Accounts with Remind's app credentials; introspection and proofs are cached
+//! briefly, and lookups and user base reads stay inside Remind's own budget,
+//! below the 600 a minute Silicon Accounts allows per app.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -15,7 +16,7 @@ use std::{
 use secrecy::{ExposeSecret as _, SecretString};
 use sha2::{Digest as _, Sha256};
 use silicon_accounts_client::{
-    AccountSummary, AccountsClient, Claims, Error as ClientError, Jwks, ProofVerification,
+    AccountSummary, AccountsClient, AppUser, Claims, Error as ClientError, Jwks, ProofVerification,
     TokenError, ValidProof, VerifyOptions,
 };
 use tokio::sync::{Mutex, RwLock};
@@ -260,30 +261,12 @@ impl AccountsGateway {
         key: &str,
         by_id: bool,
     ) -> Result<Option<AccountSummary>, AccountsError> {
-        {
-            let mut state = self.inner.lookups.lock().await;
-            let now = Instant::now();
-            if state
-                .failures
-                .get(key)
-                .is_some_and(|failed_at| now.duration_since(*failed_at) < LOOKUP_FAILURE_BACKOFF)
-            {
-                return Err(AccountsError::Unavailable(format!(
-                    "the last lookup of {key} failed less than a minute ago"
-                )));
-            }
-            while state
-                .window
-                .front()
-                .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
-            {
-                state.window.pop_front();
-            }
-            if state.window.len() >= LOOKUP_BUDGET_PER_MINUTE {
-                return Err(AccountsError::RateLimited);
-            }
-            state.window.push_back(now);
-        }
+        let budget_key = if by_id {
+            format!("id:{key}")
+        } else {
+            format!("uuid:{key}")
+        };
+        self.admit(&budget_key).await?;
         let app = self
             .inner
             .client
@@ -296,15 +279,67 @@ impl AccountsGateway {
         match result {
             Ok(summary) => Ok(Some(summary)),
             Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => {
-                let mut state = self.inner.lookups.lock().await;
-                bound(&mut state.failures, |failed_at| {
-                    failed_at.elapsed() < LOOKUP_FAILURE_BACKOFF
-                });
-                state.failures.insert(key.to_owned(), Instant::now());
-                Err(unavailable(&error))
-            }
+            Err(error) => Err(self.failed(budget_key, &error).await),
         }
+    }
+
+    /// Reads one account of Remind's user base (`GET /v1/apps/remind/users/{uuid}`):
+    /// what the account shares with Remind by signing in to it, such as its
+    /// display name and photo, which a lookup never shows. `None` when the
+    /// account never signed in to Remind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountsError::RateLimited`] or [`AccountsError::Unavailable`].
+    pub async fn member(&self, uuid: &str) -> Result<Option<AppUser>, AccountsError> {
+        let budget_key = format!("member:{uuid}");
+        self.admit(&budget_key).await?;
+        let app = self
+            .inner
+            .client
+            .as_app(&self.inner.app_id, self.inner.app_secret.expose_secret());
+        match app.user(uuid).await {
+            Ok(user) => Ok(Some(user)),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(self.failed(budget_key, &error).await),
+        }
+    }
+
+    /// Admits one read under Remind's per-minute budget, unless the same read
+    /// failed less than a minute ago.
+    async fn admit(&self, key: &str) -> Result<(), AccountsError> {
+        let mut state = self.inner.lookups.lock().await;
+        let now = Instant::now();
+        if state
+            .failures
+            .get(key)
+            .is_some_and(|failed_at| now.duration_since(*failed_at) < LOOKUP_FAILURE_BACKOFF)
+        {
+            return Err(AccountsError::Unavailable(format!(
+                "the last read of {key} failed less than a minute ago"
+            )));
+        }
+        while state
+            .window
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+        {
+            state.window.pop_front();
+        }
+        if state.window.len() >= LOOKUP_BUDGET_PER_MINUTE {
+            return Err(AccountsError::RateLimited);
+        }
+        state.window.push_back(now);
+        Ok(())
+    }
+
+    async fn failed(&self, key: String, error: &ClientError) -> AccountsError {
+        let mut state = self.inner.lookups.lock().await;
+        bound(&mut state.failures, |failed_at| {
+            failed_at.elapsed() < LOOKUP_FAILURE_BACKOFF
+        });
+        state.failures.insert(key, Instant::now());
+        unavailable(error)
     }
 
     /// The cached JWKS. `unknown_key` forces a refetch, at most once every 30

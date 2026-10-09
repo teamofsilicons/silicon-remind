@@ -177,7 +177,9 @@ impl Harness {
         id: &str,
         custodian: Option<(&str, &str)>,
     ) {
-        let mut summary = json!({"uuid": uuid, "kind": kind.as_str(), "id": id, "display_name": id, "pfp_url": "", "status": "active"});
+        // Like the real lookup: never a display name or photo.
+        let mut summary =
+            json!({"uuid": uuid, "kind": kind.as_str(), "id": id, "status": "active"});
         if let Some((custodian_uuid, custodian_id)) = custodian {
             summary["custodian"] = json!({"uuid": custodian_uuid, "id": custodian_id});
         }
@@ -224,6 +226,23 @@ impl Harness {
                 .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&bytes)}))
         };
         Ok((status, value))
+    }
+}
+
+impl Harness {
+    /// Makes Silicon Accounts answer a user base read for a member of Remind.
+    pub(super) async fn member(&self, uuid: &str, kind: ActorKind, id: &str, display_name: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/apps/remind/users/{uuid}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "membership_id": format!("remind:{uuid}"), "uuid": uuid, "kind": kind.as_str(),
+                "id": id, "display_name": display_name, "pfp_url": "https://example.test/pfp.png",
+                "status": "active", "account_status": "active", "source": "signin",
+                "granted_scopes": ["profile"], "external_id": null,
+                "first_signed_in_at": null, "last_signed_in_at": null
+            })))
+            .mount(&self.accounts)
+            .await;
     }
 }
 

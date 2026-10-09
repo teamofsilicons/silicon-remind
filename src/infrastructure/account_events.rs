@@ -14,7 +14,7 @@ use silicon_accounts_client::{WebhookEvent, WebhookPayload};
 use uuid::Uuid;
 
 use super::{
-    identity::{IdentityStore, apply_summary},
+    identity::{IdentityStore, Reread},
     postgres::{
         ActorType, AuditContext, NewInternalEvent, OwnerCleanup, append_audit, cleanup_owner_data,
         insert_internal_event_receipt, mark_internal_event_processed, validate_internal_event,
@@ -85,17 +85,18 @@ pub async fn apply(
     validate_internal_event(&receipt)?;
     let occurred_at = occurred_at(event);
 
-    // Work outside the transaction: an authoritative re-read for data events,
+    // Work outside the transaction: an authoritative re-read for data events
+    // (events can arrive out of order; what Silicon Accounts shows now cannot),
     // and retiring a deleted account's test environments (idempotent; done
     // first so a failure makes Silicon Accounts retry the whole event).
-    let summary = match (&event.payload, subject) {
+    let reread = match (&event.payload, subject) {
         (
             WebhookPayload::AccountIdChanged(_)
             | WebhookPayload::AccountUpdated(_)
             | WebhookPayload::CustodianChanged(_),
             Some(uuid),
-        ) => identity.gateway().lookup(uuid).await.ok().flatten(),
-        _ => None,
+        ) => identity.reread(uuid).await,
+        _ => Reread::default(),
     };
     if let (WebhookPayload::AccountDeleted(_), Some(uuid), Some(tests)) =
         (&event.payload, subject, tests)
@@ -117,7 +118,7 @@ pub async fn apply(
         &mut transaction,
         event,
         subject,
-        summary.is_some(),
+        &reread,
         occurred_at,
         &audit,
     )
@@ -140,9 +141,7 @@ pub async fn apply(
     transaction.commit().await?;
     // The authoritative re-read is written after the receipt so a duplicate
     // delivery never repeats it; it is an idempotent upsert.
-    if let Some(summary) = summary {
-        apply_summary(identity.pool(), &summary).await?;
-    }
+    identity.store_reread(&reread).await?;
     Ok(outcome)
 }
 
@@ -153,7 +152,7 @@ async fn apply_payload(
     transaction: &mut Tx<'_>,
     event: &WebhookEvent,
     subject: Option<&str>,
-    looked_up: bool,
+    reread: &Reread,
     occurred_at: DateTime<Utc>,
     audit: &AuditContext,
 ) -> Result<EventOutcome, AppError> {
@@ -167,11 +166,11 @@ async fn apply_payload(
         return Ok(EventOutcome::Ignored);
     };
     match &event.payload {
-        // An authoritative lookup is written after commit; nothing else to do here.
-        WebhookPayload::AccountIdChanged(_)
-        | WebhookPayload::AccountUpdated(_)
-        | WebhookPayload::CustodianChanged(_)
-            if looked_up => {}
+        // The re-read is written after commit: the lookup settles the id and
+        // custodian, the user base read the display name and photo.
+        WebhookPayload::AccountIdChanged(_) | WebhookPayload::CustodianChanged(_)
+            if reread.summary.is_some() => {}
+        WebhookPayload::AccountUpdated(_) if reread.member.is_some() => {}
         WebhookPayload::AccountIdChanged(data) => {
             ensure_row(transaction, uuid, data.kind.map(kind_name)).await?;
             sqlx::query(
