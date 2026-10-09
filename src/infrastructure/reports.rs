@@ -112,21 +112,14 @@ mod tests {
 #[cfg(test)]
 mod delivery_tests {
     use super::*;
-    use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
-    use testcontainers_modules::postgres::Postgres;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
     };
     #[tokio::test]
     async fn retries_real_queue_but_never_sends_simulated_reports() -> anyhow::Result<()> {
-        let container = Postgres::default().with_tag("17-alpine").start().await?;
-        let pool = PgPool::connect(&format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        ))
-        .await?;
+        let container = crate::test_support::TestPostgres::start().await?;
+        let pool = PgPool::connect(&container.url).await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
         let id = Uuid::now_v7();
         for (report_id, status) in [(id, "queued"), (Uuid::now_v7(), "simulated")] {

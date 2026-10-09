@@ -521,19 +521,8 @@ mod tests {
 
     #[tokio::test]
     async fn removed_tombstones_resolve_canonical_and_retained_memberships() -> anyhow::Result<()> {
-        use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
-        let container = testcontainers_modules::postgres::Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await?;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&format!(
-                "postgres://postgres:postgres@{}:{}/postgres",
-                container.get_host().await?,
-                container.get_host_port_ipv4(5432).await?,
-            ))
-            .await?;
+        let container = crate::test_support::TestPostgres::start().await?;
+        let pool = container.pool(1).await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
         let actor = uuid::Uuid::now_v7();
         let member = uuid::Uuid::now_v7();

@@ -143,17 +143,10 @@ impl Recorder {
 #[cfg(test)]
 mod isolation_tests {
     use super::*;
-    use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
-    use testcontainers_modules::postgres::Postgres;
     #[tokio::test]
     async fn sandbox_events_are_local_and_opt_out_writes_nothing() -> anyhow::Result<()> {
-        let container = Postgres::default().with_tag("17-alpine").start().await?;
-        let pool = sqlx::PgPool::connect(&format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        ))
-        .await?;
+        let container = crate::test_support::TestPostgres::start().await?;
+        let pool = sqlx::PgPool::connect(&container.url).await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
         let mut recorder = Recorder {
             enabled: true,

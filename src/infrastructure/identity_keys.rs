@@ -22,19 +22,13 @@ pub(crate) async fn resolve(
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
-    use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
-    use testcontainers_modules::postgres::Postgres;
 
     static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
     #[tokio::test]
     async fn legacy_keys_are_preserved_and_new_bindings_are_isolated() -> anyhow::Result<()> {
-        let container = Postgres::default().with_tag("17-alpine").start().await?;
-        let url = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        );
+        let container = crate::test_support::TestPostgres::start().await?;
+        let url = container.url.clone();
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)

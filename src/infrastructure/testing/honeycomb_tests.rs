@@ -2,15 +2,13 @@ use super::honeycomb::Operation;
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
-use testcontainers::{ContainerAsync, ImageExt as _, runners::AsyncRunner as _};
-use testcontainers_modules::postgres::Postgres as PostgresImage;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{body_json, header, method, path},
 };
 
 struct Fixture {
-    _container: ContainerAsync<PostgresImage>,
+    _container: crate::test_support::TestPostgres,
     tests: TestEnvironments,
     server: MockServer,
     secret: SecretString,
@@ -19,15 +17,8 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> anyhow::Result<Self> {
-        let container = PostgresImage::default()
-            .with_tag("17-alpine")
-            .start()
-            .await?;
-        let url = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        );
+        let container = crate::test_support::TestPostgres::start().await?;
+        let url = container.url.clone();
         let database = DatabaseSettings {
             url: SecretString::from(url.clone()),
             max_connections: 10.try_into()?,

@@ -1,8 +1,6 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
-use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
-use testcontainers_modules::postgres::Postgres as PostgresImage;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -14,15 +12,8 @@ use wiremock::{
     reason = "One ordered integration scenario verifies cleanup and revocation of the same sandbox"
 )]
 async fn discovery_isolated_cleanup_revocation_and_worker_admission() -> anyhow::Result<()> {
-    let container = PostgresImage::default()
-        .with_tag("17-alpine")
-        .start()
-        .await?;
-    let url = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await?,
-        container.get_host_port_ipv4(5432).await?
-    );
+    let container = crate::test_support::TestPostgres::start().await?;
+    let url = container.url.clone();
     let database = DatabaseSettings {
         url: SecretString::from(url.clone()),
         max_connections: 10.try_into()?,
@@ -152,21 +143,12 @@ async fn discovery_isolated_cleanup_revocation_and_worker_admission() -> anyhow:
 )]
 async fn idle_worker_skips_iam_but_due_and_retention_keep_fresh_admission() -> anyhow::Result<()> {
     let container = if std::env::var_os("REMIND_WORKER_TEST_DATABASE_URL").is_none() {
-        Some(
-            PostgresImage::default()
-                .with_tag("17-alpine")
-                .start()
-                .await?,
-        )
+        Some(crate::test_support::TestPostgres::start().await?)
     } else {
         None
     };
     let url = match &container {
-        Some(container) => format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        ),
+        Some(container) => container.url.clone(),
         None => std::env::var("REMIND_WORKER_TEST_DATABASE_URL")?,
     };
     let database = DatabaseSettings {

@@ -4,8 +4,6 @@ use chrono::{DateTime, Duration, SubsecRound as _, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use testcontainers::{ContainerAsync, ImageExt as _, runners::AsyncRunner as _};
-use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 use crate::{
@@ -32,7 +30,7 @@ fn fixture_now() -> DateTime<Utc> {
 }
 
 struct TestDatabase {
-    _container: ContainerAsync<Postgres>,
+    _database: crate::test_support::TestPostgres,
     pool: PgPool,
     repository: PostgresRepository,
 }
@@ -1705,18 +1703,12 @@ async fn assert_maximum_identifier_binding(
 }
 
 async fn test_database() -> anyhow::Result<TestDatabase> {
-    let container = Postgres::default().with_tag("17-alpine").start().await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await?;
+    let database = crate::test_support::TestPostgres::start().await?;
+    let pool = database.pool(5).await?;
     migrate(&pool).await?;
     let repository = PostgresRepository::new(pool.clone());
     Ok(TestDatabase {
-        _container: container,
+        _database: database,
         pool,
         repository,
     })
