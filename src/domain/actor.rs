@@ -87,7 +87,12 @@ pub struct VisibleOwner {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
     /// A Silicon Accounts access token issued to Remind.
-    AccessToken,
+    AccessToken {
+        /// The scopes the account granted Remind (`scope` claim).
+        scopes: Vec<String>,
+        /// The sign-in (token family) the token belongs to (`fid` claim).
+        family: Option<String>,
+    },
     /// A User verification proof another app issued for this account.
     Proof {
         /// The app that issued the proof and is calling on the account's behalf.
@@ -144,7 +149,7 @@ impl Actor {
     /// Returns whether the request may change data (proofs only read).
     #[must_use]
     pub const fn can_write(&self) -> bool {
-        matches!(self.credential, Credential::AccessToken)
+        matches!(self.credential, Credential::AccessToken { .. })
     }
 
     /// Returns whether a storage key belongs to this account.
@@ -276,7 +281,10 @@ pub(crate) mod fixtures {
             own_keys: vec![key],
             visible,
             read: ReadScope::Owners(owners),
-            credential: Credential::AccessToken,
+            credential: Credential::AccessToken {
+                scopes: vec!["profile".to_owned()],
+                family: None,
+            },
         }
     }
 }

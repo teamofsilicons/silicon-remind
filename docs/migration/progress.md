@@ -94,6 +94,9 @@ plus the docs commit that adds this section.
 - Silicon Accounts lookups never carry display name or photo; read `GET /v1/apps/remind/users/{uuid}`.
 - A fired one-time reminder is `completed` and moves to the archived section; list with `section=archived`.
 - The test stub's lookup answers now match the real service (no profile fields).
+- `cargo deny --offline check licenses` fails only on the workspace's own `license = "Proprietary"` (unchanged from
+  baseline; deny.toml has no private-crate exemption, and CI does not run cargo-deny). Bans and sources pass, and
+  every third-party license, including `silicon-accounts-client`'s, is allowed.
 
 ### Blocked on (outside this app)
 

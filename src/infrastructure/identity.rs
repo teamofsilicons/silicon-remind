@@ -164,7 +164,14 @@ impl IdentityStore {
             .observe_token(&claims.sub, kind, &token_id, issued_at)
             .await?;
         let row = self.refresh_if_stale(row).await?;
-        self.actor_for(&row, Credential::AccessToken).await
+        self.actor_for(
+            &row,
+            Credential::AccessToken {
+                scopes: claims.scopes().into_iter().map(str::to_owned).collect(),
+                family: claims.fid.clone(),
+            },
+        )
+        .await
     }
 
     /// Resolves the account a valid User verification proof speaks for.

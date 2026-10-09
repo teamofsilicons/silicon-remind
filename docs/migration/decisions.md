@@ -173,6 +173,10 @@ but malformed, or naming an unreadable uuid: `400 webhook_body_invalid`. Each `e
   cannot be read, apply the event's own data guarded so a late event never undoes a newer one (id and custodian by
   occurrence time, profile by `account.version`).
 
+Remind holds no sessions, refresh tokens or proofs of its own (clients keep their refresh tokens), so a sign-out
+has nothing else to end. The actor of an access-token request records the token's scopes and sign-in family (`fid`)
+for later use; nothing depends on them yet.
+
 5.3 The production webhook must pick `custodian_change` (not a default pick) besides the defaults (`id_change`,
 `display_name_change`, `pfp_change`, `access_removed`, `account_deleted`), or use every update (`events: null`);
 see `cutover.md`.

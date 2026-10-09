@@ -17,7 +17,7 @@ use crate::{
 /// `GET /api/v2/auth/me`: who is calling, as Remind sees the account.
 pub async fn me(Extension(actor): Extension<Actor>) -> Response {
     let (credential, issuing_app) = match &actor.credential {
-        Credential::AccessToken => ("access_token", None),
+        Credential::AccessToken { .. } => ("access_token", None),
         Credential::Proof { issuing_app, .. } => ("proof", Some(issuing_app.clone())),
     };
     let visible_silicons = actor
