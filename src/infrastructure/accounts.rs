@@ -307,6 +307,9 @@ impl AccountsGateway {
         }
     }
 
+    /// The cached JWKS. `unknown_key` forces a refetch, at most once every 30
+    /// seconds (the cold fetch and hourly refreshes do not count), so a flood of
+    /// tokens with made-up key ids cannot hammer Silicon Accounts.
     async fn jwks(&self, unknown_key: bool) -> Result<Arc<Jwks>, AccountsError> {
         if !unknown_key
             && let Some(cached) = self.inner.jwks.read().await.as_ref()
@@ -314,16 +317,18 @@ impl AccountsGateway {
         {
             return Ok(cached.jwks.clone());
         }
-        let mut last_fetch = self.inner.jwks_fetch.lock().await;
+        let mut last_forced = self.inner.jwks_fetch.lock().await;
         if let Some(cached) = self.inner.jwks.read().await.as_ref() {
-            let refetched_recently =
-                last_fetch.is_some_and(|at| at.elapsed() < JWKS_REFETCH_INTERVAL);
+            let forced_recently =
+                last_forced.is_some_and(|at| at.elapsed() < JWKS_REFETCH_INTERVAL);
             let fresh = cached.fetched_at.elapsed() < JWKS_MAX_AGE;
-            if (unknown_key && refetched_recently) || (!unknown_key && fresh) {
+            if (unknown_key && forced_recently) || (!unknown_key && fresh) {
                 return Ok(cached.jwks.clone());
             }
         }
-        *last_fetch = Some(Instant::now());
+        if unknown_key {
+            *last_forced = Some(Instant::now());
+        }
         match self.inner.client.jwks().await {
             Ok(jwks) => {
                 let jwks = Arc::new(jwks);

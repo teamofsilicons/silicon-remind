@@ -33,6 +33,8 @@ pub mod contracts;
 pub mod handlers;
 pub mod middleware;
 pub mod models;
+#[cfg(test)]
+mod tests;
 
 /// Cloneable dependencies shared by HTTP handlers and middleware.
 #[derive(Clone, Debug)]

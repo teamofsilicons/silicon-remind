@@ -466,6 +466,37 @@ impl Settings {
     }
 }
 
+#[cfg(test)]
+impl Settings {
+    /// Settings for in-process tests: development mode, telemetry off, the
+    /// given Silicon Accounts origin and database.
+    pub(crate) fn for_tests(accounts_url: &str, database_url: &str) -> Result<Self, SettingsError> {
+        struct Values(BTreeMap<&'static str, String>);
+        impl ConfigSource for Values {
+            fn get(&self, name: &'static str) -> Option<String> {
+                self.0.get(name).cloned()
+            }
+        }
+        let key = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        Self::from_source(&Values(BTreeMap::from([
+            ("REMIND_DATABASE_URL", database_url.to_owned()),
+            ("ACCOUNTS_URL", accounts_url.to_owned()),
+            ("REMIND_APP_SECRET", "sa_app_remind_test_secret".to_owned()),
+            (
+                "REMIND_ACCOUNTS_WEBHOOK_SECRET",
+                crate::test_support::TEST_WEBHOOK_SECRET.to_owned(),
+            ),
+            (
+                "REMIND_PROOF_ISSUERS",
+                "remind.schedules.read=interface".to_owned(),
+            ),
+            ("REMIND_ENCRYPTION_CURRENT_VERSION", "1".to_owned()),
+            ("REMIND_ENCRYPTION_KEYRING", format!(r#"{{"1":"{key}"}}"#)),
+            ("REMIND_TELEMETRY_ENABLED", "false".to_owned()),
+        ])))
+    }
+}
+
 impl MigrationSettings {
     /// Loads the isolated migration settings from process environment.
     ///
