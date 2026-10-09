@@ -251,11 +251,90 @@ pub fn destination_field_associated_data(
     data
 }
 
+/// Associated data, version 2, for one destination column. It binds the
+/// ciphertext to its destination row and the owner's storage key, both
+/// immutable, and never to a public id that can change.
+#[must_use]
+pub fn destination_field_associated_data_v2(
+    destination_id: uuid::Uuid,
+    owner_key: uuid::Uuid,
+    field: &'static str,
+) -> Vec<u8> {
+    let mut data = b"remind-destination:v2".to_vec();
+    data.push(0);
+    data.extend_from_slice(destination_id.as_bytes());
+    data.push(0);
+    data.extend_from_slice(owner_key.as_bytes());
+    data.push(0);
+    data.extend_from_slice(field.as_bytes());
+    data
+}
+
+/// Associated data for a stored destination column of either version: version
+/// 1 (rows written before the move to Silicon Accounts) needs the row's frozen
+/// organization; version 2 the row id and owner key.
+///
+/// # Errors
+///
+/// Returns an error for an unknown version or a version 1 row without an organization.
+pub fn stored_destination_associated_data(
+    aad_version: i16,
+    org_id: Option<&str>,
+    silicon_id: &str,
+    destination_id: uuid::Uuid,
+    owner_key: uuid::Uuid,
+    field: &'static str,
+) -> anyhow::Result<Vec<u8>> {
+    match (aad_version, org_id) {
+        (1, Some(org_id)) => Ok(destination_field_associated_data(org_id, silicon_id, field)),
+        (2, _) => Ok(destination_field_associated_data_v2(
+            destination_id,
+            owner_key,
+            field,
+        )),
+        _ => anyhow::bail!("destination associated-data version {aad_version} is unusable"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use secrecy::{ExposeSecret as _, SecretBox, SecretString};
 
-    use super::{SecretCipher, destination_associated_data};
+    use super::{
+        SecretCipher, destination_associated_data, destination_field_associated_data_v2,
+        stored_destination_associated_data,
+    };
+
+    #[test]
+    fn version_two_binds_row_and_owner_key_and_version_one_is_unchanged() -> anyhow::Result<()> {
+        let id = uuid::Uuid::from_u128(1);
+        let owner = uuid::Uuid::from_u128(2);
+        let v2 = destination_field_associated_data_v2(id, owner, "endpoint_url");
+        assert_ne!(
+            v2,
+            destination_field_associated_data_v2(id, uuid::Uuid::from_u128(3), "endpoint_url")
+        );
+        assert_ne!(
+            v2,
+            destination_field_associated_data_v2(uuid::Uuid::from_u128(9), owner, "endpoint_url")
+        );
+        assert_ne!(
+            v2,
+            destination_field_associated_data_v2(id, owner, "signing_secret")
+        );
+        assert_eq!(
+            stored_destination_associated_data(2, None, "si:a", id, owner, "endpoint_url")?,
+            v2
+        );
+        assert_eq!(
+            stored_destination_associated_data(1, Some("tos"), "si:a", id, owner, "endpoint_url")?,
+            super::destination_field_associated_data("tos", "si:a", "endpoint_url")
+        );
+        assert!(
+            stored_destination_associated_data(1, None, "si:a", id, owner, "endpoint_url").is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn public_id_cutover_keeps_destination_ciphertext_readable() {

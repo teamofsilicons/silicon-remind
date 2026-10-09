@@ -1,11 +1,12 @@
-//! Versioned public and internal route handlers.
+//! Versioned public route handlers and the Silicon Accounts webhook receiver.
 
-pub mod auth;
+pub mod accounts;
+pub mod accounts_webhook;
 pub mod destination;
 pub mod health;
-pub mod internal;
 pub mod reports;
 pub mod schedules;
+pub mod sharing;
 pub(crate) mod telemetry;
 pub mod testing;
 
@@ -23,5 +24,14 @@ pub async fn method_not_allowed() -> Response {
     AppError::MethodNotAllowed.into_response()
 }
 
-/// Honeycomb service lifecycle endpoints.
-pub mod honeycomb;
+/// Maps a JSON body rejection: oversize bodies are 413, everything else 422.
+pub(crate) fn map_json_rejection(rejection: &axum::extract::rejection::JsonRejection) -> AppError {
+    if matches!(
+        rejection,
+        axum::extract::rejection::JsonRejection::BytesRejection(_)
+    ) {
+        AppError::PayloadTooLarge
+    } else {
+        AppError::Validation
+    }
+}

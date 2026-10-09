@@ -1,11 +1,14 @@
-//! Test environment control and mandatory request-plane selection.
+//! Test environments: management routes and the key-selected request plane.
+//!
+//! `X-Remind-Test-Key` selects an environment before authentication runs. The
+//! request then authenticates with the caller's real Silicon Accounts token and
+//! reads and writes that environment's isolated data instead of production.
 use crate::{
     api::ApiState,
-    domain::Actor,
+    domain::{AccountRef, Actor, Relation},
     error::AppError,
-    infrastructure::{
-        iam::IamClient,
-        testing::{CreateTestEnvironment, TestEnvironment, TestEnvironments},
+    infrastructure::testing::{
+        CreateTestEnvironment, EnvironmentAccess, TestEnvironment, TestEnvironments,
     },
 };
 use axum::{
@@ -20,14 +23,13 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Isolated runtime dependencies attached only after validating a root key.
+/// Isolated data access attached after a valid key admitted the request.
 #[derive(Clone)]
 pub(crate) struct EnvironmentContext {
     pub pool: PgPool,
-    pub iam: IamClient,
 }
 
-/// Selects a test context before authentication or any handler runs.
+/// Selects a test environment before authentication or any handler runs.
 pub async fn select(State(state): State<ApiState>, mut request: Request, next: Next) -> Response {
     let mut headers = request.headers().get_all("x-remind-test-key").iter();
     let key = match (headers.next(), headers.next()) {
@@ -39,42 +41,28 @@ pub async fn select(State(state): State<ApiState>, mut request: Request, next: N
         _ => return AppError::Unauthenticated.into_response(),
     };
     let path = request.uri().path();
-    // Environment management is a production-org operation, never a sandbox
-    // identity's route to production. Internal provisioning is not public SDK API.
-    if !(path.starts_with("/api/v1/") || path == "/api/versions")
-        || path.starts_with("/api/v1/test-environments")
+    // Managing environments is a production action, never a sandbox's.
+    if !(path.starts_with("/api/v2/") || path == "/api/versions")
+        || path.starts_with("/api/v2/test-environments")
     {
-        return AppError::Forbidden.into_response();
+        return AppError::forbidden(
+            "test_key_not_allowed_here",
+            "X-Remind-Test-Key selects a test environment for /api/v2 data routes; manage environments without it.",
+        )
+        .into_response();
     }
     let tests = match manager(&state) {
         Ok(tests) => tests,
         Err(error) => return error.into_response(),
     };
     let cleaning =
-        path == "/api/v1/testing-environment/cleanings" && request.method() == http::Method::POST;
-    let configuring =
-        path == "/api/v1/testing-environment/iam" && request.method() == http::Method::PUT;
-    let current = path == "/api/v1/testing-environment" && request.method() == http::Method::GET;
-    let mut lease = match tests.enter(&key, cleaning || configuring).await {
+        path == "/api/v2/testing-environment/cleanings" && request.method() == http::Method::POST;
+    let current = path == "/api/v2/testing-environment" && request.method() == http::Method::GET;
+    let mut lease = match tests.enter(&key, cleaning).await {
         Ok(lease) => lease,
         Err(error) => return error.into_response(),
     };
-    let response = if configuring {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Configuration {
-            iam_app_secret: SecretString,
-        }
-        use axum::extract::FromRequest as _;
-        let Json(input) = match Json::<Configuration>::from_request(request, &state).await {
-            Ok(input) => input,
-            Err(error) => return super::internal::map_json_rejection(&error).into_response(),
-        };
-        match tests.configure_iam(&mut lease, input.iam_app_secret).await {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(error) => return error.into_response(),
-        }
-    } else if cleaning {
+    let response = if cleaning {
         match tests.clean(&mut lease).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(error) => return error.into_response(),
@@ -82,12 +70,8 @@ pub async fn select(State(state): State<ApiState>, mut request: Request, next: N
     } else if current {
         Json(&lease.environment).into_response()
     } else {
-        let Some(iam) = lease.iam.clone() else {
-            return AppError::conflict("test_iam_application_not_configured").into_response();
-        };
         request.extensions_mut().insert(EnvironmentContext {
             pool: lease.pool.clone(),
-            iam,
         });
         next.run(request).await
     };
@@ -98,23 +82,25 @@ pub async fn select(State(state): State<ApiState>, mut request: Request, next: N
     no_store(response)
 }
 
-/// Clear production-mode error for commands which require an environment key.
+/// Answers routes that exist only inside a test environment.
 pub async fn test_only() -> Response {
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":{"code":"test_environment_required","message":"This action is only possible for a test environment. Use remind --test <test_id> <command>.","request_id":crate::request_context::current_request_id()}}))).into_response()
 }
 
-/// Creates an empty sandbox owned by the authenticated production organization.
+/// `POST /api/v2/test-environments`: creates an empty environment owned by the caller.
 ///
 /// # Errors
 ///
-/// Returns validation, IAM test-binding, duplicate-name, or storage failures.
+/// Returns validation, duplicate-name, or storage failures.
 pub async fn create(
     State(state): State<ApiState>,
     Extension(actor): Extension<Actor>,
     body: Result<Json<CreateTestEnvironment>, rejection::JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Json(input) = body.map_err(|error| super::internal::map_json_rejection(&error))?;
-    let (environment, key) = manager(&state)?.create(&actor, input).await?;
+    crate::application::schedules::require_access_token(&actor)?;
+    let Json(input) = body.map_err(|error| super::map_json_rejection(&error))?;
+    let (mut environment, key) = manager(&state)?.create(&actor.uuid, input).await?;
+    environment.owner = Some(actor.account());
     Ok(no_store(
         (
             StatusCode::CREATED,
@@ -124,8 +110,9 @@ pub async fn create(
     ))
 }
 
-/// Listing input; UUID cursor and bounded page size.
+/// Listing input: UUID cursor and bounded page size.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     #[serde(default)]
     include_deleted: bool,
@@ -133,7 +120,7 @@ pub struct ListQuery {
     limit: Option<i64>,
 }
 
-/// Lists the organization's test environments.
+/// `GET /api/v2/test-environments`: environments of the caller's circle.
 ///
 /// # Errors
 ///
@@ -145,9 +132,12 @@ pub async fn list(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let Query(query) = query.map_err(|_| AppError::Validation)?;
     let limit = query.limit.unwrap_or(50);
-    let items = manager(&state)?
-        .list(&actor, query.include_deleted, query.after, limit)
+    let mut items = manager(&state)?
+        .list(&access(&actor), query.include_deleted, query.after, limit)
         .await?;
+    for item in &mut items {
+        item.owner = owner_ref(&state, &actor, item).await?;
+    }
     let next_cursor = if items.len() == usize::try_from(limit).unwrap_or(0) {
         items.last().map(|row| row.id)
     } else {
@@ -158,78 +148,124 @@ pub async fn list(
     ))
 }
 
-/// Reads an environment including recoverable metadata.
+/// `GET /api/v2/test-environments/{id}`: one environment, including recoverable ones.
 ///
 /// # Errors
 ///
-/// Returns not found outside the owning organization or after the recovery deadline.
+/// Returns not found outside the caller's circle or after the recovery deadline.
 pub async fn get(
     State(state): State<ApiState>,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<Json<TestEnvironment>, AppError> {
     let Path(id) = path.map_err(|_| AppError::Validation)?;
-    Ok(Json(manager(&state)?.get(&actor, id).await?))
+    let mut environment = manager(&state)?.get(&access(&actor), id).await?;
+    environment.owner = owner_ref(&state, &actor, &environment).await?;
+    Ok(Json(environment))
 }
 
-/// Retrieves the active key for its creator or an org administrator.
+/// `GET /api/v2/test-environments/{id}/key`: the active key (the owner's circle).
 ///
 /// # Errors
 ///
-/// Returns forbidden unless creator or org administrator, or not found for inactive environments.
+/// Returns not found for invisible or retired environments.
 pub async fn key(
     State(state): State<ApiState>,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<Response, AppError> {
+    crate::application::schedules::require_access_token(&actor)?;
     let Path(id) = path.map_err(|_| AppError::Validation)?;
-    let key = manager(&state)?.key(&actor, id).await?;
+    let key = manager(&state)?.key(&access(&actor), id).await?;
     Ok(key_response(id, &key))
 }
 
-/// Rotates the active environment root key.
+/// `POST /api/v2/test-environments/{id}/key-rotations`: replaces the key.
 ///
 /// # Errors
 ///
-/// Returns authorization or lifecycle conflict errors, or a storage failure.
+/// Returns authorization or lifecycle errors, or a storage failure.
 pub async fn rotate(
     State(state): State<ApiState>,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<Response, AppError> {
+    crate::application::schedules::require_access_token(&actor)?;
     let Path(id) = path.map_err(|_| AppError::Validation)?;
-    let key = manager(&state)?.rotate(&actor, id, false).await?;
+    let key = manager(&state)?.rotate(&access(&actor), id, false).await?;
     Ok(key_response(id, &key))
 }
 
-/// Restores an environment within 30 days with a new root key.
+/// `POST /api/v2/test-environments/{id}/restorations`: restores a retired
+/// environment within 30 days, with a new key.
 ///
 /// # Errors
 ///
-/// Returns not found after the recovery deadline, forbidden, or an active-name conflict.
+/// Returns not found after the recovery deadline, forbidden, or a name conflict.
 pub async fn restore(
     State(state): State<ApiState>,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<Response, AppError> {
+    crate::application::schedules::require_access_token(&actor)?;
     let Path(id) = path.map_err(|_| AppError::Validation)?;
-    let key = manager(&state)?.rotate(&actor, id, true).await?;
+    let key = manager(&state)?.rotate(&access(&actor), id, true).await?;
     Ok(key_response(id, &key))
 }
 
-/// Revokes access immediately and starts the 30-day recovery window.
+/// `DELETE /api/v2/test-environments/{id}`: retires the environment now and
+/// starts its 30-day recovery window.
 ///
 /// # Errors
 ///
-/// Returns forbidden for unauthorized members, not found, or a storage failure.
+/// Returns forbidden for non-managers, not found, or a storage failure.
 pub async fn delete(
     State(state): State<ApiState>,
     Extension(actor): Extension<Actor>,
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<StatusCode, AppError> {
+    crate::application::schedules::require_access_token(&actor)?;
     let Path(id) = path.map_err(|_| AppError::Validation)?;
-    manager(&state)?.delete(&actor, id).await?;
+    manager(&state)?.delete(&access(&actor), id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What the caller may do with environments: its circle reads them, and the
+/// caller manages its own and (for a Carbon) those of the Silicons it looks after.
+pub(crate) fn access(actor: &Actor) -> EnvironmentAccess {
+    let mut managers = vec![actor.uuid.clone()];
+    let mut readers = vec![actor.uuid.clone()];
+    for owner in &actor.visible {
+        match owner.relation {
+            Relation::Custodian => {
+                managers.push(owner.account.uuid.clone());
+                readers.push(owner.account.uuid.clone());
+            }
+            Relation::Sibling => readers.push(owner.account.uuid.clone()),
+            Relation::Own | Relation::Shared => {}
+        }
+    }
+    if let Some(custodian) = &actor.custodian {
+        readers.push(custodian.uuid.clone());
+    }
+    EnvironmentAccess { readers, managers }
+}
+
+async fn owner_ref(
+    state: &ApiState,
+    actor: &Actor,
+    environment: &TestEnvironment,
+) -> Result<Option<AccountRef>, AppError> {
+    let Some(owner) = environment.owner_uuid.as_deref() else {
+        return Ok(None);
+    };
+    if owner == actor.uuid {
+        return Ok(Some(actor.account()));
+    }
+    if let Some(visible) = actor.visible_by_uuid(owner) {
+        return Ok(Some(visible.account.clone()));
+    }
+    Ok(state.identity.find(owner).await?.map(|row| row.reference()))
 }
 
 fn manager(state: &ApiState) -> Result<&TestEnvironments, AppError> {
@@ -237,11 +273,13 @@ fn manager(state: &ApiState) -> Result<&TestEnvironments, AppError> {
         dependency: "testing_database",
     })
 }
+
 fn key_response(id: Uuid, key: &SecretString) -> Response {
     no_store(
         Json(serde_json::json!({"environment_id":id,"key":key.expose_secret()})).into_response(),
     )
 }
+
 fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()

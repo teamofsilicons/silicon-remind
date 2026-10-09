@@ -37,6 +37,13 @@ const REQUIRED_SCHEMA_FIELDS: &[(&str, &str)] = &[
     ("idempotency_records", "response_body"),
     ("internal_event_receipts", "payload_hash"),
     ("audit_records", "action"),
+    ("accounts", "uuid"),
+    ("accounts", "revoked_before"),
+    ("account_keys", "storage_id"),
+    ("identity_links", "iam_principal_id"),
+    ("reminder_viewers", "viewer_uuid"),
+    ("silicon_allowances", "allowed_uuid"),
+    ("hook_destinations", "aad_version"),
 ];
 
 /// PostgreSQL dependency or schema-readiness failure.

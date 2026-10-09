@@ -107,3 +107,43 @@ impl Drop for TestPostgres {
         .join();
     }
 }
+
+/// Accounts settings for tests pointing at `url` (a local stub or the local stack).
+///
+/// # Errors
+///
+/// Returns an error for an unparsable URL.
+pub(crate) fn accounts_settings(url: &str) -> anyhow::Result<crate::config::AccountsSettings> {
+    let url: url::Url = url.parse()?;
+    Ok(crate::config::AccountsSettings {
+        url: url.clone(),
+        api_url: url,
+        app_id: "remind".to_owned(),
+        app_secret: secrecy::SecretString::from("sa_app_remind_test_secret"),
+        webhook_secrets: vec![secrecy::SecretString::from(TEST_WEBHOOK_SECRET)],
+        request_timeout: std::time::Duration::from_secs(2),
+        lookup_ttl: std::time::Duration::from_mins(15),
+        proof_issuers: crate::config::ProofIssuers::parse("remind.schedules.read=interface")
+            .map_err(|reason| anyhow::anyhow!(reason))?,
+    })
+}
+
+/// Webhook secret used by [`accounts_settings`].
+pub(crate) const TEST_WEBHOOK_SECRET: &str = "whsec_remind_test_webhook_secret";
+
+/// An identity store over `pool` whose Silicon Accounts calls go to `url`.
+///
+/// # Errors
+///
+/// Returns an error for an unparsable URL.
+pub(crate) fn identity_store(
+    pool: sqlx::PgPool,
+    url: &str,
+) -> anyhow::Result<crate::infrastructure::identity::IdentityStore> {
+    let settings = accounts_settings(url)?;
+    Ok(crate::infrastructure::identity::IdentityStore::new(
+        pool,
+        crate::infrastructure::accounts::AccountsGateway::new(&settings)?,
+        settings.lookup_ttl,
+    ))
+}

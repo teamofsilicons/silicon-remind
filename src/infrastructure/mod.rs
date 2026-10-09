@@ -1,11 +1,12 @@
 //! PostgreSQL and external-service adapters.
 
+pub mod account_events;
+pub mod accounts;
 pub mod crypto;
-pub mod iam;
-pub(crate) mod iam_webhook;
-pub(crate) mod identity_keys;
+pub mod identity;
 pub mod postgres;
 pub(crate) mod reports;
+pub mod sharing;
 pub mod webhook;
 
 pub mod testing;

@@ -14,10 +14,14 @@ pub use connection::{HealthCheckError, connect, health_check, migrate};
 pub use error::RepositoryError;
 pub use models::{
     ActorType, AuditContext, BulkScheduleStatusReplacement, CreateSchedule, DueMaterialization,
-    ExecutionCursor, ExecutionRow, HookDestinationRewrap, HookDestinationRow, IamLifecycleOutcome,
-    IdempotencyContext, IdempotentMutation, InternalEventReceiptRow, ListSchedules,
-    MutableScheduleStatus, NewHookDestination, NewInternalEvent, Page, RevokedResourceCleanup,
-    ScheduleCursor, SchedulePurgeResult, ScheduleReplacement, ScheduleRow, ScheduleStatusChange,
-    SiliconIdentityRow, StoredIdempotentResponse,
+    ExecutionCursor, ExecutionRow, HookDestinationRewrap, HookDestinationRow, IdempotencyContext,
+    IdempotentMutation, InternalEventReceiptRow, ListSchedules, MutableScheduleStatus,
+    NewHookDestination, NewInternalEvent, Page, RevokedResourceCleanup, ScheduleCursor,
+    SchedulePurgeResult, ScheduleReplacement, ScheduleResponse, ScheduleRow, ScheduleStatusChange,
+    StoredIdempotentResponse,
 };
 pub use repository::PostgresRepository;
+pub(crate) use repository::{
+    OwnerCleanup, append_audit, cleanup_owner_data, insert_internal_event_receipt,
+    mark_internal_event_processed, validate_internal_event,
+};

@@ -1,15 +1,16 @@
-//! Local work hints avoid spending IAM authority checks on idle worker polls.
-use super::{AppError, DateTime, EnvironmentLease, TestEnvironments, Utc, Uuid, lock, schema};
+//! A cheap local hint that keeps the worker out of idle test environments.
+use super::{AppError, EnvironmentLease, MANAGED, TestEnvironments, Uuid, lock, schema};
+use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
 
 impl TestEnvironments {
-    /// Skips idle worlds without caching an authorization decision.
+    /// Skips environments with no due or maintenance work.
     ///
-    /// The preliminary query cannot lease work or authorize delivery. A positive
-    /// hint always goes through the existing fresh IAM discovery and lifecycle
-    /// admission; clean/revocation between these steps remains fenced there.
+    /// The hint cannot lease or deliver anything; a positive hint goes through
+    /// the normal admission, whose lifecycle lock fences clean and retirement.
     ///
     /// # Errors
-    /// Returns database errors or the existing live admission failure.
+    /// Returns database errors.
     pub async fn enter_worker_if_pending(
         &self,
         id: Uuid,
@@ -18,17 +19,18 @@ impl TestEnvironments {
     ) -> Result<Option<EnvironmentLease>, AppError> {
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, false).await?;
-        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days'))")
-            .bind(id).fetch_one(&mut *tx).await?;
-        if !active
-            || Self::honeycomb_fence(&mut tx, id)
-                .await?
-                .is_some_and(|fence| fence.state != "active")
-        {
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND {MANAGED} AND last_activity_at > clock_timestamp() - interval '15 days')"
+        );
+        let active: bool = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !active {
             return Ok(None);
         }
         // Only this UUID-derived schema is visible. The shared lifecycle lock
-        // prevents a clean/drop while inspecting its local candidate rows.
+        // prevents a clean or drop while its candidate rows are inspected.
         sqlx::query("SELECT set_config('search_path', $1, true)")
             .bind(format!("{}, pg_catalog", schema(id)))
             .execute(&mut *tx)

@@ -8,17 +8,13 @@ use axum::{
     middleware::Next,
     response::{IntoResponse as _, Response},
 };
-use chrono::Utc;
 use secrecy::{ExposeSecret as _, SecretString};
-use sha2::{Digest as _, Sha256};
-use subtle::ConstantTimeEq as _;
 
 use crate::{
-    api::ApiState, domain::is_valid_iam_label, error::AppError, infrastructure::iam::IamError,
-    metrics::HttpLabels, request_context as correlation,
+    api::ApiState, config::SCHEDULES_READ_SCOPE, domain::ReadScope, error::AppError,
+    infrastructure::accounts::AccountsError, metrics::HttpLabels, request_context as correlation,
 };
 
-const ORG_HEADER: &str = "x-org-id";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
 pub(crate) fn panic_response(_panic: Box<dyn Any + Send + 'static>) -> Response {
@@ -93,67 +89,207 @@ pub async fn enforce_timeout(
     }
 }
 
-/// Introspects the public bearer token and installs a strict actor extension.
+/// Routes that accept `Authorization: Proof sap_…` (GET only, scope
+/// `remind.schedules.read`). Everything else needs an access token.
+pub const PROOF_READ_ROUTES: &[&str] = &[
+    "/api/v2/schedules",
+    "/api/v2/schedules/{schedule_id}",
+    "/api/v2/schedules/{schedule_id}/executions",
+    "/api/v2/silicons",
+    "/api/v2/auth/me",
+];
+
+/// Routes where a revoked sign-in must be refused at once: Remind asks Silicon
+/// Accounts (introspection, cached up to 30 seconds) instead of trusting the
+/// token's signature alone.
+pub const INTROSPECTED_ROUTES: &[(&str, &str)] = &[
+    ("DELETE", "/api/v2/schedules/{schedule_id}"),
+    ("PUT", "/api/v2/webhook"),
+    ("DELETE", "/api/v2/webhook"),
+    ("POST", "/api/v2/webhooks"),
+    ("DELETE", "/api/v2/webhooks/{subscription_id}"),
+    ("POST", "/api/v2/viewers"),
+    ("DELETE", "/api/v2/viewers/{viewer}"),
+    ("POST", "/api/v2/allowed-accounts"),
+    ("DELETE", "/api/v2/allowed-accounts/{account}"),
+    ("GET", "/api/v2/test-environments/{id}/key"),
+    ("POST", "/api/v2/test-environments/{id}/key-rotations"),
+    ("POST", "/api/v2/test-environments/{id}/restorations"),
+    ("DELETE", "/api/v2/test-environments/{id}"),
+];
+
+/// The credential a request presented.
+#[derive(Debug)]
+pub(crate) enum Presented {
+    /// `Authorization: Bearer <Silicon Accounts access token>`.
+    Bearer(SecretString),
+    /// `Authorization: Proof <sap_… User verification proof>`.
+    Proof(SecretString),
+}
+
+/// Authenticates every API route and installs the [`Actor`].
 pub async fn authenticate(
     State(state): State<ApiState>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let state = state.scoped(request.extensions());
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|path| path.as_str().to_owned())
+        .unwrap_or_default();
+    let method = request.method().clone();
     let result = async {
-        let token = bearer_token(request.headers())?;
-        let org_id = unique_header(request.headers(), ORG_HEADER)
-            .filter(|value| is_valid_iam_label(value))
-            .ok_or(AppError::Validation)?;
-        let actor = state
-            .iam
-            .authenticate(&token, org_id, Utc::now(), state.repository.pool())
-            .await
-            .map_err(|error| map_iam_error(&error))?;
-        if let Some(organization_id) = actor.organization_iam_id {
-            let mut tx = state.repository.pool().begin().await?;
-            sqlx::query("INSERT INTO iam_organization_bindings(organization_id,org_id) VALUES ($1,$2) ON CONFLICT DO NOTHING")
-                .bind(organization_id).bind(&actor.org_id).execute(&mut *tx).await?;
-            let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM iam_organization_bindings WHERE organization_id=$1 AND org_id=$2)")
-                .bind(organization_id).bind(&actor.org_id).fetch_one(&mut *tx).await?;
-            if !matches { return Err(AppError::Unauthenticated); }
-            tx.commit().await?;
+        let mut actor = match presented_credential(request.headers())? {
+            Presented::Bearer(token) => {
+                let gateway = state.identity.gateway();
+                let claims = gateway
+                    .verify_access_token(token.expose_secret())
+                    .await
+                    .map_err(map_accounts_error)?;
+                if INTROSPECTED_ROUTES.contains(&(method.as_str(), route.as_str()))
+                    && !gateway
+                        .token_is_active(token.expose_secret())
+                        .await
+                        .map_err(map_accounts_error)?
+                {
+                    return Err(AppError::unauthenticated(
+                        "token_revoked",
+                        "Silicon Accounts reports this access token is no longer active (signed out or access removed). Sign in again.",
+                    ));
+                }
+                state.identity.resolve_bearer(&claims).await?
+            }
+            Presented::Proof(token) => {
+                if method != http::Method::GET || !PROOF_READ_ROUTES.contains(&route.as_str()) {
+                    return Err(AppError::unauthenticated(
+                        "proof_not_accepted",
+                        "Remind accepts proofs only for reading: GET /api/v2/schedules, /schedules/{id}, /schedules/{id}/executions, /silicons and /auth/me. Everything else needs the account's own access token.",
+                    ));
+                }
+                let proof = state
+                    .identity
+                    .gateway()
+                    .verify_proof(token.expose_secret())
+                    .await
+                    .map_err(map_accounts_error)?
+                    .ok_or_else(|| {
+                        AppError::unauthenticated(
+                            "proof_invalid",
+                            "The proof is not valid for Remind right now: it is unknown, expired, revoked, or was issued for another app.",
+                        )
+                    })?;
+                check_proof(&state, &proof)?;
+                state
+                    .identity
+                    .resolve_proof(&proof, proof.scopes.clone())
+                    .await?
+            }
+        };
+        // Whoever holds a test environment's key reads everything in it.
+        if request
+            .extensions()
+            .get::<super::handlers::testing::EnvironmentContext>()
+            .is_some()
+        {
+            actor.read = ReadScope::Everything;
         }
         request.extensions_mut().insert(actor);
         Ok::<Response, AppError>(next.run(request).await)
     }
     .await;
-
     result.unwrap_or_else(axum::response::IntoResponse::into_response)
 }
 
-/// Authenticates service-only endpoints using a constant-time bearer check.
-pub async fn authenticate_internal(
-    State(state): State<ApiState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let result = bearer_token(request.headers()).and_then(|provided| {
-        if secrets_equal(&provided, &state.internal_api_token) {
-            Ok(())
-        } else {
-            Err(AppError::Unauthenticated)
+/// Checks a valid proof against Remind's rules: a User verification proof
+/// for Remind, carrying a scope Remind honours, from an app allowed to send it.
+fn check_proof(
+    state: &ApiState,
+    proof: &silicon_accounts_client::ValidProof,
+) -> Result<(), AppError> {
+    if proof.kind != silicon_accounts_client::ProofKind::UserVerification || proof.user.is_none() {
+        return Err(AppError::forbidden(
+            "proof_kind_not_accepted",
+            "Remind accepts only User verification proofs, which act for one account.",
+        ));
+    }
+    if proof.receiving_app.app_id != state.identity.gateway().app_id() {
+        return Err(AppError::unauthenticated(
+            "proof_invalid",
+            "The proof was issued for another app.",
+        ));
+    }
+    if !proof
+        .scopes
+        .iter()
+        .any(|scope| scope == SCHEDULES_READ_SCOPE)
+    {
+        return Err(AppError::forbidden(
+            "proof_scope_missing",
+            format!("The proof does not carry the `{SCHEDULES_READ_SCOPE}` scope Remind requires."),
+        ));
+    }
+    let issuer = &proof.issuing_app.app_id;
+    if !state.proof_issuers.allows(SCHEDULES_READ_SCOPE, issuer) {
+        return Err(AppError::forbidden(
+            "proof_issuer_not_allowed",
+            format!(
+                "Remind does not accept `{SCHEDULES_READ_SCOPE}` proofs from `{issuer}`. The operator lists accepted apps in REMIND_PROOF_ISSUERS."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Maps a Silicon Accounts failure to the HTTP error the caller sees.
+pub(crate) fn map_accounts_error(error: AccountsError) -> AppError {
+    match error {
+        AccountsError::Rejected { code, message } => AppError::unauthenticated(code, message),
+        AccountsError::Unavailable(detail) => {
+            tracing::warn!(error.detail = %detail, "Silicon Accounts unavailable");
+            AppError::DependencyUnavailable {
+                dependency: "accounts",
+            }
         }
-    });
-    match result {
-        Ok(()) => next.run(request).await,
-        Err(error) => error.into_response(),
+        AccountsError::RateLimited => AppError::RateLimited {
+            retry_after_seconds: 60,
+        },
     }
 }
 
-pub(crate) fn bearer_token(headers: &http::HeaderMap) -> Result<SecretString, AppError> {
-    let value =
-        unique_header(headers, header::AUTHORIZATION.as_str()).ok_or(AppError::Unauthenticated)?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.is_empty() && !token.bytes().any(|byte| byte.is_ascii_whitespace()))
-        .ok_or(AppError::Unauthenticated)?;
-    Ok(SecretString::from(token))
+/// Reads the single `Authorization` header: `Bearer <token>` or `Proof <token>`.
+pub(crate) fn presented_credential(headers: &http::HeaderMap) -> Result<Presented, AppError> {
+    let value = unique_header(headers, header::AUTHORIZATION.as_str()).ok_or_else(|| {
+        AppError::unauthenticated(
+            "unauthenticated",
+            "Send `Authorization: Bearer <access token>` with a Silicon Accounts access token issued to Remind (sign in with `remind login`), or `Authorization: Proof <sap_…>` from an app allowed to read for an account.",
+        )
+    })?;
+    let (scheme, token) = value.split_once(' ').unwrap_or((value, ""));
+    if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(AppError::unauthenticated(
+            "unauthenticated",
+            "The Authorization header must be `Bearer <token>` or `Proof <token>` with exactly one token.",
+        ));
+    }
+    match scheme.to_ascii_lowercase().as_str() {
+        "bearer" if token.starts_with("sap_") => Err(AppError::unauthenticated(
+            "proof_as_bearer",
+            "That is a User verification proof; send it as `Authorization: Proof sap_…`.",
+        )),
+        "bearer" if token.starts_with("oat_") || token.starts_with("ort_") => {
+            Err(AppError::unauthenticated(
+                "iam_token_rejected",
+                "Remind no longer accepts Silicon IAM tokens. Sign in with Silicon Accounts (`remind login`) and send its access token.",
+            ))
+        }
+        "bearer" => Ok(Presented::Bearer(SecretString::from(token))),
+        "proof" => Ok(Presented::Proof(SecretString::from(token))),
+        _ => Err(AppError::unauthenticated(
+            "unauthenticated",
+            "Remind accepts the Bearer and Proof authorization schemes only.",
+        )),
+    }
 }
 
 fn unique_header<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
@@ -163,19 +299,6 @@ fn unique_header<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str
         return None;
     }
     value.to_str().ok()
-}
-
-fn map_iam_error(error: &IamError) -> AppError {
-    match error {
-        IamError::Unauthenticated => AppError::Unauthenticated,
-        IamError::Unavailable(_) => AppError::DependencyUnavailable { dependency: "iam" },
-    }
-}
-
-fn secrets_equal(provided: &SecretString, expected: &SecretString) -> bool {
-    let provided = Sha256::digest(provided.expose_secret().as_bytes());
-    let expected = Sha256::digest(expected.expose_secret().as_bytes());
-    bool::from(provided.as_slice().ct_eq(expected.as_slice()))
 }
 
 fn with_request_id(mut response: Response, request_id: &str) -> Response {
@@ -188,43 +311,49 @@ fn with_request_id(mut response: Response, request_id: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use http::{HeaderMap, HeaderValue, header};
-    use secrecy::SecretString;
 
-    use crate::domain::is_valid_iam_label;
+    use super::{Presented, presented_credential};
 
-    use super::{bearer_token, secrets_equal};
+    fn headers(values: &[&'static str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(header::AUTHORIZATION, HeaderValue::from_static(value));
+        }
+        headers
+    }
 
     #[test]
-    fn service_token_comparison_is_exact() {
-        let expected = SecretString::from("a sufficiently long service token");
-        assert!(secrets_equal(&expected, &expected));
-        assert!(!secrets_equal(
-            &SecretString::from("a sufficiently long service tokem"),
-            &expected
+    fn bearer_and_proof_schemes_are_recognised() {
+        assert!(matches!(
+            presented_credential(&headers(&["Bearer eyJ.a.b"])),
+            Ok(Presented::Bearer(_))
+        ));
+        assert!(matches!(
+            presented_credential(&headers(&["bearer eyJ.a.b"])),
+            Ok(Presented::Bearer(_))
+        ));
+        assert!(matches!(
+            presented_credential(&headers(&["Proof sap_abc"])),
+            Ok(Presented::Proof(_))
         ));
     }
 
     #[test]
-    fn organization_id_rejects_control_or_path_bytes() {
-        assert!(is_valid_iam_label("org_team-1"));
-        for value in ["ORGANIZATION", "org:team", "org/team", "org\nteam"] {
-            assert!(!is_valid_iam_label(value));
+    fn malformed_duplicate_and_legacy_credentials_are_refused_with_reasons() {
+        for (values, code) in [
+            (vec![], "unauthenticated"),
+            (vec!["Bearer first", "Bearer second"], "unauthenticated"),
+            (vec!["Bearer"], "unauthenticated"),
+            (vec!["Basic dXNlcjpwYXNz"], "unauthenticated"),
+            (vec!["Bearer sap_proof"], "proof_as_bearer"),
+            (vec!["Bearer oat_legacy"], "iam_token_rejected"),
+        ] {
+            let error = presented_credential(&headers(&values)).err();
+            assert_eq!(
+                error.map(|error| error.code()),
+                Some(code.into()),
+                "{values:?}"
+            );
         }
-        assert!(is_valid_iam_label(&"o".repeat(50)));
-        assert!(!is_valid_iam_label(&"o".repeat(51)));
-    }
-
-    #[test]
-    fn duplicate_authorization_headers_are_rejected() {
-        let mut headers = HeaderMap::new();
-        headers.append(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer first-token"),
-        );
-        headers.append(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer second-token"),
-        );
-        assert!(bearer_token(&headers).is_err());
     }
 }

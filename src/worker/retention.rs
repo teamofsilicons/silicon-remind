@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::infrastructure::{
-    crypto::{EncryptedSecret, SecretCipherKeyring, destination_field_associated_data},
+    crypto::{EncryptedSecret, SecretCipherKeyring, stored_destination_associated_data},
     postgres::{
         ActorType, AuditContext, HookDestinationRewrap, HookDestinationRow, PostgresRepository,
     },
@@ -87,9 +87,19 @@ fn reencrypt_destination(
     encryption: &SecretCipherKeyring,
     row: &HookDestinationRow,
 ) -> anyhow::Result<HookDestinationRewrap> {
-    let url_aad = destination_field_associated_data(&row.org_id, &row.silicon_id, "endpoint_url");
-    let secret_aad =
-        destination_field_associated_data(&row.org_id, &row.silicon_id, "signing_secret");
+    // Rewrapping changes the key, never the associated-data version.
+    let aad = |field| {
+        stored_destination_associated_data(
+            row.aad_version,
+            row.org_id.as_deref(),
+            &row.silicon_id,
+            row.id,
+            row.owner_principal_id,
+            field,
+        )
+    };
+    let url_aad = aad("endpoint_url")?;
+    let secret_aad = aad("signing_secret")?;
     let endpoint_url = encryption.decrypt(
         &EncryptedSecret {
             key_version: row.encryption_key_version,

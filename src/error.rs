@@ -61,6 +61,16 @@ pub enum AppError {
         /// Original transport status preserved in the response.
         status: StatusCode,
     },
+    /// A failure whose public message says exactly what is wrong and what to do.
+    #[error("{code}: {message}")]
+    Described {
+        /// HTTP status of the response.
+        status: StatusCode,
+        /// Stable, machine-readable code.
+        code: Cow<'static, str>,
+        /// Precise, non-sensitive explanation for the caller.
+        message: Cow<'static, str>,
+    },
     /// Unexpected internal failure whose source must not cross the API boundary.
     #[error("internal service error in {category}")]
     Internal {
@@ -85,7 +95,7 @@ pub struct PublicError {
     /// Stable machine-readable error code.
     pub code: Cow<'static, str>,
     /// Human-readable non-sensitive summary.
-    pub message: &'static str,
+    pub message: Cow<'static, str>,
     /// Correlation identifier for support and logs.
     pub request_id: String,
 }
@@ -95,6 +105,43 @@ impl AppError {
     #[must_use]
     pub fn conflict(code: impl Into<Cow<'static, str>>) -> Self {
         Self::Conflict { code: code.into() }
+    }
+
+    /// Creates a precisely described failure.
+    pub fn described(
+        status: StatusCode,
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::Described {
+            status,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    /// A 401 with a precise reason; the response also carries `WWW-Authenticate`.
+    pub fn unauthenticated(
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::described(StatusCode::UNAUTHORIZED, code, message)
+    }
+
+    /// A 403 with a precise reason.
+    pub fn forbidden(
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::described(StatusCode::FORBIDDEN, code, message)
+    }
+
+    /// A 422 with a precise reason.
+    pub fn invalid(
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::described(StatusCode::UNPROCESSABLE_ENTITY, code, message)
     }
 
     /// Creates an internal error while retaining its source for diagnostics.
@@ -119,7 +166,7 @@ impl AppError {
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::DependencyUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
-            Self::TransportRejected { status } => *status,
+            Self::TransportRejected { status } | Self::Described { status, .. } => *status,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -133,7 +180,7 @@ impl AppError {
             Self::Unauthenticated => Cow::Borrowed("unauthenticated"),
             Self::Forbidden => Cow::Borrowed("forbidden"),
             Self::NotFound => Cow::Borrowed("not_found"),
-            Self::Conflict { code } => code.clone(),
+            Self::Conflict { code } | Self::Described { code, .. } => code.clone(),
             Self::WebhookNotConfigured => Cow::Borrowed("webhook_not_configured"),
             Self::RateLimited { .. } => Cow::Borrowed("rate_limited"),
             Self::Timeout => Cow::Borrowed("request_timeout"),
@@ -145,7 +192,22 @@ impl AppError {
         }
     }
 
-    fn public_message(&self) -> &'static str {
+    fn public_message(&self) -> Cow<'static, str> {
+        match self {
+            Self::Described { message, .. } => message.clone(),
+            Self::Unauthenticated => Cow::Borrowed(
+                "Authentication is required: send `Authorization: Bearer <access token>` with a Silicon Accounts access token issued to Remind (sign in with `remind login`).",
+            ),
+            Self::DependencyUnavailable { dependency } if *dependency == "accounts" => {
+                Cow::Borrowed(
+                    "Silicon Accounts could not be reached to verify this request. Retry shortly.",
+                )
+            }
+            other => Cow::Borrowed(other.static_message()),
+        }
+    }
+
+    fn static_message(&self) -> &'static str {
         match self {
             Self::Validation => "The request contains invalid data.",
             Self::TimezoneRequired => {
@@ -157,8 +219,8 @@ impl AppError {
             Self::Conflict { code } if code.as_ref() == "test_reminder_limit" => {
                 "Test environments allow at most 100 retained reminders. This limit applies only to test environments."
             }
-            Self::Conflict { code } if code.as_ref() == "test_iam_application_not_configured" => {
-                "Configure the test-only IAM Application secret first: remind --test <test_id> configure-iam. Production credentials are never used."
+            Self::Conflict { code } if code.as_ref() == "test_environment_name_taken" => {
+                "You already have an active test environment with this name. Pick another name or delete the existing one."
             }
             Self::Conflict { .. } => "The request conflicts with the current resource state.",
             Self::WebhookNotConfigured => "No active webhook subscription is configured.",
@@ -168,6 +230,7 @@ impl AppError {
             Self::MethodNotAllowed => "The HTTP method is not allowed for this route.",
             Self::DependencyUnavailable { .. } => "A required service is temporarily unavailable.",
             Self::TransportRejected { .. } => "The HTTP request was rejected.",
+            Self::Described { .. } => "The request was rejected.",
             Self::Internal { .. } => "An internal service error occurred.",
         }
     }
@@ -199,6 +262,7 @@ impl axum::response::IntoResponse for AppError {
             } => Some(*retry_after_seconds),
             _ => None,
         };
+        let challenge = self.status_code() == StatusCode::UNAUTHORIZED;
         let mut response = (
             self.status_code(),
             Json(ErrorEnvelope {
@@ -218,6 +282,12 @@ impl axum::response::IntoResponse for AppError {
                 .headers_mut()
                 .insert(http::header::RETRY_AFTER, value);
         }
+        if challenge {
+            response.headers_mut().insert(
+                http::header::WWW_AUTHENTICATE,
+                http::HeaderValue::from_static("Bearer realm=\"remind\""),
+            );
+        }
         response
     }
 }
@@ -227,7 +297,9 @@ impl From<sqlx::Error> for AppError {
         if let Some(database) = source.as_database_error() {
             match database.constraint() {
                 Some("test_reminder_limit") => return Self::conflict("test_reminder_limit"),
-                Some("testing_environments_active_name") => {
+                Some(
+                    "testing_environments_active_name" | "testing_environments_owner_active_name",
+                ) => {
                     return Self::conflict("test_environment_name_taken");
                 }
                 _ => {}
@@ -251,7 +323,11 @@ impl From<crate::infrastructure::postgres::RepositoryError> for AppError {
             RepositoryError::IdempotencyConflict => Self::conflict("idempotency_conflict"),
             RepositoryError::IdempotencyIncomplete => Self::conflict("idempotency_in_progress"),
             RepositoryError::EventReceiptConflict => Self::conflict("event_id_conflict"),
-            RepositoryError::SiliconUnavailable => Self::conflict("silicon_unavailable"),
+            RepositoryError::SiliconUnavailable => Self::described(
+                StatusCode::CONFLICT,
+                "silicon_unavailable",
+                "This Silicon's account is not active at Remind (it removed Remind's access or was deleted), so its reminders cannot change.",
+            ),
             RepositoryError::WebhookNotConfigured => Self::WebhookNotConfigured,
             RepositoryError::NotFound => Self::NotFound,
             RepositoryError::VersionConflict => Self::conflict("schedule_version_conflict"),
@@ -327,6 +403,10 @@ mod tests {
             error.public_message(),
             "An internal service error occurred."
         );
+        let described = AppError::unauthenticated("token_expired", "The access token expired.");
+        assert_eq!(described.status_code(), http::StatusCode::UNAUTHORIZED);
+        assert_eq!(described.code(), "token_expired");
+        assert_eq!(described.public_message(), "The access token expired.");
         assert!(!error.public_message().contains("sensitive"));
     }
 

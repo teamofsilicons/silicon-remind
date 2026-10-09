@@ -12,7 +12,8 @@ use crate::{
     application::ports::Clock,
     config::RetrySettings,
     infrastructure::{
-        crypto::{EncryptedSecret, SecretCipherKeyring, destination_field_associated_data},
+        crypto::{EncryptedSecret, SecretCipherKeyring, stored_destination_associated_data},
+        identity::IdentityStore,
         postgres::{ExecutionRow, HookDestinationRow, PostgresRepository},
         webhook::{
             ReminderEvent, WebhookClient, WebhookDeliveryError, WebhookDestination,
@@ -26,6 +27,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct DeliveryProcessor {
     repository: PostgresRepository,
+    identity: IdentityStore,
     webhook_client: WebhookClient,
     encryption: SecretCipherKeyring,
     worker_id: String,
@@ -36,10 +38,6 @@ pub struct DeliveryProcessor {
     metrics: Metrics,
     production: bool,
     testing: bool,
-    test_admission: Option<(
-        crate::infrastructure::testing::TestEnvironments,
-        crate::infrastructure::testing::TestEnvironment,
-    )>,
     test_webhook_urls: Vec<String>,
 }
 
@@ -57,6 +55,7 @@ impl DeliveryProcessor {
     #[must_use]
     pub(crate) fn new(
         repository: PostgresRepository,
+        identity: IdentityStore,
         webhook_client: WebhookClient,
         encryption: SecretCipherKeyring,
         config: DeliveryProcessorConfig,
@@ -65,6 +64,7 @@ impl DeliveryProcessor {
     ) -> Self {
         Self {
             repository,
+            identity,
             webhook_client,
             encryption,
             worker_id: config.worker_id,
@@ -75,7 +75,6 @@ impl DeliveryProcessor {
             metrics,
             production: config.production,
             testing: false,
-            test_admission: None,
             test_webhook_urls: Vec::new(),
         }
     }
@@ -85,17 +84,11 @@ impl DeliveryProcessor {
         self
     }
 
-    /// Reuses delivery policy against an isolated repository.
-    pub(crate) fn with_repository(
-        &self,
-        repository: PostgresRepository,
-        tests: crate::infrastructure::testing::TestEnvironments,
-        environment: crate::infrastructure::testing::TestEnvironment,
-    ) -> Self {
+    /// Reuses delivery policy against a test environment's repository.
+    pub(crate) fn with_repository(&self, repository: PostgresRepository) -> Self {
         let mut delivery = self.clone();
         delivery.repository = repository;
         delivery.testing = true;
-        delivery.test_admission = Some((tests, environment));
         delivery
     }
 
@@ -151,8 +144,8 @@ impl DeliveryProcessor {
     }
 
     async fn deliver_one(&self, execution: ExecutionRow) -> anyhow::Result<()> {
-        let destinations = match self.resolve_destinations(&execution).await {
-            Ok(destinations) => destinations,
+        let (destinations, owner) = match self.resolve_destinations(&execution).await {
+            Ok(resolved) => resolved,
             Err(error) => {
                 return self.finish_failure(&execution, error).await;
             }
@@ -169,10 +162,18 @@ impl DeliveryProcessor {
             );
             return Ok(());
         }
+        // The owner's current id and uuid; the materialization-time id when no
+        // account owns the reminder yet.
+        let (silicon_id, silicon_uuid) = match owner {
+            Some(owner) if !owner.id.is_empty() => (owner.id, Some(owner.uuid)),
+            Some(owner) => (execution.silicon_id.clone(), Some(owner.uuid)),
+            None => (execution.silicon_id.clone(), None),
+        };
         let event = ReminderEvent {
             execution_id: execution.id,
             schedule_id: execution.schedule_id,
-            silicon_id: execution.silicon_id.clone(),
+            silicon_id,
+            silicon_uuid,
             text: execution.text.clone(),
             scheduled_for: execution.scheduled_for,
             timezone: execution.timezone.clone(),
@@ -191,9 +192,6 @@ impl DeliveryProcessor {
                     .any(|url| url == destination.endpoint_url.as_str())
             {
                 continue;
-            }
-            if let Some((tests, environment)) = &self.test_admission {
-                tests.validate_dispatch(environment).await?;
             }
             if let Err(error) = self
                 .webhook_client
@@ -222,18 +220,33 @@ impl DeliveryProcessor {
         Ok(())
     }
 
+    /// Every active subscription of the reminder's owner account, and the owner.
     async fn resolve_destinations(
         &self,
         execution: &ExecutionRow,
-    ) -> Result<Vec<WebhookDestination>, WebhookDeliveryError> {
-        let rows = self
+    ) -> Result<(Vec<WebhookDestination>, Option<crate::domain::AccountRef>), WebhookDeliveryError>
+    {
+        let owner_key = self
             .repository
-            .get_hook_destinations(&execution.org_id, &execution.silicon_id)
+            .execution_owner_key(execution.id)
             .await
             .map_err(|_| retryable("Webhook destination lookup failed"))?;
-        rows.iter()
+        let rows = self
+            .repository
+            .destinations_for_owner_account(owner_key)
+            .await
+            .map_err(|_| retryable("Webhook destination lookup failed"))?;
+        let owner = self
+            .identity
+            .owners_by_keys(&[owner_key])
+            .await
+            .map_err(|_| retryable("Reminder owner lookup failed"))?
+            .remove(&owner_key);
+        let destinations = rows
+            .iter()
             .map(|row| self.decrypt_destination(row))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((destinations, owner))
     }
 
     fn decrypt_destination(
@@ -251,10 +264,19 @@ impl DeliveryProcessor {
             nonce: row.signing_secret_nonce.clone(),
             ciphertext: row.signing_secret_ciphertext.clone(),
         };
-        let url_aad =
-            destination_field_associated_data(&row.org_id, &row.silicon_id, "endpoint_url");
-        let secret_aad =
-            destination_field_associated_data(&row.org_id, &row.silicon_id, "signing_secret");
+        let aad = |field| {
+            stored_destination_associated_data(
+                row.aad_version,
+                row.org_id.as_deref(),
+                &row.silicon_id,
+                row.id,
+                row.owner_principal_id,
+                field,
+            )
+            .map_err(|_| terminal("Webhook destination has unusable associated data"))
+        };
+        let url_aad = aad("endpoint_url")?;
+        let secret_aad = aad("signing_secret")?;
         let endpoint_url = self
             .encryption
             .decrypt(&url, &url_aad)
@@ -357,7 +379,10 @@ mod tests {
         application::ports::SystemClock,
         config::RetrySettings,
         infrastructure::{
-            crypto::{SecretCipherKeyring, destination_field_associated_data},
+            crypto::{
+                SecretCipherKeyring, destination_field_associated_data,
+                destination_field_associated_data_v2,
+            },
             postgres::{HookDestinationRow, PostgresRepository},
             webhook::{WebhookClient, WebhookDeliveryError},
         },
@@ -373,11 +398,12 @@ mod tests {
             1,
             &BTreeMap::from([(1, SecretString::from(URL_SAFE_NO_PAD.encode([7; 32])))]),
         )?;
-        let repository = PostgresRepository::new(
-            sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://localhost/unused")?,
-        );
+        let pool =
+            sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://localhost/unused")?;
+        let repository = PostgresRepository::new(pool.clone());
         let mut processor = DeliveryProcessor::new(
             repository,
+            crate::test_support::identity_store(pool, "http://127.0.0.1:9")?,
             WebhookClient::new(Duration::from_secs(1), Duration::from_secs(1), 1024)?,
             encryption.clone(),
             DeliveryProcessorConfig {
@@ -390,21 +416,28 @@ mod tests {
             Arc::new(SystemClock),
             Metrics::new(),
         );
-        for scheme in ["http", "https"] {
+        let id = Uuid::from_u128(5);
+        let owner = Uuid::from_u128(6);
+        for (scheme, aad_version) in [("http", 1_i16), ("https", 1), ("http", 2), ("https", 2)] {
             let endpoint = format!("{scheme}://127.0.0.1:8787/reminders");
-            let url = encryption.encrypt(
-                &SecretString::from(endpoint.clone()),
-                &destination_field_associated_data("test", "si:clock", "endpoint_url"),
-            )?;
+            let aad = |field| {
+                if aad_version == 1 {
+                    destination_field_associated_data("test", "si:clock", field)
+                } else {
+                    destination_field_associated_data_v2(id, owner, field)
+                }
+            };
+            let url =
+                encryption.encrypt(&SecretString::from(endpoint.clone()), &aad("endpoint_url"))?;
             let secret = encryption.encrypt(
                 &SecretString::from("fixture-signing-secret"),
-                &destination_field_associated_data("test", "si:clock", "signing_secret"),
+                &aad("signing_secret"),
             )?;
             let now = Utc::now();
             let row = HookDestinationRow {
-                id: Uuid::nil(),
-                org_id: "test".into(),
-                owner_principal_id: Uuid::nil(),
+                id,
+                org_id: (aad_version == 1).then(|| "test".to_owned()),
+                owner_principal_id: owner,
                 silicon_id: "si:clock".into(),
                 endpoint_url_ciphertext: url.ciphertext,
                 endpoint_url_nonce: url.nonce,
@@ -416,6 +449,7 @@ mod tests {
                 purge_after: None,
                 created_at: now,
                 updated_at: now,
+                aad_version,
             };
             for production in [false, true] {
                 for testing in [false, true] {

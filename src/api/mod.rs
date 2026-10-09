@@ -7,7 +7,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderName, header},
     middleware as axum_middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
 };
 use secrecy::SecretString;
 use sqlx::PgPool;
@@ -18,12 +18,12 @@ use tower_http::{
 };
 
 use crate::{
-    application::{ports::SystemClock, schedules::ScheduleService},
-    config::{RuntimeEnvironment, Settings},
+    application::{ports::SystemClock, schedules::ScheduleService, sharing::SharingService},
+    config::{ProofIssuers, RuntimeEnvironment, Settings},
     infrastructure::{
+        accounts::AccountsGateway,
         crypto::SecretCipherKeyring,
-        iam::IamClient,
-        iam_webhook::IamWebhookVerifier,
+        identity::IdentityStore,
         postgres::{self, PostgresRepository},
     },
     metrics::Metrics,
@@ -40,11 +40,11 @@ pub struct ApiState {
     pub(crate) tests: Option<crate::infrastructure::testing::TestEnvironments>,
     pub(crate) idempotency_retention: Duration,
     pub(crate) schedules: ScheduleService,
+    pub(crate) sharing: SharingService,
     pub(crate) repository: PostgresRepository,
-    pub(crate) iam: IamClient,
-    pub(crate) iam_webhook: IamWebhookVerifier,
-    pub(crate) internal_api_token: SecretString,
-    pub(crate) honeycomb_service_token: Option<SecretString>,
+    pub(crate) identity: IdentityStore,
+    pub(crate) proof_issuers: ProofIssuers,
+    pub(crate) webhook_secrets: Vec<SecretString>,
     pub(crate) encryption: SecretCipherKeyring,
     pub(crate) is_test: bool,
     pub(crate) reports_enabled: bool,
@@ -59,30 +59,31 @@ impl ApiState {
     ///
     /// # Errors
     ///
-    /// Returns an error when an outbound client or encryption keyring cannot be
-    /// constructed from validated configuration.
+    /// Returns an error when an outbound client or the encryption keyring cannot
+    /// be constructed from validated configuration.
     pub fn new(settings: &Settings, pool: PgPool) -> anyhow::Result<Self> {
-        let repository = PostgresRepository::new(pool);
+        let repository = PostgresRepository::new(pool.clone());
+        let gateway = AccountsGateway::new(&settings.accounts)?;
+        let identity = IdentityStore::new(pool, gateway, settings.accounts.lookup_ttl);
         let schedules = ScheduleService::new(
             repository.clone(),
+            identity.clone(),
             Arc::new(SystemClock),
             settings.retention.idempotency_retention,
         );
-        let iam = IamClient::new(&settings.iam)?;
         let encryption = SecretCipherKeyring::from_base64url(
             settings.encryption.current_version,
             &settings.encryption.keys,
         )?;
-        let iam_webhook = IamWebhookVerifier::from_keys(&settings.iam.webhook_keys)?;
         Ok(Self {
             tests: None,
             idempotency_retention: settings.retention.idempotency_retention,
             schedules,
+            sharing: SharingService::new(identity.clone()),
             repository,
-            iam,
-            iam_webhook,
-            internal_api_token: settings.internal_api.bearer_token.clone(),
-            honeycomb_service_token: settings.honeycomb_service_token.clone(),
+            identity,
+            proof_issuers: settings.accounts.proof_issuers.clone(),
+            webhook_secrets: settings.accounts.webhook_secrets.clone(),
             encryption,
             is_test: false,
             telemetry: crate::telemetry::Recorder::new(settings),
@@ -94,8 +95,11 @@ impl ApiState {
     }
 }
 
-/// Builds the complete public, internal, and operational router.
-#[allow(clippy::too_many_lines)]
+/// Builds the complete public and operational router.
+#[allow(
+    clippy::too_many_lines,
+    reason = "The route table reads best as one declaration"
+)]
 pub fn router(state: ApiState, settings: &Settings) -> Router {
     let public_api = Router::new()
         .route("/telemetry/events", post(handlers::telemetry::record))
@@ -131,60 +135,46 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
             "/webhooks/{subscription_id}",
             delete(handlers::destination::unsubscribe),
         )
-        .route("/silicons", get(handlers::destination::silicons))
-        .route("/auth/me", get(handlers::auth::me))
+        .route("/silicons", get(handlers::accounts::silicons))
+        .route("/auth/me", get(handlers::accounts::me))
+        .route(
+            "/viewers",
+            get(handlers::sharing::list_viewers).post(handlers::sharing::grant_viewer),
+        )
+        .route(
+            "/viewers/{viewer}",
+            delete(handlers::sharing::revoke_viewer),
+        )
+        .route(
+            "/allowed-accounts",
+            get(handlers::sharing::list_allowed).post(handlers::sharing::allow_account),
+        )
+        .route(
+            "/allowed-accounts/{account}",
+            delete(handlers::sharing::disallow_account),
+        )
         .merge(test_environment_routes())
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::authenticate,
         ));
 
-    let internal_provisioning_api = Router::new()
-        .route(
-            "/hook-destinations",
-            put(handlers::internal::upsert_hook_destination),
-        )
-        .route(
-            "/hook-destinations/{org_id}/{silicon_id}",
-            delete(handlers::internal::disable_hook_destination),
-        )
-        .route_layer(axum_middleware::from_fn_with_state(
-            state.clone(),
-            middleware::authenticate_internal,
-        ));
-    let internal_api = Router::new()
-        .merge(internal_provisioning_api)
-        .route("/iam/events", post(handlers::internal::accept_iam_event));
-
     Router::new()
-        .route("/internal/honeycomb/organizations/{org}/testing-environments/{id}/operations/{operation}", put(handlers::honeycomb::apply).get(handlers::honeycomb::receipt))
         .route("/api/versions", get(contracts::versions))
         .route("/health/live", get(handlers::health::live))
         .route("/health/ready", get(handlers::health::ready))
         .route("/metrics", get(handlers::health::metrics))
-        .route("/webhook/", post(handlers::internal::accept_iam_event))
-        .route("/api/v1/auth/login", post(handlers::auth::login))
-        .route("/api/v1/auth/iam", get(handlers::auth::iam))
+        .route("/webhook", post(handlers::accounts_webhook::receive))
+        .route("/webhook/", post(handlers::accounts_webhook::receive))
         .route(
-            "/api/v1/auth/organizations",
-            get(handlers::auth::organizations),
-        )
-        .route("/api/v1/auth/refresh", post(handlers::auth::refresh))
-        .route("/api/v1/auth/logout", post(handlers::auth::logout))
-        .route(
-            "/api/v1/testing-environment/iam",
-            axum::routing::put(handlers::testing::test_only),
-        )
-        .route(
-            "/api/v1/testing-environment",
+            "/api/v2/testing-environment",
             get(handlers::testing::test_only),
         )
         .route(
-            "/api/v1/testing-environment/cleanings",
+            "/api/v2/testing-environment/cleanings",
             post(handlers::testing::test_only),
         )
-        .nest("/api/v1", public_api)
-        .nest("/internal/v1", internal_api)
+        .nest("/api/v2", public_api)
         .fallback(handlers::not_found)
         .method_not_allowed_fallback(handlers::method_not_allowed)
         .layer(axum_middleware::from_fn_with_state(
@@ -203,7 +193,7 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
             header::AUTHORIZATION,
             HeaderName::from_static("x-remind-test-key"),
             HeaderName::from_static("x-hook-signature"),
-            HeaderName::from_static("x-silicon-iam-signature"),
+            HeaderName::from_static("x-accounts-signature"),
         ]))
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
@@ -231,7 +221,6 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         state.tests = Some(
             crate::infrastructure::testing::TestEnvironments::connect(
                 database,
-                &settings.iam,
                 state.encryption.clone(),
             )
             .await?,
@@ -276,6 +265,8 @@ impl axum::extract::FromRequestParts<ApiState> for ScopedState {
 }
 
 impl ApiState {
+    /// Points data access at the selected test environment, if any. Identity
+    /// stays in the production database: Silicon Accounts has no test copies.
     pub(crate) fn scoped(&self, extensions: &http::Extensions) -> Self {
         let mut state = self.clone();
         if let Some(context) = extensions.get::<handlers::testing::EnvironmentContext>() {
@@ -283,10 +274,10 @@ impl ApiState {
             state.repository = PostgresRepository::new(context.pool.clone());
             state.schedules = ScheduleService::new(
                 state.repository.clone(),
+                self.identity.clone(),
                 Arc::new(SystemClock),
                 self.idempotency_retention,
             );
-            state.iam = context.iam.clone();
         }
         state
     }

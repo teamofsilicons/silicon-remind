@@ -19,7 +19,7 @@ use crate::{
 
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
-/// `GET /api/v1/schedules`.
+/// `GET /api/v2/schedules`.
 ///
 /// # Errors
 ///
@@ -30,7 +30,7 @@ pub async fn list(
     query: Result<Query<models::ListSchedulesQuery>, rejection::QueryRejection>,
 ) -> Result<Json<models::PageResponse<models::ScheduleResponse>>, AppError> {
     let Query(query) = query.map_err(|_| AppError::Validation)?;
-    let page = state
+    let (page, owners) = state
         .schedules
         .list(
             &actor,
@@ -45,12 +45,12 @@ pub async fn list(
     let items = page
         .items
         .iter()
-        .map(models::ScheduleResponse::from)
+        .map(|row| models::ScheduleResponse::new(row, owners.get(&row.owner_principal_id)))
         .collect();
     Ok(Json(models::PageResponse { items, next_cursor }))
 }
 
-/// `POST /api/v1/schedules`.
+/// `POST /api/v2/schedules`.
 ///
 /// # Errors
 ///
@@ -62,7 +62,7 @@ pub async fn create(
     headers: HeaderMap,
     body: Result<Json<models::CreateScheduleRequest>, rejection::JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Json(request) = body.map_err(|error| map_json_rejection(&error))?;
+    let Json(request) = body.map_err(|error| super::map_json_rejection(&error))?;
     let hash = request_hash(&request)?;
     let command = request.try_into()?;
     let idempotency_key = idempotency_key(&headers)?;
@@ -73,7 +73,7 @@ pub async fn create(
     mutation_response(mutation.status_code, mutation.body)
 }
 
-/// `PATCH /api/v1/schedules`.
+/// `PATCH /api/v2/schedules`.
 ///
 /// # Errors
 ///
@@ -84,7 +84,7 @@ pub async fn update_statuses(
     headers: HeaderMap,
     body: Result<Json<models::BulkScheduleStatusRequest>, rejection::JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Json(request) = body.map_err(|error| map_json_rejection(&error))?;
+    let Json(request) = body.map_err(|error| super::map_json_rejection(&error))?;
     let hash = request_hash(&request)?;
     let idempotency_key = idempotency_key(&headers)?;
     let mutation = state
@@ -100,7 +100,7 @@ pub async fn update_statuses(
     mutation_response(mutation.status_code, mutation.body)
 }
 
-/// `GET /api/v1/schedules/{schedule_id}`.
+/// `GET /api/v2/schedules/{schedule_id}`.
 ///
 /// # Errors
 ///
@@ -111,11 +111,14 @@ pub async fn get(
     path: Result<Path<Uuid>, rejection::PathRejection>,
 ) -> Result<Json<models::ScheduleResponse>, AppError> {
     let Path(schedule_id) = path.map_err(|_| AppError::Validation)?;
-    let schedule = state.schedules.get(&actor, schedule_id).await?;
-    Ok(Json(models::ScheduleResponse::from(&schedule)))
+    let (schedule, owner) = state.schedules.get(&actor, schedule_id).await?;
+    Ok(Json(models::ScheduleResponse::new(
+        &schedule,
+        owner.as_ref(),
+    )))
 }
 
-/// `PATCH /api/v1/schedules/{schedule_id}`.
+/// `PATCH /api/v2/schedules/{schedule_id}`.
 ///
 /// # Errors
 ///
@@ -128,7 +131,7 @@ pub async fn patch(
     body: Result<Json<models::PatchScheduleRequest>, rejection::JsonRejection>,
 ) -> Result<Response, AppError> {
     let Path(schedule_id) = path.map_err(|_| AppError::Validation)?;
-    let Json(request) = body.map_err(|error| map_json_rejection(&error))?;
+    let Json(request) = body.map_err(|error| super::map_json_rejection(&error))?;
     let hash = request_hash(&request)?;
     let idempotency_key = idempotency_key(&headers)?;
     let mutation = state
@@ -138,7 +141,7 @@ pub async fn patch(
     mutation_response(mutation.status_code, mutation.body)
 }
 
-/// `DELETE /api/v1/schedules/{schedule_id}`.
+/// `DELETE /api/v2/schedules/{schedule_id}`.
 ///
 /// # Errors
 ///
@@ -153,7 +156,7 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/v1/schedules/{schedule_id}/executions`.
+/// `GET /api/v2/schedules/{schedule_id}/executions`.
 ///
 /// # Errors
 ///
@@ -198,21 +201,14 @@ fn mutation_response(status_code: u16, body: serde_json::Value) -> Result<Respon
     Ok((status, Json(body)).into_response())
 }
 
-fn map_json_rejection(rejection: &rejection::JsonRejection) -> AppError {
-    if matches!(rejection, rejection::JsonRejection::BytesRejection(_)) {
-        AppError::PayloadTooLarge
-    } else {
-        AppError::Validation
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use axum::{Json, body::Body, extract::FromRequest as _, response::IntoResponse as _};
     use http::{HeaderMap, HeaderValue, Request, StatusCode};
     use http_body_util::BodyExt as _;
 
-    use super::{idempotency_key, map_json_rejection};
+    use super::idempotency_key;
+    use crate::api::handlers::map_json_rejection;
     use crate::{api::models::CreateScheduleRequest, domain::CreateScheduleCommand};
 
     #[tokio::test]
@@ -233,7 +229,7 @@ mod tests {
             }
             let request = Request::builder()
                 .method("POST")
-                .uri("/api/v1/schedules")
+                .uri("/api/v2/schedules")
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))?;
             let Json(request) = Json::<CreateScheduleRequest>::from_request(request, &())

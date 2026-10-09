@@ -40,8 +40,11 @@ pub struct ReminderEvent {
     pub execution_id: Uuid,
     /// Owning schedule identifier.
     pub schedule_id: Uuid,
-    /// Destination Silicon public identifier.
+    /// The owner Silicon's current public id.
     pub silicon_id: String,
+    /// The owner Silicon's Silicon Accounts uuid; `None` for a reminder from
+    /// before the move to Silicon Accounts that no account owns yet.
+    pub silicon_uuid: Option<String>,
     /// Reminder content captured when the occurrence was materialized.
     pub text: String,
     /// Exact intended occurrence instant.
@@ -198,6 +201,7 @@ impl<'a> EventEnvelope<'a> {
                 execution_id: event.execution_id,
                 schedule_id: event.schedule_id,
                 silicon_id: &event.silicon_id,
+                silicon_uuid: event.silicon_uuid.as_deref(),
                 text: &event.text,
                 scheduled_for: event.scheduled_for,
                 timezone: &event.timezone,
@@ -211,6 +215,7 @@ struct EventPayload<'a> {
     execution_id: Uuid,
     schedule_id: Uuid,
     silicon_id: &'a str,
+    silicon_uuid: Option<&'a str>,
     text: &'a str,
     scheduled_for: DateTime<Utc>,
     timezone: &'a str,
