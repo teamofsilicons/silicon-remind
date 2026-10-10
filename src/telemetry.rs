@@ -24,6 +24,29 @@ pub fn init(settings: &Settings) -> anyhow::Result<()> {
 /// Returns an error when the configured filter is invalid or another global
 /// subscriber was installed first.
 pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow::Result<()> {
+    init_with_writer(environment, log_filter, std::io::stdout)
+}
+
+/// Installs tracing like [`init_process`], but writes every log line to
+/// standard error, for a command whose standard output is its result (the
+/// `remind-migrate link-identities` JSON report).
+///
+/// # Errors
+///
+/// Returns an error when the configured filter is invalid or another global
+/// subscriber was installed first.
+pub fn init_command(environment: RuntimeEnvironment, log_filter: &str) -> anyhow::Result<()> {
+    init_with_writer(environment, log_filter, std::io::stderr)
+}
+
+fn init_with_writer<W>(
+    environment: RuntimeEnvironment,
+    log_filter: &str,
+    writer: W,
+) -> anyhow::Result<()>
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
     install_tls_provider();
     let filter = build_filter(log_filter)?;
     let registry = tracing_subscriber::registry().with(filter);
@@ -34,7 +57,8 @@ pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow
                 tracing_subscriber::fmt::layer()
                     .compact()
                     .with_target(true)
-                    .with_thread_ids(false),
+                    .with_thread_ids(false)
+                    .with_writer(writer),
             )
             .try_init()?,
         RuntimeEnvironment::Production => registry
@@ -44,7 +68,8 @@ pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow
                     .flatten_event(true)
                     .with_ansi(false)
                     .with_current_span(true)
-                    .with_span_list(false),
+                    .with_span_list(false)
+                    .with_writer(writer),
             )
             .try_init()?,
     }
@@ -114,7 +139,18 @@ impl Recorder {
         &self,
         pool: &sqlx::PgPool,
         is_test: bool,
+        event: serde_json::Value,
+    ) {
+        self.record_with_budget(pool, is_test, event, std::time::Duration::from_millis(100))
+            .await;
+    }
+
+    async fn record_with_budget(
+        &self,
+        pool: &sqlx::PgPool,
+        is_test: bool,
         mut event: serde_json::Value,
+        budget: std::time::Duration,
     ) {
         if !self.enabled {
             return;
@@ -125,7 +161,7 @@ impl Recorder {
         event["occurred_at"] = chrono::Utc::now().to_rfc3339().into();
         if is_test {
             // Never hand sandbox events to the production daemon or its disk spool.
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            let _ = tokio::time::timeout(budget, async {
                 sqlx::query("INSERT INTO telemetry_events(id,event) VALUES($1,$2)")
                     .bind(uuid::Uuid::now_v7()).bind(event).execute(pool).await?;
                 sqlx::query("DELETE FROM telemetry_events WHERE id IN (SELECT id FROM telemetry_events ORDER BY recorded_at DESC OFFSET 10000)").execute(pool).await?;
@@ -143,28 +179,25 @@ impl Recorder {
 #[cfg(test)]
 mod isolation_tests {
     use super::*;
-    use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
-    use testcontainers_modules::postgres::Postgres;
     #[tokio::test]
     async fn sandbox_events_are_local_and_opt_out_writes_nothing() -> anyhow::Result<()> {
-        let container = Postgres::default().with_tag("17-alpine").start().await?;
-        let pool = sqlx::PgPool::connect(&format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        ))
-        .await?;
+        let container = crate::test_support::TestPostgres::start().await?;
+        let pool = sqlx::PgPool::connect(&container.url).await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
         let mut recorder = Recorder {
             enabled: true,
             #[cfg(unix)]
             client: None,
         };
+        // This test verifies routing and opt-out, not the deliberately lossy
+        // production latency budget. Loaded CI must still observe the fixture.
+        let budget = std::time::Duration::from_secs(5);
         recorder
-            .record(
+            .record_with_budget(
                 &pool,
                 true,
                 serde_json::json!({"source":"cli","event":"command_completed"}),
+                budget,
             )
             .await;
         let event: serde_json::Value = sqlx::query_scalar("SELECT event FROM telemetry_events")
@@ -173,14 +206,20 @@ mod isolation_tests {
         assert_eq!(event["environment"], "testing");
         recorder.enabled = false;
         recorder
-            .record(&pool, true, serde_json::json!({"event":"should_not_exist"}))
+            .record_with_budget(
+                &pool,
+                true,
+                serde_json::json!({"event":"should_not_exist"}),
+                budget,
+            )
             .await;
         recorder.enabled = true;
         recorder
-            .record(
+            .record_with_budget(
                 &pool,
                 false,
                 serde_json::json!({"event":"production_should_not_write_locally"}),
+                budget,
             )
             .await;
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM telemetry_events")

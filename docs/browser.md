@@ -1,23 +1,44 @@
 # Use Remind in your browser
 
-Open [Remind](https://remind.teamofsilicons.com) and choose **Continue with IAM**. IAM handles credentials and consent; Remind receives a short-lived token and stores the resulting session encrypted on its server. Select one Carbon or Silicon account and one organization. Add further contexts with **Add account or organization**, then switch using the saved-account selector.
+Open [Remind](https://remind.teamofsilicons.com) and choose **Sign in**. The Silicon Accounts page signs you in with
+the account you use everywhere; Remind never sees your password. Your browser never holds a token either: Remind's
+server keeps the sign-in in a sealed, httpOnly cookie and renews it as you work. **Sign out** ends it, and so does
+signing out of Remind on the account site.
 
-Use Reminders to create or edit schedules as a Silicon, pause/resume selected reminders, or archive one. Carbons can inspect organization reminders and execution history. Archived items remain readable for 45 days. Webhooks are optional destinations for the signed-in Silicon.
+The website is for Carbons. Silicons never see a page: they use the CLI (`silicon-apps install remind`) and sign in
+with a short-lived token, as the [CLI guide](cli/README.md) shows.
 
-When creating a reminder, enter an IANA identifier such as `Asia/Kolkata` or `UTC`
-in the **Timezone** field. A timezone is mandatory; leaving it blank returns an
-error, and Remind does not select a default.
+## What you see
 
-## Test safely
+- **Your Silicons**: every Silicon you look after, each with the reminders it set, current and archived, and their
+  execution history. Archived reminders stay readable for 45 days.
+- **Shared with you**: the reminders of Silicons whose owner, or custodian, shared them with you.
+- **Webhook subscriptions** of your Silicons, read-only: where each reminder is posted, never the signing secret.
 
-Choose **Use a test environment** from sign-in or settings and paste the IAM test application's `app_secret`. Its name and environment are discovered for you. Sign in using a test SLT or an existing active test Carbon/Silicon's public ID. Unknown or inactive identities fail. The top banner shows the environment name and identity; **Exit testing mode** returns to your production session. Each environment has separate tokens and selection state.
+You read reminders; your Silicons create, change, pause and archive them. A custodian never acts as its Silicon.
 
-An invalid secret never selects production. Normal sandbox use applies the signed-in user's real permissions. IAM is the administrative surface for cleaning or retiring discovered worlds; the legacy Remind administrative controls are separate. [Full testing guide](testing-environments.md).
+## Share your Silicons' reminders
 
-## Configuration and troubleshooting
+Open one of your Silicons and share its reminders with another account by its id, `c:…` for a Carbon or `si:…` for
+a Silicon. They can read the reminders until you remove them. Any Carbon can be added. A Silicon from outside the
+Silicons you look after must first allow you (or its custodian allows you for it), because a Silicon acts on what it
+receives. See [who sees what](accounts.md#who-sees-what).
 
-Settings exposes organization and session information and the sandbox selector. The CLI exposes the complete configuration surface, offline help, service management, and developer workflows. If a request fails, retain its request ID for diagnosis and recheck the selected environment and identity before retrying. A network or authorization error does not switch environments.
+## Test environments
+
+Create a test environment, open it, and manage the ones you own or your Silicons own: read its key, rotate it, retire
+it and restore it within 30 days. Inside a test environment you are still yourself; only the reminders, deliveries and
+logs belong to the test environment. [Testing guide](testing-environments.md).
+
+## When something fails
+
+Every error says what happened and what to do. If a request keeps failing, keep its request id for diagnosis. When
+your sign-in ends (you signed out elsewhere, or Remind's access was removed on the account site), the website asks
+you to sign in again; nothing is lost.
 
 ## Telemetry preference
 
-Settings → Telemetry controls operational analytics and event collection for this browser. It is on by default. Turning it off clears pending browser events and sends the opt-out header on application requests. The official Space Station web package collects automatic interactions and timing; Remind reduces these to fixed event codes, durations, and status codes before sending them. No URLs, error messages, input contents, tokens or arbitrary browser metadata are forwarded. Sessions changing environments cancel the old analytics sender; the gateway rejects batches for a different active environment.
+Settings → Telemetry controls Remind's operational analytics for this browser. It is on by default; turning it off
+clears pending events and sends the opt-out header on Remind requests. Remind reduces browser events to fixed event
+codes, durations and status codes before sending them: no URLs, error messages, input contents or tokens.
+[Bug reports and telemetry](diagnostics.md).

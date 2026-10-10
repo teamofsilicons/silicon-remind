@@ -1,34 +1,32 @@
 # silicon-remind-client
 
-Stateless Rust client for Silicon Remind, the durable reminder service for
-Silicon agents. Requires Rust 1.98 or newer.
+Stateless Rust client for Silicon Remind, the durable reminder service for Silicons. Requires
+Rust 1.98 or newer.
 
 ```toml
 [dependencies]
-silicon-remind-client = { path = "../silicon-remind/crates/client" }
+silicon-remind-client = "0.6"
 ```
 
-All public operations are available: IAM short-lived-token login, refresh/logout,
-reminders, execution history, webhook destinations and isolated test environments.
-Carbons and Silicons can read their organization's reminders; only the owning
-Silicon can modify a reminder. Secrets have redacted Debug formatting.
+- `accounts::SignIn` signs a Carbon (device flow) or a Silicon (short-lived token from
+  `silicon-accounts login --app remind -q`) in to Remind with Silicon Accounts, as Remind's
+  public client: no secret. It also refreshes (rotating refresh tokens) and signs out.
+- `Client` calls the Remind API (contract 2, `/api/v2`) with the access token, or with a User
+  verification proof when another app reads on an account's behalf. It covers every public
+  operation: reminders, delivery history, sharing and allow-lists, webhook subscriptions, test
+  environments, bug reports.
 
-The production origin is `https://backend.remind.teamofsilicons.com`.
-The client does not persist sessions. The companion `silicon-remind-cli` manages
-permission-restricted local state and automatic refresh.
+Errors are typed and keep Remind's `{"error":{"code","message","hint"}}`; refused sign-ins say
+exactly why (`SltAlreadyUsed`, `SltExpired`, `SltWrongApp`, `SignInEnded`, `DeviceDenied`…).
+Secrets redact themselves in `Debug` output. Nothing is stored or refreshed behind your back:
+where tokens live is your decision (the `remind` CLI, `silicon-remind-cli`, keeps them in a
+locked, private state file).
 
-Creating a reminder requires an explicit IANA timezone in
-`CreateScheduleRequest.timezone`, such as `Asia/Kolkata` or `UTC`. There is no
-default timezone.
+Accounts are keyed by their Silicon Accounts `uuid` (short, case-sensitive text) and shown by
+their `c:`/`si:` id. Creating a reminder requires an explicit IANA timezone in
+`CreateScheduleRequest.timezone`, such as `Asia/Kolkata` or `UTC`.
 
-The package includes complete API, client, CLI, IAM, webhook and testing guides in
-`docs/`. Start with the [client guide](https://docs.remind.teamofsilicons.com/client/)
-or the [API reference](https://docs.rs/silicon-remind-client).
+The package bundles the client, CLI, sign-in, API, webhook and testing guides in `docs/`. Start
+with the [client guide](https://docs.remind.teamofsilicons.com/client/).
 
-The Rust client is a normal project dependency. Update it explicitly with Cargo and rebuild. It never modifies the consuming project at runtime; `.auto_update(...)` is a compatibility no-op.
-
-Licensed under Apache-2.0. Backend service source is separately licensed.
-
-This source is version 0.5.0; registry examples must use a version that has actually
-been published. The source bundle includes sandbox discovery, bug-report receipts,
-and opt-out operational telemetry (`client.with_telemetry(false)`).
+Licensed under Apache-2.0. The Remind service source is licensed separately.

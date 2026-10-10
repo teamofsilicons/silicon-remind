@@ -36,6 +36,9 @@ pub enum RepositoryError {
     /// A repository input violated an infrastructure-level invariant.
     #[error("invalid repository input: {0}")]
     InvalidInput(&'static str),
+    /// An account's retained resources reached the service capacity limit.
+    #[error("the account resource limit was reached: {0}")]
+    ResourceLimit(&'static str),
     /// A stored idempotent response could not be represented as JSON.
     #[error("could not serialize an idempotent response")]
     Serialization(#[from] serde_json::Error),

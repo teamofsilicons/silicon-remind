@@ -1,41 +1,71 @@
-# Internal service API
+# Service-only routes and operator commands
 
-These routes are for trusted backend integration. They are deliberately absent
-from the public Rust client and CLI. Use public `/api/v1/webhook` for a signed-in
-Silicon's normal configuration.
+These are the parts of Remind that only Silicon Accounts and the people operating Remind use. Nothing here is in
+the public Rust client or the CLI, and none of it needs a Carbon's or a Silicon's sign-in. Everything a Carbon, a
+Silicon or another app calls is in the [API guide](api/README.md).
 
-## Provisioning
+## Silicon Accounts app webhook
 
-`Authorization: Bearer <REMIND_INTERNAL_API_TOKEN>` is required. Production
-transport must be HTTPS. Requests use JSON and stable error envelopes.
+`POST /webhook/` (also `POST /webhook`) receives Silicon Accounts' signed account events for the app `remind`. Set
+it as the app's webhook at Silicon Accounts (`PUT /v1/apps/remind/webhook`, or the developer platform) with the URL
+`https://api.remind.teamofsilicons.com/webhook/`, and store the `whsec_…` secret shown once in
+`REMIND_ACCOUNTS_WEBHOOK_SECRET`. Pick `custodian_change` besides the default events (or every update): who looks
+after a Silicon decides who reads its reminders.
 
-- `PUT /internal/v1/hook-destinations`: body `org_id`, `silicon_id`, immutable
-  IAM `principal_id` UUID, `endpoint_url`, and `signing_secret`. Returns 201 on
-  initial configuration or 200 on replacement, with org/Silicon/version/time.
-  Credentials are encrypted at rest and never echoed. The Silicon ID must
-  belong to the org and endpoint; URL/signature format is described in
-  [webhook delivery](webhook-delivery.md). An IAM revocation tombstone cannot be
-  cleared by provisioning.
-- `DELETE /internal/v1/hook-destinations/{org_id}/{silicon_id}` disables that
-  destination, returning 204. It does not disclose or rotate its old secret.
+Remind checks `X-Accounts-Signature` over the exact raw body with each configured secret (two, comma-separated, while
+a rotation overlaps) and refuses a delivery whose `X-Accounts-Timestamp` is more than five minutes away. Each
+`event_id` is recorded and applied once.
 
-Internal provisioning addresses production data. Test headers are rejected;
-sandbox Silicons use the normal owner-authenticated public route.
+| answer | when |
+| --- | --- |
+| `200 {"event_id":…,"status":"processed"}` | the event was applied |
+| `200 … "status":"duplicate"` | this `event_id` was already applied |
+| `200 … "status":"ignored"` | a `ping`, or an event type Remind does not act on |
+| `401 webhook_signature_invalid` | no signature, a wrong one, or a stale timestamp |
+| `400 webhook_body_invalid` | correctly signed, but not a Silicon Accounts event |
+| `5xx` | applying it failed; Silicon Accounts retries, and the `event_id` keeps it from applying twice |
 
-## IAM receiver
+What each event changes (a new id, a new custodian, a sign-out, removed access, a deleted account) is described in
+[signing in and who sees what](accounts.md#when-an-account-changes). Send a test with
+`POST /v1/apps/remind/webhook/test` at Silicon Accounts; Remind answers `ignored`.
 
-`POST /webhook/`, with legacy alias `/internal/v1/iam/events`, authenticates by
-IAM's signature, not the internal bearer. Follow [IAM integration](iam.md).
-The exact-byte official verifier checks the signed envelope and key version.
-A processed event returns 202 with `receipt_id` and `status: accepted`; exact
-replays return the original durable receipt, conflicting reuse returns 409.
+## Health and metrics
 
-Signed testing wrappers route only to linked active Remind test environments.
-The root key is excluded from persisted normalized envelopes. Current member
-and organization revocations are committed with the receipt. Background cleanup
-archives inaccessible resources and cancels unaccepted executions. IAM logout
-also takes effect through live introspection on the next authenticated request.
+The API (`:8080` in the container) and the worker's operational listener (`REMIND_WORKER_OPERATIONAL_BIND_ADDR`,
+`:9090`) both serve:
 
-## Honeycomb lifecycle
+- `GET /health/live`: the process is up.
+- `GET /health/ready`: the database answers within two seconds and its migration ledger and critical schema fields
+  match this build. A reachable but unmigrated database is not ready.
+- `GET /metrics`: Prometheus metrics. The worker's are the source for scheduler, delivery, retry and worker-error
+  counters.
 
-Shared test environment control uses a separate service credential and durable operation receipts. See the [Honeycomb lifecycle contract](honeycomb-lifecycle.md). These endpoints do not require an active test session and are not exposed by the public client or CLI.
+Only `/health/*` is public on the API host; keep `/metrics` and the worker's listener private (health probes and the
+metrics collector only). `GET /api/versions` is part of the public contract.
+
+## Operator commands
+
+Run these with the migration owner's database credentials (`REMIND_MIGRATOR_DATABASE_URL`, and
+`REMIND_TEST_MIGRATOR_DATABASE_URL` for the testing database), never from a Carbon's or a Silicon's machine.
+
+```sh
+remind-migrate                 # apply the embedded migrations: production, testing, every test-environment schema
+remind-migrate link-identities --file mapping.csv --dry-run
+remind-migrate link-identities --file mapping.csv [--source <label>]
+```
+
+`remind-migrate` with no command applies the migrations. It never runs by itself when the API or worker starts: run
+it once per release, before the new API and worker.
+
+`link-identities` re-keys data that belonged to an account of the previous identity service to the Silicon Accounts
+account it became. Each line of the file is `iam_principal_id,accounts_uuid`, where the left side is either the
+principal's UUID or the `si:`/`c:` id it had; a header line, blank lines and `#` comments are skipped, and `-` (or
+nothing) after the comma removes a link. With `REMIND_APP_SECRET` set, every uuid is checked with Silicon Accounts
+first (it must exist, not be deleted, and be the same kind); without it, the run links offline. One refused line rolls
+back the whole run. Nothing is rewritten: a wrong link is corrected by running again with the right uuid.
+
+It prints a JSON report: `linked` (with each account's reminder and subscription counts), `unchanged`, `unlinked`,
+`refused`, `unmatched` (principals that still own reminders or subscriptions and have no link) and
+`test_environments_linked`. Until it is linked, an old Silicon's reminders keep firing but nobody can see or change
+them. `scripts/suggest-identity-links.py` turns a dry run's `unmatched` list into a mapping file for review; the
+production steps are in [the cutover guide](migration/cutover.md).

@@ -457,11 +457,9 @@ impl ValidatedSchedulePatch {
 pub struct Schedule {
     /// Stable schedule identifier.
     pub id: Uuid,
-    /// Owning organization identifier.
-    pub org_id: String,
-    /// Stable IAM identifier of the owning Silicon principal.
-    pub owner_principal_id: String,
-    /// Public global identifier of the owning Silicon.
+    /// Storage key of the owning Silicon's account.
+    pub owner_key: Uuid,
+    /// The owning Silicon's public id when the schedule was created.
     pub silicon_id: String,
     /// Reminder text delivered in future execution snapshots.
     pub text: String,
@@ -488,16 +486,14 @@ impl Schedule {
     #[must_use]
     pub fn new(
         id: Uuid,
-        org_id: impl Into<String>,
-        owner_principal_id: impl Into<String>,
+        owner_key: Uuid,
         silicon_id: impl Into<String>,
         new_schedule: NewSchedule,
         created_at: DateTime<Utc>,
     ) -> Self {
         Self {
             id,
-            org_id: org_id.into(),
-            owner_principal_id: owner_principal_id.into(),
+            owner_key,
             silicon_id: silicon_id.into(),
             text: new_schedule.text,
             timezone: new_schedule.timezone,
@@ -804,9 +800,8 @@ mod tests {
         let validated = recurring_command().validate(now)?;
         Ok(Schedule::new(
             Uuid::from_u128(7),
-            "org-1",
-            "00000000-0000-0000-0000-000000000007",
-            "silicon-1",
+            Uuid::from_u128(7),
+            "si:silicon-1",
             validated,
             now,
         ))
@@ -1042,9 +1037,8 @@ mod tests {
         let validated = one_time_command().validate(created_at)?;
         let mut schedule = Schedule::new(
             Uuid::from_u128(8),
-            "org-1",
-            "00000000-0000-0000-0000-000000000008",
-            "silicon-1",
+            Uuid::from_u128(8),
+            "si:silicon-1",
             validated,
             created_at,
         );
@@ -1149,9 +1143,8 @@ mod tests {
         let one_time = one_time_command().validate(now)?;
         let mut one_time = Schedule::new(
             Uuid::from_u128(1),
-            "org-1",
-            "00000000-0000-0000-0000-000000000001",
-            "silicon-1",
+            Uuid::from_u128(1),
+            "si:silicon-1",
             one_time,
             now,
         );

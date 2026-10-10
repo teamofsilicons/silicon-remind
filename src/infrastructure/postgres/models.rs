@@ -4,16 +4,16 @@ use serde_json::Value;
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::domain::{ReminderReadScope, ScheduleSection};
+use crate::domain::{AccountRef, ScheduleSection};
 
-/// An IAM principal type accepted by persistence and audit records.
+/// An actor category accepted by persistence and audit records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActorType {
-    /// A human account.
+    /// A Carbon account.
     Carbon,
-    /// An AI-agent account.
+    /// A Silicon account.
     Silicon,
-    /// An IAM application acting with its own identity.
+    /// An app acting with its own identity (Silicon Accounts webhooks, proofs).
     Application,
     /// An authenticated platform service.
     Service,
@@ -38,7 +38,7 @@ impl ActorType {
 pub struct AuditContext {
     /// Actor category.
     pub actor_type: ActorType,
-    /// Stable IAM or internal worker identifier.
+    /// Silicon Accounts uuid, app id, or internal worker identifier.
     pub actor_id: String,
     /// Request correlation identifier, when the operation has one.
     pub request_id: Option<String>,
@@ -49,7 +49,7 @@ pub struct AuditContext {
 pub struct IdempotencyContext {
     /// Authenticated actor category. System actors are not accepted here.
     pub actor_type: ActorType,
-    /// Stable authenticated actor identifier.
+    /// The authenticated account's Silicon Accounts uuid.
     pub actor_id: String,
     /// Client-provided idempotency key.
     pub key: String,
@@ -64,11 +64,11 @@ pub struct IdempotencyContext {
 pub struct ScheduleRow {
     /// Schedule UUID.
     pub id: Uuid,
-    /// Owning organization.
-    pub org_id: String,
-    /// Stable IAM UUID of the owning Silicon principal.
+    /// Organization of a row written before the move to Silicon Accounts; `None` since.
+    pub org_id: Option<String>,
+    /// Storage key of the owning Silicon's account.
     pub owner_principal_id: Uuid,
-    /// Public global identifier of the owning Silicon.
+    /// The owning Silicon's public id when the schedule was created.
     pub silicon_id: String,
     /// Immutable-as-written reminder content for future occurrences.
     pub text: String,
@@ -124,12 +124,12 @@ impl ScheduleRow {
 pub struct CreateSchedule {
     /// Application-generated UUID.
     pub id: Uuid,
-    /// Owning organization.
-    pub org_id: String,
-    /// Stable authenticated IAM principal UUID.
-    pub owner_principal_id: Uuid,
-    /// Public global identifier resolved from the active IAM binding.
+    /// The creating Silicon's storage key.
+    pub owner_key: Uuid,
+    /// The creating Silicon's current public id, kept as the creation snapshot.
     pub silicon_id: String,
+    /// The creating Silicon, as responses show the owner.
+    pub owner: AccountRef,
     /// Reminder content.
     pub text: String,
     /// Validated IANA time-zone identifier.
@@ -163,12 +163,10 @@ impl MutableScheduleStatus {
 /// Fully merged, validated replacement persisted by an idempotent PATCH.
 #[derive(Clone, Debug)]
 pub struct ScheduleReplacement {
-    /// Organization scope.
-    pub org_id: String,
-    /// Stable owner principal required for mutation authority.
-    pub owner_principal_id: Uuid,
-    /// Public global Silicon identifier retained on the schedule.
-    pub silicon_id: String,
+    /// Every storage key of the owner Silicon; the schedule must be stored under one.
+    pub owner_keys: Vec<Uuid>,
+    /// The owner Silicon, as responses show it.
+    pub owner: AccountRef,
     /// Target schedule UUID.
     pub schedule_id: Uuid,
     /// Version observed before domain-level merge and validation.
@@ -202,10 +200,8 @@ pub struct ScheduleStatusChange {
 /// Validated desired-status changes persisted as one atomic operation.
 #[derive(Clone, Debug)]
 pub struct BulkScheduleStatusReplacement {
-    /// Organization scope shared by every target schedule.
-    pub org_id: String,
-    /// Stable owner principal required for mutation authority.
-    pub owner_principal_id: Uuid,
+    /// Every storage key of the owner Silicon; each schedule must be stored under one.
+    pub owner_keys: Vec<Uuid>,
     /// Desired state shared by every target schedule.
     pub status: MutableScheduleStatus,
     /// Target revisions in API request order.
@@ -221,15 +217,15 @@ pub struct ScheduleCursor {
     pub id: Uuid,
 }
 
-/// Tenant-scoped schedule listing filters.
+/// Owner-scoped schedule listing filters.
 #[derive(Clone, Debug)]
 pub struct ListSchedules {
-    /// Organization scope.
-    pub org_id: String,
-    /// IAM-authorized owner projection, enforced before pagination.
-    pub read_scope: ReminderReadScope,
-    /// Optional owner filter.
-    pub silicon_id: Option<String>,
+    /// Storage keys the caller may read, enforced before pagination; `None` reads every row.
+    pub read_keys: Option<Vec<Uuid>>,
+    /// Optional owner filter: the storage keys of one owner.
+    pub owner_keys: Option<Vec<Uuid>>,
+    /// Optional owner filter by the creation-time public id, for rows no account owns yet.
+    pub silicon_snapshot: Option<String>,
     /// Product-facing current or archived partition.
     pub section: ScheduleSection,
     /// Optional lifecycle filter.
@@ -247,9 +243,9 @@ pub struct ExecutionRow {
     pub id: Uuid,
     /// Parent schedule UUID.
     pub schedule_id: Uuid,
-    /// Organization snapshot.
-    pub org_id: String,
-    /// Owner Silicon snapshot.
+    /// Organization of a row written before the move to Silicon Accounts; `None` since.
+    pub org_id: Option<String>,
+    /// Owner Silicon's public id when the occurrence was materialized.
     pub silicon_id: String,
     /// Schedule revision after this occurrence was materialized.
     pub schedule_version: i64,
@@ -309,11 +305,11 @@ pub struct DueMaterialization {
 pub struct HookDestinationRow {
     /// Registry row UUID.
     pub id: Uuid,
-    /// Organization scope.
-    pub org_id: String,
-    /// Stable IAM UUID of the destination Silicon principal.
+    /// Organization of a row written before the move to Silicon Accounts; `None` since.
+    pub org_id: Option<String>,
+    /// Storage key of the owning Silicon's account.
     pub owner_principal_id: Uuid,
-    /// Public global identifier used by webhook routing.
+    /// The owning Silicon's public id when the subscription was created.
     pub silicon_id: String,
     /// AES-GCM ciphertext containing the endpoint URL.
     pub endpoint_url_ciphertext: Vec<u8>,
@@ -335,18 +331,20 @@ pub struct HookDestinationRow {
     pub created_at: DateTime<Utc>,
     /// Last replacement timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Associated-data scheme of the ciphertexts: 1 binds them to the legacy
+    /// organization and handle, 2 to this row's id and owner storage key.
+    pub aad_version: i16,
 }
 
 /// Already-encrypted destination values accepted by the registry repository.
+/// New destinations always use associated-data version 2.
 #[derive(Clone, Debug)]
 pub struct NewHookDestination {
-    /// Application-generated registry UUID used when no row exists.
+    /// Application-generated registry UUID (also part of the associated data).
     pub id: Uuid,
-    /// Organization scope.
-    pub org_id: String,
-    /// Stable IAM UUID of the destination Silicon principal.
-    pub owner_principal_id: Uuid,
-    /// Public global identifier used by webhook routing.
+    /// The owning Silicon's storage key.
+    pub owner_key: Uuid,
+    /// The owning Silicon's current public id, kept as the creation snapshot.
     pub silicon_id: String,
     /// Encrypted URL bytes.
     pub endpoint_url_ciphertext: Vec<u8>,
@@ -379,19 +377,7 @@ pub struct HookDestinationRewrap {
     pub encryption_key_version: i16,
 }
 
-/// Active IAM principal-to-public-Silicon binding used for ownership and webhook
-/// routing. Revoked bindings are intentionally not returned by public lookup.
-#[derive(Clone, Debug, FromRow)]
-pub struct SiliconIdentityRow {
-    /// Selected organization.
-    pub org_id: String,
-    /// Stable IAM principal UUID.
-    pub principal_id: Uuid,
-    /// Immutable global Silicon identifier.
-    pub silicon_id: String,
-}
-
-/// Deduplicated internal IAM or provisioning event receipt.
+/// Deduplicated internal event receipt (Silicon Accounts webhooks; legacy IAM events).
 #[derive(Clone, Debug, FromRow)]
 pub struct InternalEventReceiptRow {
     /// Internal receipt UUID.
@@ -453,20 +439,8 @@ pub struct NewInternalEvent {
     pub received_at: DateTime<Utc>,
 }
 
-/// Result of atomically applying one IAM membership-removal event.
-#[derive(Clone, Debug)]
-pub struct IamLifecycleOutcome {
-    /// Durable, processed inbox receipt. On replay this is the original row.
-    pub receipt: InternalEventReceiptRow,
-    /// Whether an identical committed event was observed without new changes.
-    pub replayed: bool,
-    /// Number of active or paused schedules soft-deleted by this transaction.
-    pub schedules_deleted: u64,
-    /// Number of unaccepted executions terminally failed by this transaction.
-    pub executions_failed: u64,
-}
-
-/// Result of one bounded cleanup pass over IAM-revoked resources.
+/// Result of one bounded cleanup pass over resources IAM revoked before the move to
+/// Silicon Accounts (rows that still carry an organization).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RevokedResourceCleanup {
     /// Newly soft-deleted schedules.
@@ -525,31 +499,55 @@ pub enum IdempotentMutation<T> {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ScheduleResponse {
+/// Public schedule representation (`openapi.yaml` `Schedule`), also stored
+/// verbatim for idempotent replay.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScheduleResponse {
+    /// Schedule UUID.
     pub id: Uuid,
-    pub org_id: String,
+    /// The owner Silicon's account; `null` only for a row written before the
+    /// move to Silicon Accounts that no account owns yet.
+    pub owner: Option<AccountRef>,
+    /// The owner Silicon's current public id (the creation-time id when the
+    /// owner is unknown).
     pub silicon_id: String,
+    /// Reminder content.
     pub text: String,
+    /// IANA timezone identifier.
     pub timezone: String,
+    /// One-time or recurring materialization behavior.
     pub kind: String,
+    /// Five-field Linux cron expression.
     pub cron: String,
+    /// Public lifecycle status.
     pub status: String,
+    /// Product-facing current or archived section.
     pub section: ScheduleSection,
+    /// Next due instant or null.
     pub next_run_at: Option<DateTime<Utc>>,
+    /// Time at which the reminder entered the archive, if applicable.
     pub archived_at: Option<DateTime<Utc>>,
+    /// Permanent-deletion deadline for archived reminders.
     pub purge_after: Option<DateTime<Utc>>,
+    /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// Last mutation timestamp.
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<&ScheduleRow> for ScheduleResponse {
-    fn from(row: &ScheduleRow) -> Self {
-        let archived_at = row.archived_at();
+impl ScheduleResponse {
+    /// Builds the response for a row and its owner. The owner's current id wins
+    /// over the creation snapshot when Remind knows it.
+    #[must_use]
+    pub fn new(row: &ScheduleRow, owner: Option<&AccountRef>) -> Self {
+        let silicon_id = owner
+            .map(|owner| owner.id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| row.silicon_id.clone());
         Self {
             id: row.id,
-            org_id: row.org_id.clone(),
-            silicon_id: row.silicon_id.clone(),
+            owner: owner.cloned(),
+            silicon_id,
             text: row.text.clone(),
             timezone: row.timezone.clone(),
             kind: row.schedule_kind.clone(),
@@ -557,7 +555,7 @@ impl From<&ScheduleRow> for ScheduleResponse {
             status: row.status.clone(),
             section: row.section(),
             next_run_at: row.next_run_at,
-            archived_at,
+            archived_at: row.archived_at(),
             purge_after: row.purge_after,
             created_at: row.created_at,
             updated_at: row.updated_at,

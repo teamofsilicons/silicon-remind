@@ -30,6 +30,12 @@ pub(crate) async fn create(
     body: Result<Json<BugReportRequest>, rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<BugReportResponse>), AppError> {
     let Json(input) = body.map_err(|_| AppError::Validation)?;
+    if !actor.can_write() {
+        return Err(AppError::forbidden(
+            "proof_cannot_write",
+            "Proofs only read reminders; send bug reports with the account's own access token.",
+        ));
+    }
     validate(&input)?;
     let key = super::schedules::idempotency_key(&headers)?;
     if !(8..=255).contains(&key.len()) {
@@ -44,15 +50,15 @@ pub(crate) async fn create(
     let hash = serde_json::to_string(&hash).map_err(|e| AppError::internal("report_hash", e))?;
     let pool = state.repository.pool();
     let mut tx = pool.begin().await.map_err(db)?;
-    // Serialize submissions per actor, including the rate limit and idempotent replay.
+    // Serialize submissions per account, including the rate limit and idempotent replay.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 906))")
-        .bind(format!("{}:{}", actor.org_id, actor.id))
+        .bind(format!("account:{}", actor.uuid))
         .execute(&mut *tx)
         .await
         .map_err(db)?;
     let existing: Option<(Uuid,String,String,Option<String>)> = sqlx::query_as(
-        "SELECT id,request_hash,status,failure_reason FROM bug_reports WHERE org_id=$1 AND actor_id=$2 AND idempotency_key=$3")
-        .bind(&actor.org_id).bind(&actor.id).bind(&key).fetch_optional(&mut *tx).await.map_err(db)?;
+        "SELECT id,request_hash,status,failure_reason FROM bug_reports WHERE org_id IS NULL AND actor_id=$1 AND idempotency_key=$2")
+        .bind(&actor.uuid).bind(&key).fetch_optional(&mut *tx).await.map_err(db)?;
     if let Some((id, old_hash, status, failure_reason)) = existing {
         if old_hash != hash {
             return Err(AppError::conflict("idempotency_key_reused"));
@@ -66,8 +72,8 @@ pub(crate) async fn create(
             }),
         ));
     }
-    let recent: i64 = sqlx::query_scalar("SELECT count(*) FROM bug_reports WHERE org_id=$1 AND actor_id=$2 AND created_at > now()-interval '1 hour'")
-        .bind(&actor.org_id).bind(&actor.id).fetch_one(&mut *tx).await.map_err(db)?;
+    let recent: i64 = sqlx::query_scalar("SELECT count(*) FROM bug_reports WHERE org_id IS NULL AND actor_id=$1 AND created_at > now()-interval '1 hour'")
+        .bind(&actor.uuid).fetch_one(&mut *tx).await.map_err(db)?;
     if recent >= 10 {
         return Err(AppError::RateLimited {
             retry_after_seconds: 3600,
@@ -75,8 +81,8 @@ pub(crate) async fn create(
     }
     let id = Uuid::now_v7();
     let status = if state.is_test { "simulated" } else { "queued" };
-    sqlx::query("INSERT INTO bug_reports(id,org_id,actor_id,idempotency_key,request_hash,message,pr,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
-        .bind(id).bind(&actor.org_id).bind(&actor.id).bind(key).bind(hash).bind(input.message).bind(input.pr).bind(status)
+    sqlx::query("INSERT INTO bug_reports(id,org_id,actor_id,idempotency_key,request_hash,message,pr,status) VALUES($1,NULL,$2,$3,$4,$5,$6,$7)")
+        .bind(id).bind(&actor.uuid).bind(key).bind(hash).bind(input.message).bind(input.pr).bind(status)
         .execute(&mut *tx).await.map_err(db)?;
     tx.commit().await.map_err(db)?;
     Ok((
@@ -94,8 +100,8 @@ pub(crate) async fn get(
     Extension(actor): Extension<Actor>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<BugReportResponse>, AppError> {
-    sqlx::query_as("SELECT id,status,failure_reason FROM bug_reports WHERE id=$1 AND org_id=$2 AND actor_id=$3")
-        .bind(id).bind(actor.org_id).bind(actor.id).fetch_optional(state.repository.pool()).await.map_err(db)?
+    sqlx::query_as("SELECT id,status,failure_reason FROM bug_reports WHERE id=$1 AND org_id IS NULL AND actor_id=$2")
+        .bind(id).bind(&actor.uuid).fetch_optional(state.repository.pool()).await.map_err(db)?
         .map(Json).ok_or(AppError::NotFound)
 }
 

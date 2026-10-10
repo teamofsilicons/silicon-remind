@@ -1,4 +1,8 @@
-//! Organization-scoped schedule and execution-history use cases.
+//! Schedule and execution-history use cases for Silicon Accounts actors.
+//!
+//! Only a Silicon sets and changes reminders, with its own access token. Every
+//! account in the Silicon's circle and every account it granted view reads
+//! them. In a test environment the key holder reads everything there.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -16,17 +20,20 @@ use uuid::Uuid;
 use crate::{
     application::ports::Clock,
     domain::{
-        Actor, ActorKind, CreateScheduleCommand, CronExpression, CursorKind,
-        MAX_SCHEDULE_STATUS_BATCH_SIZE, PageCursor, PatchScheduleCommand, Schedule, ScheduleKind,
-        ScheduleSection, ScheduleStatus, ScheduleTiming, ScheduleValidationError,
-        is_valid_global_silicon_id,
+        AccountRef, Actor, ActorKind, CreateScheduleCommand, Credential, CronExpression,
+        CursorKind, MAX_SCHEDULE_STATUS_BATCH_SIZE, PageCursor, PatchScheduleCommand, ReadScope,
+        Schedule, ScheduleKind, ScheduleSection, ScheduleStatus, ScheduleTiming,
+        ScheduleValidationError, is_valid_account_uuid, is_valid_global_silicon_id,
     },
     error::AppError,
-    infrastructure::postgres::{
-        ActorType, AuditContext, BulkScheduleStatusReplacement, CreateSchedule, ExecutionCursor,
-        ExecutionRow, IdempotencyContext, IdempotentMutation, ListSchedules, MutableScheduleStatus,
-        Page, PostgresRepository, ScheduleCursor, ScheduleReplacement, ScheduleRow,
-        ScheduleStatusChange,
+    infrastructure::{
+        identity::IdentityStore,
+        postgres::{
+            ActorType, AuditContext, BulkScheduleStatusReplacement, CreateSchedule,
+            ExecutionCursor, ExecutionRow, IdempotencyContext, IdempotentMutation, ListSchedules,
+            MutableScheduleStatus, Page, PostgresRepository, ScheduleCursor, ScheduleReplacement,
+            ScheduleRow, ScheduleStatusChange,
+        },
     },
     request_context,
 };
@@ -40,24 +47,31 @@ pub struct MutationResponse {
     pub body: Value,
 }
 
+/// The accounts behind storage keys, for building responses.
+pub type Owners = HashMap<Uuid, AccountRef>;
+
 /// Application service enforcing domain and authorization policy.
 #[derive(Clone, Debug)]
 pub struct ScheduleService {
     repository: PostgresRepository,
+    identity: IdentityStore,
     clock: Arc<dyn Clock>,
     idempotency_retention: Duration,
 }
 
 impl ScheduleService {
-    /// Creates the service with its durable repository and deterministic clock.
+    /// Creates the service. `repository` holds the selected environment's data;
+    /// `identity` is always the production identity store.
     #[must_use]
     pub fn new(
         repository: PostgresRepository,
+        identity: IdentityStore,
         clock: Arc<dyn Clock>,
         idempotency_retention: Duration,
     ) -> Self {
         Self {
             repository,
+            identity,
             clock,
             idempotency_retention,
         }
@@ -69,7 +83,7 @@ impl ScheduleService {
         &self.repository
     }
 
-    /// Creates an owned schedule with atomic idempotency replay state.
+    /// Creates a reminder owned by the calling Silicon, idempotently.
     ///
     /// # Errors
     ///
@@ -81,13 +95,13 @@ impl ScheduleService {
         idempotency_key: String,
         request_hash: [u8; 32],
     ) -> Result<MutationResponse, AppError> {
-        require_silicon(actor)?;
+        require_writing_silicon(actor)?;
         validate_idempotency_key(&idempotency_key)?;
         let now = self.clock.now();
         let idempotency = self.idempotency(actor, idempotency_key, request_hash, now)?;
         if let Some(stored) = self
             .repository
-            .find_idempotent_response(&actor.org_id, "schedule.create", None, &idempotency)
+            .find_idempotent_response("schedule.create", None, &idempotency)
             .await?
         {
             return Ok(MutationResponse {
@@ -95,39 +109,33 @@ impl ScheduleService {
                 body: stored.response_body,
             });
         }
-        let owner_principal_id = principal_id(actor)?;
         let validated = command.validate(now).map_err(|_| AppError::Validation)?;
-        let silicon_id = actor
-            .public_id
-            .as_deref()
-            .ok_or(AppError::Unauthenticated)?;
-        self.repository
-            .register_authenticated_silicon(&actor.org_id, owner_principal_id, silicon_id)
-            .await?;
-        let identity = self
-            .repository
-            .get_schedulable_silicon_identity(&actor.org_id, owner_principal_id)
-            .await?;
+        if !is_valid_global_silicon_id(&actor.public_id) {
+            return Err(AppError::described(
+                http::StatusCode::CONFLICT,
+                "silicon_id_unknown",
+                "Remind does not know this Silicon's si: id yet. Retry in a minute.",
+            ));
+        }
         let schedule = CreateSchedule {
             id: Uuid::now_v7(),
-            org_id: actor.org_id.clone(),
-            owner_principal_id,
-            silicon_id: identity.silicon_id,
+            owner_key: actor.storage_key,
+            silicon_id: actor.public_id.clone(),
+            owner: actor.account(),
             text: validated.text().to_owned(),
             timezone: validated.timezone().name().to_owned(),
             schedule_kind: validated.timing().kind().as_str().to_owned(),
             cron: validated.timing().cron().to_string(),
             next_run_at: validated.next_run_at(),
         };
-        let audit = audit_context(actor);
         let mutation = self
             .repository
-            .create_schedule_idempotent(&schedule, &idempotency, &audit)
+            .create_schedule_idempotent(&schedule, &idempotency, &audit_context(actor))
             .await?;
         Ok(mutation_response(mutation, 201))
     }
 
-    /// Lists every visible schedule in the selected organization.
+    /// Lists the reminders the caller may read, optionally for one Silicon.
     ///
     /// # Errors
     ///
@@ -140,12 +148,14 @@ impl ScheduleService {
         status: Option<ScheduleStatus>,
         encoded_cursor: Option<&str>,
         limit: Option<u32>,
-    ) -> Result<Page<ScheduleRow>, AppError> {
-        if silicon_id
-            .as_deref()
-            .is_some_and(|value| !is_valid_global_silicon_id(value))
-        {
-            return Err(AppError::Validation);
+    ) -> Result<(Page<ScheduleRow>, Owners), AppError> {
+        if silicon_id.as_deref().is_some_and(|value| {
+            !is_valid_global_silicon_id(value) && !is_valid_account_uuid(value)
+        }) {
+            return Err(AppError::invalid(
+                "silicon_id_invalid",
+                "silicon_id must be a Silicon id such as si:scout or its account UUID.",
+            ));
         }
         let cursor = encoded_cursor
             .map(|cursor| PageCursor::decode(cursor, CursorKind::Schedules))
@@ -155,34 +165,47 @@ impl ScheduleService {
                 created_at: cursor.timestamp(),
                 id: cursor.id(),
             });
+        let (owner_keys, silicon_snapshot) = match silicon_id.as_deref() {
+            Some(id) => self.owner_filter(actor, id).await?,
+            None => (None, None),
+        };
         let filters = ListSchedules {
-            org_id: actor.org_id.clone(),
-            read_scope: actor.read_scope.clone(),
-            silicon_id,
+            read_keys: actor.read_keys(),
+            owner_keys,
+            silicon_snapshot,
             section,
             status: status.map(schedule_status_name).map(str::to_owned),
             cursor,
             limit: validate_page_limit(limit)?,
         };
-        self.repository
-            .list_schedules(&filters)
-            .await
-            .map_err(Into::into)
+        let page = self.repository.list_schedules(&filters).await?;
+        let owners = self.owners_for(actor, &page.items).await?;
+        Ok((page, owners))
     }
 
-    /// Gets one organization-visible schedule.
+    /// Gets one readable reminder and its owner.
     ///
     /// # Errors
     ///
-    /// Returns not found without leaking cross-organization existence.
-    pub async fn get(&self, actor: &Actor, schedule_id: Uuid) -> Result<ScheduleRow, AppError> {
-        self.repository
-            .get_schedule(&actor.org_id, schedule_id, &actor.read_scope)
+    /// Returns not found for reminders the caller cannot read.
+    pub async fn get(
+        &self,
+        actor: &Actor,
+        schedule_id: Uuid,
+    ) -> Result<(ScheduleRow, Option<AccountRef>), AppError> {
+        let row = self
+            .repository
+            .get_schedule(actor.read_keys().as_deref(), schedule_id)
             .await?
-            .ok_or(AppError::NotFound)
+            .ok_or(AppError::NotFound)?;
+        let owner = self
+            .owners_for(actor, std::slice::from_ref(&row))
+            .await?
+            .remove(&row.owner_principal_id);
+        Ok((row, owner))
     }
 
-    /// Applies an owner-only schedule merge patch atomically and idempotently.
+    /// Applies an owner-only merge patch atomically and idempotently.
     ///
     /// # Errors
     ///
@@ -195,18 +218,13 @@ impl ScheduleService {
         idempotency_key: String,
         request_hash: [u8; 32],
     ) -> Result<MutationResponse, AppError> {
-        require_silicon(actor)?;
+        require_writing_silicon(actor)?;
         validate_idempotency_key(&idempotency_key)?;
         let now = self.clock.now();
         let idempotency = self.idempotency(actor, idempotency_key, request_hash, now)?;
         if let Some(stored) = self
             .repository
-            .find_idempotent_response(
-                &actor.org_id,
-                "schedule.patch",
-                Some(schedule_id),
-                &idempotency,
-            )
+            .find_idempotent_response("schedule.patch", Some(schedule_id), &idempotency)
             .await?
         {
             return Ok(MutationResponse {
@@ -214,7 +232,7 @@ impl ScheduleService {
                 body: stored.response_body,
             });
         }
-        let current_row = self.get(actor, schedule_id).await?;
+        let (current_row, _) = self.get(actor, schedule_id).await?;
         require_owner(actor, &current_row)?;
         let mut schedule = schedule_from_row(&current_row)?;
         let patch = command
@@ -223,16 +241,14 @@ impl ScheduleService {
         schedule
             .apply_patch(patch)
             .map_err(|error| map_patch_validation(&error))?;
-
         let status = match schedule.status {
             ScheduleStatus::Active => MutableScheduleStatus::Active,
             ScheduleStatus::Paused => MutableScheduleStatus::Paused,
             ScheduleStatus::Completed => return Err(AppError::conflict("schedule_completed")),
         };
         let replacement = ScheduleReplacement {
-            org_id: actor.org_id.clone(),
-            owner_principal_id: principal_id(actor)?,
-            silicon_id: current_row.silicon_id.clone(),
+            owner_keys: actor.own_keys.clone(),
+            owner: actor.account(),
             schedule_id,
             expected_version: current_row.version,
             text: schedule.text.clone(),
@@ -249,7 +265,7 @@ impl ScheduleService {
         Ok(mutation_response(mutation, 200))
     }
 
-    /// Sets the desired status of a bounded reminder set atomically.
+    /// Sets the desired status of up to 100 of the caller's reminders atomically.
     ///
     /// # Errors
     ///
@@ -263,15 +279,14 @@ impl ScheduleService {
         idempotency_key: String,
         request_hash: [u8; 32],
     ) -> Result<MutationResponse, AppError> {
-        require_silicon(actor)?;
+        require_writing_silicon(actor)?;
         validate_schedule_status_batch(&schedule_ids, status)?;
         validate_idempotency_key(&idempotency_key)?;
-
         let now = self.clock.now();
         let idempotency = self.idempotency(actor, idempotency_key, request_hash, now)?;
         if let Some(stored) = self
             .repository
-            .find_idempotent_response(&actor.org_id, "schedule.bulk_status", None, &idempotency)
+            .find_idempotent_response("schedule.bulk_status", None, &idempotency)
             .await?
         {
             return Ok(MutationResponse {
@@ -279,28 +294,21 @@ impl ScheduleService {
                 body: stored.response_body,
             });
         }
-
         let rows = self
             .repository
-            .get_schedules_for_status_change(&actor.org_id, &schedule_ids)
+            .get_schedules_for_status_change(actor.read_keys().as_deref(), &schedule_ids)
             .await?;
         if rows.len() != schedule_ids.len() {
             return Err(AppError::NotFound);
         }
-
         let rows_by_id: HashMap<Uuid, ScheduleRow> =
             rows.into_iter().map(|row| (row.id, row)).collect();
         let ordered_rows = schedule_ids
             .iter()
             .map(|schedule_id| rows_by_id.get(schedule_id).ok_or(AppError::NotFound))
             .collect::<Result<Vec<_>, _>>()?;
-
-        let owner_principal_id = principal_id(actor)?;
-        if ordered_rows
-            .iter()
-            .any(|row| row.owner_principal_id != owner_principal_id)
-        {
-            return Err(AppError::Forbidden);
+        for row in &ordered_rows {
+            require_owner(actor, row)?;
         }
         if ordered_rows
             .iter()
@@ -308,22 +316,19 @@ impl ScheduleService {
         {
             return Err(AppError::conflict("invalid_schedule_state"));
         }
-
         let mutable_status = mutable_schedule_status(status)?;
         let schedules = ordered_rows
             .into_iter()
             .map(|row| {
-                let next_run_at = desired_next_run_at(row, status, now)?;
                 Ok(ScheduleStatusChange {
                     id: row.id,
                     expected_version: row.version,
-                    next_run_at,
+                    next_run_at: desired_next_run_at(row, status, now)?,
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
         let replacement = BulkScheduleStatusReplacement {
-            org_id: actor.org_id.clone(),
-            owner_principal_id,
+            owner_keys: actor.own_keys.clone(),
             status: mutable_status,
             schedules,
         };
@@ -334,18 +339,19 @@ impl ScheduleService {
         Ok(mutation_response(mutation, 200))
     }
 
-    /// Archives an owner schedule and prevents future delivery claims.
+    /// Archives one of the caller's reminders and stops its future deliveries.
     ///
     /// # Errors
     ///
-    /// Returns not found whenever ownership cannot be established.
+    /// Returns not found for reminders the caller cannot read, and forbidden for
+    /// a readable reminder another Silicon set.
     pub async fn delete(&self, actor: &Actor, schedule_id: Uuid) -> Result<(), AppError> {
-        require_silicon(actor)?;
-        let owner_principal_id = principal_id(actor)?;
+        require_writing_silicon(actor)?;
+        let (row, _) = self.get(actor, schedule_id).await?;
+        require_owner(actor, &row)?;
         self.repository
             .archive_schedule(
-                &actor.org_id,
-                owner_principal_id,
+                &actor.own_keys,
                 schedule_id,
                 self.clock.now(),
                 &audit_context(actor),
@@ -354,7 +360,7 @@ impl ScheduleService {
         Ok(())
     }
 
-    /// Lists execution history for an organization-visible schedule.
+    /// Lists a readable reminder's execution history.
     ///
     /// # Errors
     ///
@@ -376,14 +382,99 @@ impl ScheduleService {
             });
         self.repository
             .list_executions(
-                &actor.org_id,
+                actor.read_keys().as_deref(),
                 schedule_id,
-                &actor.read_scope,
                 cursor,
                 validate_page_limit(limit)?,
             )
             .await
             .map_err(Into::into)
+    }
+
+    /// The owners of rows, from the caller's scope first and then from the
+    /// identity store (needed in test environments, where everything is readable).
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence errors.
+    pub async fn owners_for(
+        &self,
+        actor: &Actor,
+        rows: &[ScheduleRow],
+    ) -> Result<Owners, AppError> {
+        let mut owners = Owners::new();
+        let mut missing = HashSet::new();
+        for row in rows {
+            match actor.owner_of_key(row.owner_principal_id) {
+                Some(owner) => {
+                    owners.insert(row.owner_principal_id, owner.account.clone());
+                }
+                None => {
+                    missing.insert(row.owner_principal_id);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let missing = missing.into_iter().collect::<Vec<_>>();
+            owners.extend(self.identity.owners_by_keys(&missing).await?);
+        }
+        Ok(owners)
+    }
+
+    /// Resolves `?silicon_id=` to storage keys among what the caller may read.
+    /// A stale cached id is retried through Silicon Accounts; an id the caller
+    /// cannot see matches nothing. In a test environment rows that no account
+    /// owns are also matched by their creation-time id.
+    async fn owner_filter(
+        &self,
+        actor: &Actor,
+        silicon_id: &str,
+    ) -> Result<(Option<Vec<Uuid>>, Option<String>), AppError> {
+        match &actor.read {
+            ReadScope::Owners(owners) => {
+                let mut uuid = actor
+                    .visible_by_uuid(silicon_id)
+                    .or_else(|| actor.visible_by_id(silicon_id))
+                    .map(|owner| owner.account.uuid.clone());
+                if uuid.is_none()
+                    && self
+                        .identity
+                        .gateway()
+                        .admit_caller_lookup(&actor.uuid)
+                        .await
+                        .is_ok()
+                    && let Ok(Some(account)) = self.identity.resolve_account(silicon_id).await
+                    && actor.visible_by_uuid(&account.uuid).is_some()
+                {
+                    uuid = Some(account.uuid);
+                }
+                let keys = uuid
+                    .map(|uuid| {
+                        owners
+                            .iter()
+                            .filter(|(_, owner)| owner.account.uuid == uuid)
+                            .map(|(key, _)| *key)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok((Some(keys), None))
+            }
+            ReadScope::Everything => {
+                self.identity
+                    .gateway()
+                    .admit_caller_lookup(&actor.uuid)
+                    .await
+                    .map_err(crate::infrastructure::identity::lookup_error)?;
+                let keys = match self.identity.resolve_account(silicon_id).await {
+                    Ok(Some(account)) => self.identity.keys_of(&account.uuid).await?,
+                    _ => Vec::new(),
+                };
+                Ok((
+                    Some(keys),
+                    is_valid_global_silicon_id(silicon_id).then(|| silicon_id.to_owned()),
+                ))
+            }
+        }
     }
 
     fn idempotency(
@@ -400,7 +491,7 @@ impl ScheduleService {
         })?;
         Ok(IdempotencyContext {
             actor_type: actor_type(actor.kind),
-            actor_id: actor.id.clone(),
+            actor_id: actor.uuid.clone(),
             key,
             request_hash,
             expires_at,
@@ -470,7 +561,6 @@ fn schedule_from_row(row: &ScheduleRow) -> Result<Schedule, AppError> {
         .map_err(|error| AppError::internal("stored_schedule_kind", error))?;
     let expression = CronExpression::parse(&row.cron)
         .map_err(|error| AppError::internal("stored_schedule_cron", error))?;
-    let timing = ScheduleTiming::new(kind, expression);
     let status = match row.status.as_str() {
         "active" => ScheduleStatus::Active,
         "paused" => ScheduleStatus::Paused,
@@ -486,12 +576,11 @@ fn schedule_from_row(row: &ScheduleRow) -> Result<Schedule, AppError> {
         .map_err(|error| AppError::internal("stored_schedule_version", error))?;
     Ok(Schedule {
         id: row.id,
-        org_id: row.org_id.clone(),
-        owner_principal_id: row.owner_principal_id.to_string(),
+        owner_key: row.owner_principal_id,
         silicon_id: row.silicon_id.clone(),
         text: row.text.clone(),
         timezone,
-        timing,
+        timing: ScheduleTiming::new(kind, expression),
         status,
         next_run_at: row.next_run_at,
         created_at: row.created_at,
@@ -508,32 +597,59 @@ const fn actor_type(kind: ActorKind) -> ActorType {
     }
 }
 
-fn audit_context(actor: &Actor) -> AuditContext {
+/// Audit attribution: the account's uuid.
+#[must_use]
+pub fn audit_context(actor: &Actor) -> AuditContext {
     AuditContext {
         actor_type: actor_type(actor.kind),
-        actor_id: actor.id.clone(),
+        actor_id: actor.uuid.clone(),
         request_id: request_context::current_request_id(),
     }
 }
 
-fn require_silicon(actor: &Actor) -> Result<(), AppError> {
+/// Refuses proofs: another app acting for an account can only read.
+///
+/// # Errors
+///
+/// Returns a 403 that says why.
+pub fn require_access_token(actor: &Actor) -> Result<(), AppError> {
+    if let Credential::Proof { issuing_app, .. } = &actor.credential {
+        return Err(AppError::forbidden(
+            "proof_cannot_write",
+            format!(
+                "This request carries a proof from `{issuing_app}`, which can only read reminders. Changes need the account's own Remind access token."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses proofs (they only read) and Carbons (only Silicons set reminders).
+///
+/// # Errors
+///
+/// Returns a 403 that says why.
+pub fn require_writing_silicon(actor: &Actor) -> Result<(), AppError> {
+    require_access_token(actor)?;
     if actor.is_silicon() {
         Ok(())
     } else {
-        Err(AppError::Forbidden)
+        Err(AppError::forbidden(
+            "silicon_only",
+            "Only a Silicon sets and changes reminders. A Carbon sees the reminders of the Silicons it looks after but cannot change them.",
+        ))
     }
 }
 
 fn require_owner(actor: &Actor, schedule: &ScheduleRow) -> Result<(), AppError> {
-    if actor.is_silicon() && actor.id == schedule.owner_principal_id.to_string() {
+    if actor.is_silicon() && actor.owns_key(schedule.owner_principal_id) {
         Ok(())
     } else {
-        Err(AppError::Forbidden)
+        Err(AppError::forbidden(
+            "not_reminder_owner",
+            "Only the Silicon that set this reminder can change it; others it is shared with can only read it.",
+        ))
     }
-}
-
-fn principal_id(actor: &Actor) -> Result<Uuid, AppError> {
-    Uuid::parse_str(&actor.id).map_err(|_| AppError::Unauthenticated)
 }
 
 fn validate_idempotency_key(key: &str) -> Result<(), AppError> {
@@ -586,7 +702,6 @@ fn desired_next_run_at(
     if row.status == schedule_status_name(status) {
         return Ok(row.next_run_at);
     }
-
     let mut schedule = schedule_from_row(row)?;
     let patch = PatchScheduleCommand {
         status: Some(status),
@@ -638,12 +753,15 @@ fn mutation_response<T>(mutation: IdempotentMutation<T>, applied_status: u16) ->
 #[cfg(test)]
 mod tests {
     use serde::Serialize;
+    use uuid::Uuid;
 
     use super::{
-        desired_next_run_at, request_hash, validate_idempotency_key, validate_page_limit,
-        validate_schedule_status_batch,
+        desired_next_run_at, request_hash, require_owner, require_writing_silicon,
+        validate_idempotency_key, validate_page_limit, validate_schedule_status_batch,
     };
-    use crate::domain::{MAX_SCHEDULE_STATUS_BATCH_SIZE, ScheduleStatus};
+    use crate::domain::{
+        ActorKind, Credential, MAX_SCHEDULE_STATUS_BATCH_SIZE, ScheduleStatus, fixtures::actor,
+    };
     use crate::infrastructure::postgres::ScheduleRow;
 
     #[derive(Serialize)]
@@ -654,10 +772,8 @@ mod tests {
     #[test]
     fn request_fingerprint_is_stable_and_payload_bound() -> anyhow::Result<()> {
         let first = request_hash(&Input { value: "a" })?;
-        let replay = request_hash(&Input { value: "a" })?;
-        let different = request_hash(&Input { value: "b" })?;
-        assert_eq!(first, replay);
-        assert_ne!(first, different);
+        assert_eq!(first, request_hash(&Input { value: "a" })?);
+        assert_ne!(first, request_hash(&Input { value: "b" })?);
         Ok(())
     }
 
@@ -671,30 +787,27 @@ mod tests {
 
     #[test]
     fn validates_bulk_status_contract() {
-        let first = uuid::Uuid::now_v7();
-        let second = uuid::Uuid::now_v7();
-
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
         assert!(validate_schedule_status_batch(&[first, second], ScheduleStatus::Paused).is_ok());
         assert!(validate_schedule_status_batch(&[], ScheduleStatus::Active).is_err());
         assert!(validate_schedule_status_batch(&[first, first], ScheduleStatus::Paused).is_err());
         assert!(validate_schedule_status_batch(&[first], ScheduleStatus::Completed).is_err());
         assert!(
             validate_schedule_status_batch(
-                &vec![uuid::Uuid::nil(); MAX_SCHEDULE_STATUS_BATCH_SIZE + 1],
+                &vec![Uuid::nil(); MAX_SCHEDULE_STATUS_BATCH_SIZE + 1],
                 ScheduleStatus::Active,
             )
             .is_err()
         );
     }
 
-    #[test]
-    fn resumed_schedule_uses_first_cron_occurrence_after_shared_time() -> anyhow::Result<()> {
-        let now = "2026-09-01T10:00:30Z".parse()?;
-        let row = ScheduleRow {
-            id: uuid::Uuid::now_v7(),
-            org_id: "org_test".to_owned(),
-            owner_principal_id: uuid::Uuid::now_v7(),
-            silicon_id: "silicon_test_org_test".to_owned(),
+    fn row(owner: Uuid) -> anyhow::Result<ScheduleRow> {
+        Ok(ScheduleRow {
+            id: Uuid::now_v7(),
+            org_id: None,
+            owner_principal_id: owner,
+            silicon_id: "si:test".to_owned(),
             text: "wake up".to_owned(),
             timezone: "UTC".to_owned(),
             schedule_kind: "recurring".to_owned(),
@@ -707,12 +820,50 @@ mod tests {
             purge_after: None,
             created_at: "2026-09-01T09:00:00Z".parse()?,
             updated_at: "2026-09-01T09:30:00Z".parse()?,
-        };
+        })
+    }
 
+    #[test]
+    fn resumed_schedule_uses_first_cron_occurrence_after_shared_time() -> anyhow::Result<()> {
+        let now = "2026-09-01T10:00:30Z".parse()?;
         assert_eq!(
-            desired_next_run_at(&row, ScheduleStatus::Active, now)?,
+            desired_next_run_at(&row(Uuid::now_v7())?, ScheduleStatus::Active, now)?,
             Some("2026-09-01T10:01:00Z".parse()?)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn only_silicons_with_their_own_token_change_their_own_reminders() -> anyhow::Result<()> {
+        let key = Uuid::from_u128(1);
+        let silicon = actor("aaa", "si:scout", ActorKind::Silicon, key, vec![]);
+        let carbon = actor(
+            "ccc",
+            "c:ada",
+            ActorKind::Carbon,
+            Uuid::from_u128(2),
+            vec![],
+        );
+        let mut proof = silicon.clone();
+        proof.credential = Credential::Proof {
+            issuing_app: "interface".to_owned(),
+            scopes: vec!["remind.schedules.read".to_owned()],
+        };
+        assert!(require_writing_silicon(&silicon).is_ok());
+        assert_eq!(
+            require_writing_silicon(&carbon)
+                .map_err(|error| error.code())
+                .err(),
+            Some("silicon_only".into())
+        );
+        assert_eq!(
+            require_writing_silicon(&proof)
+                .map_err(|error| error.code())
+                .err(),
+            Some("proof_cannot_write".into())
+        );
+        assert!(require_owner(&silicon, &row(key)?).is_ok());
+        assert!(require_owner(&silicon, &row(Uuid::from_u128(3))?).is_err());
         Ok(())
     }
 }

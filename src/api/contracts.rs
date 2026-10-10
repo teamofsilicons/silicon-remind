@@ -11,7 +11,11 @@ use axum::{
     response::{IntoResponse as _, Response},
 };
 
-const CURRENT: i32 = 1;
+/// The implemented wire contract: Silicon Accounts tokens, no organizations.
+pub const CURRENT: i32 = 2;
+const CURRENT_HEADER: &str = "2";
+/// Contract 1 accepted only Silicon IAM tokens; it was retired with them.
+const RETIRED: i32 = 1;
 type ContractState = (String, Option<chrono::DateTime<chrono::Utc>>);
 
 /// Lists the service's implemented protocols and lifecycle policy.
@@ -52,13 +56,16 @@ pub async fn negotiate(State(state): State<ApiState>, request: Request, next: Ne
         .get_all("x-remind-api-version")
         .iter()
         .collect();
+    if path_version == Some(RETIRED) {
+        return (StatusCode::GONE,Json(serde_json::json!({"error":{"code":"api_version_retired","message":"Remind API v1 was retired when Remind moved to Silicon Accounts sign-in. Use /api/v2 with X-Remind-API-Version: 2 and a Silicon Accounts access token; see https://docs.remind.teamofsilicons.com/version-policy/","request_id":crate::request_context::current_request_id()}}))).into_response();
+    }
     if path_version != Some(CURRENT)
         || headers.len() > 1
         || headers
             .first()
-            .is_some_and(|h| h.to_str().ok() != Some("1"))
+            .is_some_and(|h| h.to_str().ok() != Some(CURRENT_HEADER))
     {
-        return (StatusCode::NOT_ACCEPTABLE,Json(serde_json::json!({"error":{"code":"unsupported_api_version","message":"Use /api/v1 and X-Remind-API-Version: 1; discover supported protocols at /api/versions","request_id":crate::request_context::current_request_id()}}))).into_response();
+        return (StatusCode::NOT_ACCEPTABLE,Json(serde_json::json!({"error":{"code":"unsupported_api_version","message":"Use /api/v2 and X-Remind-API-Version: 2; discover supported protocols at /api/versions","request_id":crate::request_context::current_request_id()}}))).into_response();
     }
     let state = state.scoped(request.extensions());
     // A single atomic write serializes usage with deprecation/sunset decisions.
@@ -70,9 +77,10 @@ pub async fn negotiate(State(state): State<ApiState>, request: Request, next: Ne
         Err(error) => return AppError::from(error).into_response(),
     };
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert("x-remind-api-version", HeaderValue::from_static("1"));
+    response.headers_mut().insert(
+        "x-remind-api-version",
+        HeaderValue::from_static(CURRENT_HEADER),
+    );
     response.headers_mut().insert(
         "link",
         HeaderValue::from_static(

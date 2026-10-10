@@ -1,641 +1,356 @@
-//! Exercise the installed command grammar, isolated state, and live auth checks.
-use anyhow::{Context as _, Result};
-use serde_json::{Value, json};
-use std::{
-    fs,
-    path::Path,
-    process::{Command, Output},
-};
-use tempfile::TempDir;
-use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path},
-};
+//! The Silicon Apps contract (help, `accounts --json`, `login status --json` signed out, in an
+//! empty home), home selection, old and broken state files, and retired commands.
+mod common;
 
-fn cli(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_remind"));
-    command
-        .env("HOME", home)
-        .env_remove("SILICON_HOME")
-        .env_remove("REMIND_URL")
-        .env_remove("REMIND_ORG")
-        .env_remove("REMIND_ACCOUNT")
-        .arg("--no-update");
-    command
+use anyhow::Result;
+use common::{Home, json_error, ok_json};
+use serde_json::{Value, json};
+
+fn golden_accounts(api_url: &str, accounts_url: &str) -> Value {
+    json!({
+        "app_id": "remind",
+        "client_id": "remind",
+        "accounts_url": accounts_url,
+        "api_url": api_url,
+        "version": env!("CARGO_PKG_VERSION"),
+        "api_version": 2,
+        "sign_in": {
+            "carbon": "remind login",
+            "silicon": "silicon-accounts login --app remind -q | remind login --slt-stdin",
+            "status": "remind login status --json"
+        },
+        "docs_url": "https://docs.remind.teamofsilicons.com"
+    })
 }
-fn success(output: Output) -> Result<Value> {
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stderr.is_empty()
-            || String::from_utf8_lossy(&output.stderr).starts_with("Test environment:"),
-        "JSON commands may only print the selected environment on stderr"
-    );
-    Ok(serde_json::from_slice(&output.stdout)?)
-}
-fn session() -> Value {
-    json!({"access_token":"access-fixture", "refresh_token":"refresh-fixture",
-        "expires_in":3600, "token_type":"Bearer", "scope":"", "actor":{"type":"silicon","public_id":"si:fixture"}, "org_id":"tos"})
-}
-fn identity(actor: &str) -> Value {
-    json!({"principal_id":"01992000-0000-7000-8000-000000000001", "actor_type":actor,
-        "public_id":if actor == "silicon" { "si:fixture" } else { "c:fixture" }, "org_id":"tos", "membership_id":"01992000-0000-7000-8000-000000000002",
-        "org_role":"member", "authorization_epoch":1, "can_manage_reminders":actor == "silicon"})
-}
-fn save(home: &Path, url: &str, expired: bool, test: Option<&str>) -> Result<()> {
-    fs::create_dir_all(home.join(".remind"))?;
-    let key = format!("{url}#{}", test.unwrap_or("production"));
-    let mut sessions = serde_json::Map::new();
-    sessions.insert(
-        key.clone(),
-        json!({"session":session(), "org":"tos",
-        "expires_at": if expired { 0 } else { chrono::Utc::now().timestamp() + 3600 }}),
-    );
-    let mut test_keys = serde_json::Map::new();
-    if test.is_some() {
-        test_keys.insert(key, json!("12345678901234567890123456789012"));
+
+#[test]
+fn the_three_discovery_commands_work_in_an_empty_home_and_write_nothing() -> Result<()> {
+    let home = Home::new()?;
+    let silicon_home = Home::new()?;
+    let run = |args: &[&str]| {
+        home.remind(None, None)
+            .env("SILICON_HOME", &silicon_home.path)
+            .args(args)
+            .output()
+    };
+    let help = run(&["--help"])?;
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout)?;
+    assert!(help.contains("remind login") && help.contains("accounts --json"));
+    for retired in [
+        "iam",
+        "IAM",
+        "Honeycomb",
+        "honeycomb",
+        "organization",
+        "--org",
+    ] {
+        assert!(!help.contains(retired), "help mentions {retired}");
     }
-    fs::write(
-        home.join(".remind/state.json"),
-        serde_json::to_vec(&json!({
-            "url":url, "auto_update":false, "last_update_check":0, "sessions":sessions, "test_keys":test_keys
-        }))?,
-    )?;
+    assert_eq!(
+        ok_json(run(&["accounts", "--json"])?)?,
+        golden_accounts(
+            "https://api.remind.teamofsilicons.com",
+            "https://accounts.teamofsilicons.com"
+        )
+    );
+    let status = run(&["login", "status", "--json"])?;
+    assert!(
+        status.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(ok_json(status)?, json!({"authenticated": false}));
+    let text = run(&["login", "status"])?;
+    assert_eq!(
+        text.status.code(),
+        Some(1),
+        "signed out without --json exits 1"
+    );
+    assert!(String::from_utf8(text.stdout)?.contains("Not signed in"));
+    assert!(!home.path.join(".remind").exists());
+    assert!(!silicon_home.path.join(".remind").exists());
     Ok(())
 }
 
 #[test]
-fn help_and_home_selection() -> Result<()> {
-    let home = TempDir::new()?;
-    let silicon = TempDir::new()?;
-    let configured = TempDir::new()?;
-    let help = cli(home.path()).arg("--help").output()?;
-    assert!(help.status.success());
-    let help = String::from_utf8(help.stdout)?;
-    assert!(help.contains("iam") && help.contains("login"));
-    assert!(!home.path().join(".remind").exists());
-    assert!(!cli(home.path()).arg("login").output()?.status.success());
-    let normal = success(
-        cli(home.path())
-            .args(["config", "show", "--json"])
+fn accounts_follows_flags_environment_and_saved_settings() -> Result<()> {
+    let home = Home::new()?;
+    let from_env = ok_json(
+        home.remind(Some("http://127.0.0.1:4181"), Some("http://localhost:9590"))
+            .args(["accounts", "--json"])
             .output()?,
     )?;
-    assert_eq!(normal["home"], home.path().to_string_lossy().as_ref());
-    let alternate = success(
-        cli(home.path())
-            .env("SILICON_HOME", silicon.path())
-            .args(["config", "show", "--json"])
+    assert_eq!(
+        from_env,
+        golden_accounts("http://127.0.0.1:4181", "http://localhost:9590")
+    );
+    ok_json(
+        home.remind(None, None)
+            .args(["config", "set-url", "http://localhost:4181/", "--json"])
             .output()?,
     )?;
-    assert_eq!(alternate["home"], silicon.path().to_string_lossy().as_ref());
-    success(
-        cli(home.path())
-            .env("SILICON_HOME", silicon.path())
+    ok_json(
+        home.remind(None, None)
+            .args([
+                "config",
+                "set-accounts-url",
+                "http://127.0.0.1:9590",
+                "--json",
+            ])
+            .output()?,
+    )?;
+    let saved = ok_json(
+        home.remind(None, None)
+            .args(["accounts", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(saved["api_url"], "http://localhost:4181");
+    assert_eq!(saved["accounts_url"], "http://127.0.0.1:9590");
+    let flag = ok_json(
+        home.remind(None, None)
+            .args(["--url", "https://remind.example", "accounts", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(flag["api_url"], "https://remind.example");
+    let custom = ok_json(
+        home.remind(None, None)
+            .env("REMIND_APP_ID", "remind-dev")
+            .args(["accounts", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(custom["app_id"], "remind-dev");
+    assert_eq!(
+        custom["sign_in"]["silicon"],
+        "silicon-accounts login --app remind-dev -q | remind login --slt-stdin"
+    );
+    Ok(())
+}
+
+#[test]
+fn hidden_iam_prints_exactly_the_accounts_object() -> Result<()> {
+    let home = Home::new()?;
+    let accounts = ok_json(
+        home.remind(None, None)
+            .args(["accounts", "--json"])
+            .output()?,
+    )?;
+    let iam = ok_json(home.remind(None, None).args(["iam", "--json"]).output()?)?;
+    assert_eq!(iam, accounts);
+    Ok(())
+}
+
+#[test]
+fn discovery_still_exits_zero_without_a_usable_home() -> Result<()> {
+    let home = Home::new()?;
+    let accounts = home
+        .remind(None, None)
+        .env("SILICON_HOME", "")
+        .args(["accounts", "--json"])
+        .output()?;
+    assert_eq!(ok_json(accounts)?["app_id"], "remind");
+    let status = ok_json(
+        home.remind(None, None)
+            .env("SILICON_HOME", "")
+            .args(["login", "status", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(status["authenticated"], false);
+    assert_eq!(status["reason"], "home_unavailable");
+    let list = home
+        .remind(None, None)
+        .env("SILICON_HOME", "")
+        .args(["list", "--json"])
+        .output()?;
+    assert_eq!(list.status.code(), Some(2));
+    assert_eq!(json_error(&list)?["error"]["code"], "home_unavailable");
+    Ok(())
+}
+
+#[test]
+fn home_selection_follows_silicon_home_and_the_saved_pointer() -> Result<()> {
+    let home = Home::new()?;
+    let silicon = Home::new()?;
+    let configured = Home::new()?;
+    let show = |silicon_home: Option<&std::path::Path>| -> Result<Value> {
+        let mut command = home.remind(None, None);
+        if let Some(path) = silicon_home {
+            command.env("SILICON_HOME", path);
+        }
+        ok_json(command.args(["config", "show", "--json"]).output()?)
+    };
+    assert_eq!(show(None)?["home"], home.path.to_string_lossy().as_ref());
+    assert_eq!(
+        show(Some(&silicon.path))?["home"],
+        silicon.path.to_string_lossy().as_ref()
+    );
+    ok_json(
+        home.remind(None, None)
+            .env("SILICON_HOME", &silicon.path)
             .args(["config", "home"])
-            .arg(configured.path())
+            .arg(&configured.path)
             .arg("--json")
             .output()?,
     )?;
-    let selected = success(
-        cli(home.path())
-            .env("SILICON_HOME", silicon.path())
-            .args(["config", "show", "--json"])
-            .output()?,
-    )?;
+    let canonical = std::fs::canonicalize(&configured.path)?;
     assert_eq!(
-        selected["home"],
-        fs::canonicalize(configured.path())?
-            .to_string_lossy()
-            .as_ref()
+        show(Some(&silicon.path))?["home"],
+        canonical.to_string_lossy().as_ref()
     );
-    let normal = success(
-        cli(home.path())
-            .args(["config", "show", "--json"])
+    assert_eq!(show(None)?["home"], home.path.to_string_lossy().as_ref());
+    let missing = home
+        .remind(None, None)
+        .args(["config", "home"])
+        .arg(home.path.join("missing"))
+        .output()?;
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("not a directory"));
+    Ok(())
+}
+
+#[test]
+fn a_state_file_from_the_previous_release_asks_to_sign_in_again() -> Result<()> {
+    let home = Home::new()?;
+    home.write_state(&json!({
+        "url": "https://backend.remind.teamofsilicons.com", "auto_update": false, "telemetry": true,
+        "last_update_check": 0,
+        "sessions": {"https://backend.remind.teamofsilicons.com#production#silicon:si:scout@tos": {
+            "session": {"access_token": "oat_old", "refresh_token": "ort_old", "expires_in": 3600,
+                "token_type": "Bearer", "scope": "", "actor": {"type": "silicon", "public_id": "si:scout"},
+                "org_id": "tos"}, "org": "tos", "expires_at": 1}},
+        "selected_sessions": {}, "test_keys": {}
+    }))?;
+    let status = ok_json(
+        home.remind(None, None)
+            .args(["login", "status", "--json"])
             .output()?,
     )?;
-    assert_eq!(normal["home"], home.path().to_string_lossy().as_ref());
+    assert_eq!(status["authenticated"], false);
+    assert_eq!(status["reason"], "sign_in_again");
+    let list = home.remind(None, None).args(["list", "--json"]).output()?;
+    assert_eq!(list.status.code(), Some(3));
+    let error = json_error(&list)?;
+    assert_eq!(error["error"]["code"], "not_signed_in");
     assert!(
-        !cli(home.path())
-            .env("SILICON_HOME", "")
-            .args(["config", "show"])
-            .output()?
-            .status
-            .success()
+        error["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("earlier Remind")
     );
+    let changed = home
+        .remind(None, None)
+        .args(["config", "telemetry", "off", "--json"])
+        .output()?;
+    assert!(changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("archived"));
     assert!(
-        !cli(home.path())
-            .args(["config", "home"])
-            .arg(home.path().join("missing"))
-            .output()?
-            .status
-            .success()
+        home.files()
+            .iter()
+            .any(|name| name.starts_with("state.legacy-")),
+        "{:?}",
+        home.files()
+    );
+    let state = home.state()?;
+    assert_eq!(state["version"], 2);
+    assert!(state.get("sessions").is_none());
+    Ok(())
+}
+
+#[test]
+fn an_unreadable_state_file_never_breaks_discovery() -> Result<()> {
+    let home = Home::new()?;
+    std::fs::create_dir_all(home.path.join(".remind"))?;
+    std::fs::write(home.state_path(), b"{ broken")?;
+    let status = ok_json(
+        home.remind(None, None)
+            .args(["login", "status", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(status["authenticated"], false);
+    assert_eq!(status["reason"], "state_unreadable");
+    assert_eq!(
+        ok_json(
+            home.remind(None, None)
+                .args(["accounts", "--json"])
+                .output()?
+        )?["app_id"],
+        "remind"
     );
     Ok(())
 }
 
 #[test]
-fn missing_session_is_machine_readable_without_contacting_server() -> Result<()> {
-    let home = TempDir::new()?;
-    let result = success(
-        cli(home.path())
-            .args(["--url", "http://127.0.0.1:1", "login", "status", "--json"])
-            .output()?,
-    )?;
-    assert_eq!(result, json!({"authenticated":false}));
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn iam_discovers_server_configuration_without_credentials() -> Result<()> {
-    let home = TempDir::new()?;
-    let server = MockServer::start().await;
-    let info = json!({"app_id":"custom-remind", "iam_url":"https://iam.example.test", "iam_environment_id":null});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/iam"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&info))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let result = success(
-        cli(home.path())
-            .args(["--url", &server.uri(), "iam", "--json"])
-            .output()?,
-    )?;
-    assert_eq!(result, info);
-    let requests = server.received_requests().await.context("requests")?;
-    assert!(!requests[0].headers.contains_key("authorization"));
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn login_status_verifies_both_actor_types_and_preserves_direct_login() -> Result<()> {
-    for actor in ["carbon", "silicon"] {
-        let mut tokens = session();
-        tokens["actor"] = json!({"type":actor,"public_id":identity(actor)["public_id"]});
-        let home = TempDir::new()?;
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .and(wiremock::matchers::body_json(
-                json!({"slt":"short-lived-fixture"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/auth/me"))
-            .and(header("authorization", "Bearer access-fixture"))
-            .and(header("x-org-id", "tos"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(identity(actor)))
-            .expect(2)
-            .mount(&server)
-            .await;
-        success(
-            cli(home.path())
-                .args([
-                    "--url",
-                    &server.uri(),
-                    "login",
-                    "short-lived-fixture",
-                    "--json",
-                ])
-                .output()?,
-        )?;
-        let status = success(
-            cli(home.path())
-                .args(["--url", &server.uri(), "login", "status", "--json"])
-                .output()?,
-        )?;
-        assert_eq!(status["authenticated"], true);
-        assert_eq!(status["actor_type"], actor);
-        assert_eq!(status["public_id"], identity(actor)["public_id"]);
-        assert!(status.get("access_token").is_none() && status.get("refresh_token").is_none());
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_refreshes_expired_sandbox_session_in_the_same_context() -> Result<()> {
-    let home = TempDir::new()?;
-    let server = MockServer::start().await;
-    let id = "01992000-0000-7000-8000-000000000003";
-    save(home.path(), &server.uri(), true, Some(id))?;
-    let mut refreshed = session();
-    refreshed["access_token"] = json!("successor-access");
-    refreshed["refresh_token"] = json!("successor-refresh");
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/refresh"))
-        .and(header(
-            "x-remind-test-key",
-            "12345678901234567890123456789012",
-        ))
-        .and(wiremock::matchers::body_json(
-            json!({"refresh_token":"refresh-fixture"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(refreshed))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/me"))
-        .and(header(
-            "x-remind-test-key",
-            "12345678901234567890123456789012",
-        ))
-        .and(header("authorization", "Bearer successor-access"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let status = success(
-        cli(home.path())
-            .args(["--test", id, "login", "status", "--json"])
-            .output()?,
-    )?;
-    assert_eq!(status["authenticated"], true);
-    let state: Value = serde_json::from_slice(&fs::read(home.path().join(".remind/state.json"))?)?;
-    let stored = &state["sessions"][format!("{}#{id}", server.uri())];
-    assert_eq!(stored["session"]["refresh_token"], "successor-refresh");
-    assert!(stored["pending_refresh_key"].is_null());
-    let production = success(
-        cli(home.path())
-            .args(["login", "status", "--json"])
-            .output()?,
-    )?;
-    assert_eq!(production, json!({"authenticated":false}));
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delayed_and_legacy_refresh_replays_are_renewed_before_status() -> Result<()> {
-    for started in [Value::Null, json!(1)] {
-        let home = TempDir::new()?;
-        let server = MockServer::start().await;
-        save(home.path(), &server.uri(), true, None)?;
-        let state_path = home.path().join(".remind/state.json");
-        let key = format!("{}#production", server.uri());
-        let mut state: Value = serde_json::from_slice(&fs::read(&state_path)?)?;
-        state["sessions"][&key]["pending_refresh_key"] = json!("original-refresh-attempt");
-        state["sessions"][&key]["refresh_started_at"] = started;
-        fs::write(&state_path, state.to_string())?;
-        for (old, new) in [("refresh-fixture", "replayed"), ("replayed", "fresh")] {
-            let mut tokens = session();
-            tokens["access_token"] = json!(format!("access-{new}"));
-            tokens["refresh_token"] = json!(new);
-            Mock::given(method("POST"))
-                .and(path("/api/v1/auth/refresh"))
-                .and(wiremock::matchers::body_json(json!({"refresh_token":old})))
-                .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
-                .expect(1)
-                .mount(&server)
-                .await;
-        }
-        Mock::given(method("GET"))
-            .and(path("/api/v1/auth/me"))
-            .and(header("authorization", "Bearer access-fresh"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
-            .expect(1)
-            .mount(&server)
-            .await;
-        assert_eq!(
-            success(
-                cli(home.path())
-                    .args(["login", "status", "--json"])
-                    .output()?
-            )?["authenticated"],
-            true
-        );
-        let state: Value = serde_json::from_slice(&fs::read(&state_path)?)?;
-        assert_eq!(state["sessions"][&key]["session"]["refresh_token"], "fresh");
-        assert!(state["sessions"][&key]["refresh_started_at"].is_null());
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_distinguishes_rejected_authority_from_service_failures() -> Result<()> {
-    for expired in [false, true] {
-        for code in [401, 403, 503] {
-            let home = TempDir::new()?;
-            let server = MockServer::start().await;
-            save(home.path(), &server.uri(), expired, None)?;
-            Mock::given(path(if expired {
-                "/api/v1/auth/refresh"
-            } else {
-                "/api/v1/auth/me"
-            }))
-            .respond_with(
-                ResponseTemplate::new(code)
-                    .set_body_json(json!({"error":{"code":"fixture_error", "message":"rejected"}})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-            if !expired && code == 401 {
-                Mock::given(path("/api/v1/auth/refresh"))
-                    .respond_with(ResponseTemplate::new(401).set_body_json(
-                        json!({"error":{"code":"invalid_token", "message":"family revoked"}}),
-                    ))
-                    .expect(1)
-                    .mount(&server)
-                    .await;
-            }
-            let result = cli(home.path())
-                .args(["login", "status", "--json"])
-                .output()?;
-            if code == 401 {
-                assert_eq!(success(result)?, json!({"authenticated":false}));
-            } else {
-                assert!(!result.status.success());
-                assert!(result.stdout.is_empty());
-                let error: Value = serde_json::from_slice(&result.stderr)?;
-                assert_eq!(error["error"]["status"], code);
-            }
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn early_rejection_refreshes_once_and_persists_for_the_next_process() -> Result<()> {
-    let home = TempDir::new()?;
-    let server = MockServer::start().await;
-    save(home.path(), &server.uri(), false, None)?;
-    Mock::given(path("/api/v1/auth/me"))
-        .and(header("authorization", "Bearer access-fixture"))
-        .respond_with(
-            ResponseTemplate::new(401).set_body_json(
-                json!({"error":{"code":"invalid_token", "message":"access inactive"}}),
-            ),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let mut refreshed = session();
-    refreshed["access_token"] = json!("successor-access");
-    refreshed["refresh_token"] = json!("successor-refresh");
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/refresh"))
-        .and(wiremock::matchers::body_json(
-            json!({"refresh_token":"refresh-fixture"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(refreshed))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(path("/api/v1/auth/me"))
-        .and(header("authorization", "Bearer successor-access"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(identity("silicon")))
-        .expect(2)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/schedules"))
-        .and(header("authorization", "Bearer successor-access"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"items":[], "next_cursor":null})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let result = success(cli(home.path()).args(["list", "--json"]).output()?)?;
-    assert_eq!(result["items"], json!([]));
-    let status = success(
-        cli(home.path())
-            .args(["login", "status", "--json"])
-            .output()?,
-    )?;
-    assert_eq!(status["authenticated"], true);
-    let state: Value = serde_json::from_slice(&fs::read(home.path().join(".remind/state.json"))?)?;
-    let stored = &state["sessions"][format!("{}#production", server.uri())];
-    assert_eq!(stored["session"]["refresh_token"], "successor-refresh");
-    assert!(stored["pending_refresh_key"].is_null());
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn selected_sandbox_footer_survives_errors_and_exit_preserves_production() -> Result<()> {
-    let home = TempDir::new()?;
-    let server = MockServer::start().await;
-    let id = "01992000-0000-7000-8000-000000000004";
-    save(home.path(), &server.uri(), false, None)?;
-    let file = home.path().join(".remind/state.json");
-    let mut state: Value = serde_json::from_slice(&fs::read(&file)?)?;
-    state["selected_tests"] = json!({server.uri():id});
-    state["test_names"] = json!({format!("{}#{id}",server.uri()):"Isolated test"});
-    state["test_keys"][format!("{}#{id}", server.uri())] = json!(format!("ask_{}", "t".repeat(43)));
-    fs::write(&file, serde_json::to_vec(&state)?)?;
-    let failed = cli(home.path()).args(["list", "--json"]).output()?;
-    assert!(!failed.status.success());
-    assert!(failed.stdout.is_empty());
+fn retired_commands_explain_what_replaced_them() -> Result<()> {
+    let home = Home::new()?;
+    let auth = home
+        .remind(None, None)
+        .args(["--json", "auth", "login", "--slt-stdin"])
+        .output()?;
+    assert_eq!(auth.status.code(), Some(2));
     assert!(
-        String::from_utf8(failed.stderr)?
+        json_error(&auth)?["error"]["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("remind login")
+    );
+    let update = ok_json(
+        home.remind(None, None)
+            .args(["--json", "update", "--check"])
+            .output()?,
+    )?;
+    assert_eq!(update["manager"], "silicon-apps");
+    let daemon = home
+        .remind(None, None)
+        .args(["daemon", "install", "--json"])
+        .output()?;
+    assert_eq!(daemon.status.code(), Some(2));
+    let removed = home
+        .remind(None, None)
+        .args(["--org", "tos", "list"])
+        .output()?;
+    assert_eq!(removed.status.code(), Some(2));
+    assert!(
+        !home.path.join(".remind").exists(),
+        "none of these wrote state"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_selected_test_environment_is_named_after_every_command() -> Result<()> {
+    let home = Home::new()?;
+    let id = "01992000-0000-7000-8000-000000000004";
+    let url = "http://127.0.0.1:9";
+    home.write_state(&json!({
+        "version": 2, "url": url,
+        "test_keys": {format!("{url}#{id}"): "12345678901234567890123456789012"},
+        "selected_tests": {url: id},
+        "test_names": {format!("{url}#{id}"): "release-qa"}
+    }))?;
+    let failed = home.remind(None, None).args(["list", "--json"]).output()?;
+    assert_eq!(failed.status.code(), Some(3));
+    let stderr = String::from_utf8(failed.stderr)?;
+    assert!(
+        stderr
             .lines()
             .last()
-            .is_some_and(|line| line.contains("Test environment: Isolated test"))
+            .is_some_and(|l| l.contains("release-qa")),
+        "{stderr}"
     );
-    let help = cli(home.path()).args(["create", "--help"]).output()?;
-    assert!(help.status.success());
-    assert!(String::from_utf8(help.stderr)?.contains("Test environment: Isolated test"));
-    let exit = cli(home.path()).args(["env", "exit", "--json"]).output()?;
-    assert_eq!(success(exit)?["environment"], "production");
-    let after: Value = serde_json::from_slice(&fs::read(file)?)?;
-    let production_slot = format!("{}#production", server.uri());
-    assert_eq!(
-        after["sessions"][&production_slot]["session"],
-        state["sessions"][&production_slot]["session"]
-    );
-    assert_eq!(
-        after["sessions"][&production_slot]["org"],
-        state["sessions"][&production_slot]["org"]
-    );
+    let parse_error = home.remind(None, None).args(["not-a-command"]).output()?;
+    assert!(String::from_utf8(parse_error.stderr)?.contains("release-qa"));
+    let exit = ok_json(
+        home.remind(None, None)
+            .args(["env", "exit", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(exit["environment"], "production");
     assert!(
-        after["selected_tests"]
+        home.state()?["selected_tests"]
             .as_object()
             .is_some_and(|m| m.is_empty())
     );
-    assert_eq!(
-        server
-            .received_requests()
-            .await
-            .context("request log")?
-            .len(),
-        0
-    );
-    Ok(())
-}
-
-#[test]
-fn updates_are_honeycomb_managed_and_parse_errors_keep_the_test_footer() -> Result<()> {
-    let home = TempDir::new()?;
-    let result = success(cli(home.path()).args(["update", "--json"]).output()?)?;
-    assert_eq!(result["status"], "managed");
-    assert_eq!(result["command"], "honeycomb update 'remind'");
-    let result = cli(home.path()).args(["daemon", "install"]).output()?;
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("Honeycomb manages"));
-    let id = "01992000-0000-7000-8000-000000000011";
-    let result = cli(home.path())
-        .args(["--test", id, "not-a-command"])
-        .output()?;
-    assert!(!result.status.success());
-    assert!(result.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&result.stderr)
-            .lines()
-            .last()
-            .is_some_and(|line| line.contains(id))
-    );
-    Ok(())
-}
-
-/// An organization header cannot turn retired unscoped credentials into an IAM5 session.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unscoped_login_requires_reauthentication_even_with_org_override() -> Result<()> {
-    for explicit_org in [false, true] {
-        let home = TempDir::new()?;
-        let server = MockServer::start().await;
-        let mut tokens = session();
-        tokens["org_id"] = Value::Null;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let mut command = cli(home.path());
-        command.args(["--url", &server.uri(), "login", "slt-fixture", "--json"]);
-        if explicit_org {
-            command.args(["--org", "tos"]);
-        }
-        let output = command.output()?;
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Sign in again"));
-        assert_eq!(
-            server.received_requests().await.context("requests")?.len(),
-            1
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn separate_account_org_sessions_survive_later_logins() -> Result<()> {
-    let home = TempDir::new()?;
-    let server = MockServer::start().await;
-    for (name, kind, org) in [("first", "silicon", "tos"), ("second", "carbon", "bricks")] {
-        let mut tokens = session();
-        let mut actor = identity(kind);
-        actor["org_id"] = json!(org);
-        tokens["actor"] = json!({"type":kind,"public_id":actor["public_id"]});
-        tokens["org_id"] = json!(org);
-        tokens["access_token"] = json!(format!("access-{name}"));
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .and(wiremock::matchers::body_json(json!({"slt":name})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/auth/me"))
-            .and(header("authorization", format!("Bearer access-{name}")))
-            .and(header("x-org-id", org))
-            .respond_with(ResponseTemplate::new(200).set_body_json(actor))
-            .mount(&server)
-            .await;
-        success(
-            cli(home.path())
-                .args(["--url", &server.uri(), "login", name, "--json"])
-                .output()?,
-        )?;
-    }
-    let contexts = success(
-        cli(home.path())
-            .args(["--url", &server.uri(), "auth", "contexts", "--json"])
-            .output()?,
-    )?;
-    assert_eq!(contexts["items"].as_array().context("items")?.len(), 2);
-    assert!(!contexts.to_string().contains("access-first"));
-    let first = success(
-        cli(home.path())
-            .args([
-                "--url",
-                &server.uri(),
-                "--account",
-                "si:fixture",
-                "--org",
-                "tos",
-                "login",
-                "status",
-                "--json",
-            ])
-            .output()?,
-    )?;
-    assert_eq!(first["public_id"], "si:fixture");
-    assert_eq!(first["org_id"], "tos");
-    let wrong = success(
-        cli(home.path())
-            .args([
-                "--url",
-                &server.uri(),
-                "--account",
-                "si:fixture",
-                "--org",
-                "bricks",
-                "login",
-                "status",
-                "--json",
-            ])
-            .output()?,
-    )?;
-    assert_eq!(wrong, json!({"authenticated":false}));
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refresh_cannot_move_a_saved_context_and_retains_retry_identity() -> Result<()> {
-    let home = TempDir::new()?;
-    let server = MockServer::start().await;
-    save(home.path(), &server.uri(), true, None)?;
-    let mut tokens = session();
-    tokens["org_id"] = json!("bricks");
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/refresh"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(tokens))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let output = cli(home.path())
-        .args(["login", "status", "--json"])
-        .output()?;
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("changed the selected account or organization")
-    );
-    let state: Value = serde_json::from_slice(&fs::read(home.path().join(".remind/state.json"))?)?;
-    let stored = &state["sessions"][format!("{}#production", server.uri())];
-    assert_eq!(stored["org"], "tos");
-    assert_eq!(stored["session"]["org_id"], "tos");
-    assert!(stored["pending_refresh_key"].is_string());
-    let requests = server.received_requests().await.context("requests")?;
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|r| r.url.path() == "/api/v1/auth/refresh")
-            .count(),
-        1
-    );
-    assert!(!requests.iter().any(|r| r.url.path() == "/api/v1/auth/me"));
-    assert!(
-        requests
-            .iter()
-            .all(|r| r.headers.get("x-org-id").is_none_or(|org| org != "bricks"))
-    );
+    let production = home.remind(None, None).args(["list", "--json"]).output()?;
+    assert!(!String::from_utf8(production.stderr)?.contains("release-qa"));
     Ok(())
 }

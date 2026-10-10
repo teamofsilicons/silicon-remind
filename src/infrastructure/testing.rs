@@ -1,24 +1,24 @@
-//! Shared test database with isolated copies of the production reminder schema.
+//! Remind's own test environments: isolated copies of the reminder schema in a
+//! shared testing database, each reached with its own 32-character key.
 //!
-//! A transaction-scoped advisory lock guards the entire API request or worker
-//! cycle. Lifecycle mutations take the exclusive lock, so a successful clean or
-//! deletion cannot race a delivery which was already admitted.
+//! An environment belongs to the account that created it. Its owner and, when
+//! the owner is a Silicon, the owner's custodian manage it (key, rotation,
+//! deletion, restoration); the owner's circle can see it and read its key.
+//! Whoever holds the key reads everything inside it and acts there as their
+//! own Silicon Accounts account. Environments that Silicon IAM or Honeycomb
+//! controlled are dormant: never listed, entered, worked or swept.
+//!
+//! A transaction-scoped advisory lock guards every request and worker cycle.
+//! Lifecycle changes take it exclusively, so a clean or deletion never races a
+//! delivery that was already admitted.
 
-use super::{
-    crypto::{EncryptedSecret, SecretCipherKeyring},
-    iam::IamClient,
-};
-use crate::{
-    config::{DatabaseSettings, IamSettings},
-    domain::Actor,
-    error::AppError,
-};
+use super::crypto::{EncryptedSecret, SecretCipherKeyring};
+use crate::{config::DatabaseSettings, domain::AccountRef, error::AppError};
 use chrono::{DateTime, Utc};
 use rand::{Rng as _, distr::Alphanumeric};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use silicon_iam_client::{Client, Credential, EnvironmentKey, models};
 use sqlx::{
     AssertSqlSafe, FromRow, PgPool, Postgres, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -27,72 +27,90 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-mod discovery;
-/// Honeycomb participant lifecycle contract.
-pub mod honeycomb;
 mod worker_admission;
 
 static CONTROL_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./testing/migrations");
 const MAX_CACHED_TEST_POOLS: usize = 4;
 
-/// Metadata visible to an environment's owning organization. Credentials are separate.
+/// Environments Remind manages itself (not dormant IAM/Honeycomb ones).
+const MANAGED: &str = "iam_control_version IS NULL";
+
+/// Metadata of one test environment. Its key is never part of this.
 #[derive(Clone, Debug, Serialize, FromRow)]
 pub struct TestEnvironment {
-    /// Public environment selector, never an authentication credential.
+    /// Public selector, never a credential.
     pub id: Uuid,
-    /// Production organization that owns this test environment.
-    pub org_id: String,
-    /// Production principal that created it.
-    pub creator_id: String,
-    /// Human-readable name.
+    /// The owning account's Silicon Accounts uuid; `None` for an environment
+    /// from before the move to Silicon Accounts that no account owns yet.
+    #[serde(rename = "owner_uuid")]
+    pub owner_uuid: Option<String>,
+    /// The owner as Remind shows it (filled in by the API).
+    #[sqlx(skip)]
+    pub owner: Option<AccountRef>,
+    /// Name, unique among the owner's active environments.
     pub name: String,
     /// Optional purpose.
     pub description: Option<String>,
-    /// IAM sandbox to which all authentication is bound.
-    pub iam_environment_id: Uuid,
     /// Monotonic metadata revision.
     pub version: i64,
-    /// IAM-owned worlds use IAM lifecycle administration, without a Remind god key.
-    pub iam_control_version: Option<i64>,
     /// Creation instant.
     pub created_at: DateTime<Utc>,
-    /// Most recent successful user activity; worker ticks do not keep it alive.
+    /// Most recent successful use; worker ticks do not keep it alive.
     pub last_activity_at: DateTime<Utc>,
-    /// Retirement instant, if inactive.
+    /// Retirement instant, if retired.
     pub deleted_at: Option<DateTime<Utc>>,
     /// Permanent deletion deadline.
     pub purge_after: Option<DateTime<Utc>>,
 }
 
-/// Inputs for an empty Remind replica, paired with an existing IAM replica.
+/// Inputs for a new, empty environment.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateTestEnvironment {
-    /// Unique active name within the production organization.
+    /// Name, unique among the caller's active environments.
     pub name: String,
     /// Optional purpose.
     pub description: Option<String>,
-    /// IAM root environment key. The IAM environment ID is verified remotely.
-    pub iam_test_key: SecretString,
-    /// Test-only credential from creating/importing the Remind app into IAM.
+    /// Retired: test environments use the caller's Silicon Accounts sign-in.
     #[serde(default)]
-    pub iam_app_secret: Option<SecretString>,
+    pub iam_test_key: Option<serde::de::IgnoredAny>,
+    /// Retired: test environments use the caller's Silicon Accounts sign-in.
+    #[serde(default)]
+    pub iam_app_secret: Option<serde::de::IgnoredAny>,
 }
 
+/// What the caller may do with environments, by owner uuid.
+#[derive(Clone, Debug, Default)]
+pub struct EnvironmentAccess {
+    /// Owners whose environments the caller sees and whose keys it may read
+    /// (its circle).
+    pub readers: Vec<String>,
+    /// Owners whose environments the caller manages (itself, and for a Carbon
+    /// the Silicons it looks after).
+    pub managers: Vec<String>,
+}
+
+impl EnvironmentAccess {
+    fn manages(&self, environment: &TestEnvironment) -> bool {
+        environment
+            .owner_uuid
+            .as_ref()
+            .is_some_and(|owner| self.managers.contains(owner))
+    }
+}
+
+/// Sealed per-environment secrets. Older environments also sealed IAM keys,
+/// which are ignored now.
 #[derive(Serialize, Deserialize)]
 struct Credentials {
     key: String,
-    iam_key: String,
-    #[serde(default)]
-    iam_app_secret: Option<String>,
 }
 
-/// Test database dependencies; cache entries contain pools, never authority decisions.
+/// Test database dependencies; cache entries hold pools, never authority decisions.
 #[derive(Clone)]
 pub struct TestEnvironments {
     control: PgPool,
     database: DatabaseSettings,
-    iam_settings: IamSettings,
     cipher: SecretCipherKeyring,
     pools: Arc<Mutex<HashMap<Uuid, PgPool>>>,
 }
@@ -103,34 +121,24 @@ impl std::fmt::Debug for TestEnvironments {
     }
 }
 
-/// A live environment admission, held until the request or delivery finishes.
+/// A live admission, held until the request or worker cycle finishes.
 pub struct EnvironmentLease {
     /// Environment metadata, rechecked under its lifecycle lock.
     pub environment: TestEnvironment,
     /// Isolated data pool.
     pub pool: PgPool,
-    /// Official IAM client with mandatory test credentials.
-    pub iam: Option<IamClient>,
-    /// Expected IAM root key for signed test webhook verification.
-    pub iam_key: Option<EnvironmentKey>,
-    /// Live IAM digest for secret-selected webhook admission.
-    pub webhook_key_digest: Option<String>,
     guard: Transaction<'static, Postgres>,
 }
 
 impl EnvironmentLease {
-    /// Releases the admission and optionally records successful user activity.
+    /// Releases the admission and optionally records successful use.
     ///
     /// # Errors
     ///
-    /// Returns a database error if activity bookkeeping or transaction commit fails.
+    /// Returns a database error if activity bookkeeping or the commit fails.
     pub async fn finish(mut self, activity: bool) -> Result<(), AppError> {
         if activity {
             sqlx::query("UPDATE public.testing_environments SET last_activity_at = clock_timestamp() WHERE id = $1 AND deleted_at IS NULL")
-                .bind(self.environment.id).execute(&mut *self.guard).await?;
-        }
-        if activity {
-            sqlx::query("UPDATE public.honeycomb_environments SET last_activity_at=clock_timestamp() WHERE environment_id=$1 AND state='active'")
                 .bind(self.environment.id).execute(&mut *self.guard).await?;
         }
         self.guard.commit().await?;
@@ -143,17 +151,15 @@ impl TestEnvironments {
     ///
     /// # Errors
     ///
-    /// Returns a connection or configuration error for the shared testing database.
+    /// Returns a connection error for the shared testing database.
     pub async fn connect(
         database: &DatabaseSettings,
-        iam: &IamSettings,
         cipher: SecretCipherKeyring,
     ) -> Result<Self, AppError> {
         let control = super::postgres::connect(database).await?;
         Ok(Self {
             control,
             database: database.clone(),
-            iam_settings: iam.clone(),
             cipher,
             pools: Arc::default(),
         })
@@ -172,7 +178,7 @@ impl TestEnvironments {
             let valid = CONTROL_MIGRATOR.iter().all(|expected| applied.iter().any(|(version, checksum, success)|
                 *version == expected.version && *success && checksum.as_slice() == expected.checksum.as_ref()
             ));
-            sqlx::query("SELECT id, key_hash, iam_key_hash, secrets, deleted_at, purge_after FROM public.testing_environments LIMIT 0")
+            sqlx::query("SELECT id, key_hash, owner_uuid, secrets, deleted_at, purge_after FROM public.testing_environments LIMIT 0")
                 .execute(&self.control).await?;
             Ok::<_, sqlx::Error>(valid)
         }).await;
@@ -184,62 +190,18 @@ impl TestEnvironments {
         Ok(())
     }
 
-    /// Installs the test-only Application credential without changing the IAM root binding.
+    /// The control pool, for operator tooling (identity linking).
+    #[must_use]
+    pub const fn control(&self) -> &PgPool {
+        &self.control
+    }
+
+    /// One-shot control database migration, used only by remind-migrate. Every
+    /// environment schema, dormant ones included, gets the same migrations.
     ///
     /// # Errors
     ///
-    /// Returns a rejected IAM credential or a storage error. The caller must hold
-    /// the exclusive environment lease selected by its root key.
-    pub async fn configure_iam(
-        &self,
-        lease: &mut EnvironmentLease,
-        secret: SecretString,
-    ) -> Result<(), AppError> {
-        let iam = Client::builder(self.iam_settings.base_url.as_str())
-            .map_err(iam_error)?
-            .auto_update(false)
-            .timeout(self.iam_settings.request_timeout)
-            .environment(lease.iam_key.clone().ok_or(AppError::Forbidden)?)
-            .build()
-            .map_err(iam_error)?;
-        self.validate_app(&iam, &secret).await?;
-        let id = lease.environment.id;
-        let mut credentials = self.credentials(&mut lease.guard, id).await?;
-        credentials.iam_app_secret = Some(secret.expose_secret().to_owned());
-        sqlx::query(
-            "UPDATE public.testing_environments SET secrets=$2,version=version+1 WHERE id=$1",
-        )
-        .bind(id)
-        .bind(self.seal(id, &credentials)?)
-        .execute(&mut *lease.guard)
-        .await?;
-        Ok(())
-    }
-
-    async fn validate_app(&self, iam: &Client, secret: &SecretString) -> Result<(), AppError> {
-        // Invalid tokens answer inactive only after the test app authenticates.
-        iam.with_credential(Credential::application(
-            &self.iam_settings.app_id,
-            secret.expose_secret(),
-        ))
-        .oauth()
-        .introspect(
-            &models::TokenIntrospectionRequest {
-                token: "oat_remind_configuration_probe".to_owned(),
-                token_type_hint: None,
-            },
-            None,
-        )
-        .await
-        .map_err(iam_error)?;
-        Ok(())
-    }
-
-    /// One-shot control database migration, used only by remind-migrate.
-    ///
-    /// # Errors
-    ///
-    /// Returns schema, checksum, or database errors; runtime processes never call this method.
+    /// Returns schema, checksum, or database errors.
     pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
         CONTROL_MIGRATOR.run(pool).await?;
         let ids: Vec<Uuid> =
@@ -261,53 +223,39 @@ impl TestEnvironments {
         Ok(())
     }
 
-    /// Verifies IAM binding, initializes production tables, and publishes an empty environment.
+    /// Creates an empty environment owned by the caller and returns its key.
     ///
     /// # Errors
     ///
-    /// Returns invalid input, an invalid IAM test binding, a duplicate active name, or a schema/storage failure.
+    /// Returns invalid input, a duplicate active name, or a schema/storage failure.
     pub async fn create(
         &self,
-        actor: &Actor,
+        owner_uuid: &str,
         input: CreateTestEnvironment,
     ) -> Result<(TestEnvironment, SecretString), AppError> {
+        if input.iam_test_key.is_some() || input.iam_app_secret.is_some() {
+            return Err(AppError::invalid(
+                "test_key_field_retired",
+                "A test environment no longer takes a key from another service: it uses your Silicon Accounts sign-in. Send only name and description.",
+            ));
+        }
         if input.name.trim().is_empty()
             || input.name.len() > 100
             || input.description.as_ref().is_some_and(|s| s.len() > 10000)
         {
             return Err(AppError::Validation);
         }
-        let iam_key = EnvironmentKey::new(input.iam_test_key.expose_secret())
-            .map_err(|_| AppError::Validation)?;
-        let iam = Client::builder(self.iam_settings.base_url.as_str())
-            .map_err(iam_error)?
-            .auto_update(false)
-            .timeout(self.iam_settings.request_timeout)
-            .environment(iam_key)
-            .build()
-            .map_err(iam_error)?;
-        let binding = iam.environments().current().await.map_err(iam_error)?;
-        if let Some(secret) = &input.iam_app_secret {
-            self.validate_app(&iam, secret).await?;
-        }
         let id = Uuid::now_v7();
         let key = generate_key();
-        let credentials = Credentials {
-            key: key.clone(),
-            iam_key: input.iam_test_key.expose_secret().to_owned(),
-            iam_app_secret: input
-                .iam_app_secret
-                .map(|value| value.expose_secret().to_owned()),
-        };
-        let sealed = self.seal(id, &credentials)?;
+        let sealed = self.seal(id, &Credentials { key: key.clone() })?;
         let mut transaction = self.control.begin().await?;
-        sqlx::query("INSERT INTO public.testing_environments (id,org_id,creator_id,name,description,iam_environment_id,key_hash,secrets,iam_key_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
-            .bind(id).bind(&actor.org_id).bind(&actor.id)
-            .bind(input.name.trim()).bind(input.description).bind(binding.id).bind(hash(&key)).bind(sealed)
-            .bind(hash(&credentials.iam_key))
+        check_environment_capacity(&mut transaction, owner_uuid, true).await?;
+        sqlx::query("INSERT INTO public.testing_environments (id,org_id,creator_id,owner_uuid,name,description,iam_environment_id,key_hash,secrets) VALUES ($1,NULL,$2,$2,$3,$4,NULL,$5,$6)")
+            .bind(id).bind(owner_uuid)
+            .bind(input.name.trim()).bind(input.description).bind(hash(&key)).bind(sealed)
             .execute(&mut *transaction).await?;
-        // DDL and metadata publish atomically. Migrations are the same embedded SQL
-        // used in production; the test-only quota is added afterward.
+        // DDL and metadata publish atomically. The production migrations build
+        // the schema; the test-only quota is added afterwards.
         let schema = schema(id);
         sqlx::raw_sql(AssertSqlSafe(format!(
             "CREATE SCHEMA {schema}; SET LOCAL search_path TO {schema};"
@@ -317,17 +265,22 @@ impl TestEnvironments {
         migrate_data_schema(&mut transaction).await?;
         sqlx::raw_sql(QUOTA_SQL).execute(&mut *transaction).await?;
         transaction.commit().await?;
-        Ok((self.get(actor, id).await?, SecretString::from(key)))
+        let access = EnvironmentAccess {
+            readers: vec![owner_uuid.to_owned()],
+            managers: vec![owner_uuid.to_owned()],
+        };
+        Ok((self.get(&access, id).await?, SecretString::from(key)))
     }
 
-    /// Organization-scoped listing, including recoverable deleted environments when requested.
+    /// Lists environments the caller may see, including recoverable retired
+    /// ones when `deleted` is set.
     ///
     /// # Errors
     ///
     /// Returns invalid pagination or a database failure.
     pub async fn list(
         &self,
-        actor: &Actor,
+        access: &EnvironmentAccess,
         deleted: bool,
         after: Option<Uuid>,
         limit: i64,
@@ -335,30 +288,58 @@ impl TestEnvironments {
         if !(1..=100).contains(&limit) {
             return Err(AppError::Validation);
         }
-        Ok(sqlx::query_as("SELECT * FROM public.testing_environments WHERE org_id = $1 AND ((iam_control_version IS NOT NULL OR COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp())) AND ($2 OR (deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at>clock_timestamp()-interval '15 days'))) AND ($3::uuid IS NULL OR id > $3) ORDER BY id LIMIT $4")
-            .bind(&actor.org_id).bind(deleted).bind(after).bind(limit).fetch_all(&self.control).await?.into_iter().map(logical_lifecycle).collect())
+        let sql = format!(
+            "SELECT * FROM public.testing_environments WHERE owner_uuid = ANY($1) AND {MANAGED} AND COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp() AND ($2 OR (deleted_at IS NULL AND last_activity_at > clock_timestamp()-interval '15 days')) AND ($3::uuid IS NULL OR id > $3) ORDER BY id LIMIT $4"
+        );
+        Ok(sqlx::query_as(AssertSqlSafe(sql))
+            .bind(&access.readers)
+            .bind(deleted)
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&self.control)
+            .await?
+            .into_iter()
+            .map(logical_lifecycle)
+            .collect())
     }
 
-    /// Reads one owned environment inside the recovery window.
+    /// Reads one environment the caller may see, inside the recovery window.
     ///
     /// # Errors
     ///
-    /// Returns not found for other organizations or expired environments, or a database error.
-    pub async fn get(&self, actor: &Actor, id: Uuid) -> Result<TestEnvironment, AppError> {
-        sqlx::query_as("SELECT * FROM public.testing_environments WHERE id = $1 AND org_id = $2 AND ((iam_control_version IS NOT NULL OR COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp()))")
-            .bind(id).bind(&actor.org_id).fetch_optional(&self.control).await?.map(logical_lifecycle).ok_or(AppError::NotFound)
+    /// Returns not found for environments outside the caller's circle or past
+    /// recovery, or a database error.
+    pub async fn get(
+        &self,
+        access: &EnvironmentAccess,
+        id: Uuid,
+    ) -> Result<TestEnvironment, AppError> {
+        let sql = format!(
+            "SELECT * FROM public.testing_environments WHERE id = $1 AND owner_uuid = ANY($2) AND {MANAGED} AND COALESCE(purge_after,last_activity_at+interval '45 days') > clock_timestamp()"
+        );
+        sqlx::query_as(AssertSqlSafe(sql))
+            .bind(id)
+            .bind(&access.readers)
+            .fetch_optional(&self.control)
+            .await?
+            .map(logical_lifecycle)
+            .ok_or(AppError::NotFound)
     }
 
-    /// Reads the active key for its creator or an org owner/admin.
+    /// Reads the active key. The owner's circle may read it.
     ///
     /// # Errors
     ///
-    /// Returns forbidden for non-administrators, not found for inactive environments, or a credential-storage error.
-    pub async fn key(&self, actor: &Actor, id: Uuid) -> Result<SecretString, AppError> {
+    /// Returns not found for invisible or retired environments, or a
+    /// credential-storage error.
+    pub async fn key(
+        &self,
+        access: &EnvironmentAccess,
+        id: Uuid,
+    ) -> Result<SecretString, AppError> {
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, false).await?;
-        let row = guarded_get(&mut tx, actor, id).await?;
-        require_manager(actor, &row)?;
+        let row = guarded_get(&mut tx, access, id).await?;
         if row.deleted_at.is_some() {
             return Err(AppError::NotFound);
         }
@@ -367,164 +348,216 @@ impl TestEnvironments {
         Ok(SecretString::from(credentials.key))
     }
 
-    /// Rotates or restores a key under exclusive lifecycle admission.
+    /// Rotates the key, or restores a retired environment with a new key.
     ///
     /// # Errors
     ///
-    /// Returns authorization, expired-window, lifecycle, name-conflict or encryption/storage errors.
+    /// Returns authorization, lifecycle, name-conflict or storage errors.
     pub async fn rotate(
         &self,
-        actor: &Actor,
+        access: &EnvironmentAccess,
         id: Uuid,
         restore: bool,
     ) -> Result<SecretString, AppError> {
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, true).await?;
-        let row = guarded_get(&mut tx, actor, id).await?;
-        require_manager(actor, &row)?;
+        let row = guarded_get(&mut tx, access, id).await?;
+        require_manager(access, &row)?;
         if row.deleted_at.is_some() != restore {
             return Err(AppError::conflict("environment_state_conflict"));
         }
-        let mut credentials = self.credentials(&mut tx, id).await?;
-        credentials.key = generate_key();
+        if restore && let Some(owner) = &row.owner_uuid {
+            check_environment_capacity(&mut tx, owner, false).await?;
+        }
+        let key = generate_key();
         sqlx::query("UPDATE public.testing_environments SET key_hash=$2,secrets=$3,deleted_at=NULL,purge_after=NULL,last_activity_at=clock_timestamp(),version=version+1 WHERE id=$1")
-            .bind(id).bind(hash(&credentials.key)).bind(self.seal(id, &credentials)?).execute(&mut *tx).await?;
+            .bind(id).bind(hash(&key)).bind(self.seal(id, &Credentials { key: key.clone() })?).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(SecretString::from(credentials.key))
+        Ok(SecretString::from(key))
     }
 
-    /// Retires an environment immediately while retaining its data for 30 days.
+    /// Retires an environment now; its data stays recoverable for 30 days.
     ///
     /// # Errors
     ///
     /// Returns authorization, not-found or database errors.
-    pub async fn delete(&self, actor: &Actor, id: Uuid) -> Result<(), AppError> {
+    pub async fn delete(&self, access: &EnvironmentAccess, id: Uuid) -> Result<(), AppError> {
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, true).await?;
-        let row = guarded_get(&mut tx, actor, id).await?;
-        require_manager(actor, &row)?;
+        let row = guarded_get(&mut tx, access, id).await?;
+        require_manager(access, &row)?;
         retire(&mut tx, id).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    /// Admits a key-bearing request, rechecking active state after taking the lock.
+    /// Retires every active environment a deleted account owned (idempotent).
     ///
     /// # Errors
     ///
-    /// Returns unauthorized for malformed, revoked, unknown or inactive keys, or a database error.
+    /// Returns database errors.
+    pub async fn retire_owned_by(&self, owner_uuid: &str) -> Result<u64, AppError> {
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM public.testing_environments WHERE owner_uuid = $1 AND deleted_at IS NULL ORDER BY id",
+        )
+        .bind(owner_uuid)
+        .fetch_all(&self.control)
+        .await?;
+        let mut retired = 0;
+        for id in ids {
+            let mut tx = self.control.begin().await?;
+            lock(&mut tx, id, true).await?;
+            retire(&mut tx, id).await?;
+            tx.commit().await?;
+            retired += 1;
+        }
+        Ok(retired)
+    }
+}
+
+impl TestEnvironments {
+    /// Admits a key-bearing request, rechecking active state under the lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns unauthorized for malformed, rotated, unknown or retired keys, or
+    /// a database error.
     pub async fn enter(
         &self,
         key: &SecretString,
         exclusive: bool,
     ) -> Result<EnvironmentLease, AppError> {
-        if key.expose_secret().starts_with("ask_") {
-            if exclusive {
-                return Err(AppError::Forbidden);
-            }
-            return self.discover(key).await;
-        }
         if key.expose_secret().len() != 32
             || !key
                 .expose_secret()
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric())
         {
-            return Err(AppError::Unauthenticated);
+            return Err(AppError::unauthenticated(
+                "test_key_invalid",
+                "X-Remind-Test-Key must be the 32-character key of an active test environment.",
+            ));
         }
-        let id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM public.testing_environments WHERE key_hash=$1 AND deleted_at IS NULL",
-        )
-        .bind(hash(key.expose_secret()))
-        .fetch_optional(&self.control)
-        .await?
-        .ok_or(AppError::Unauthenticated)?;
+        let unknown = || {
+            AppError::unauthenticated(
+                "test_key_invalid",
+                "No active test environment has this key (it may have been rotated, retired or cleaned up).",
+            )
+        };
+        let sql = format!(
+            "SELECT id FROM public.testing_environments WHERE key_hash=$1 AND deleted_at IS NULL AND {MANAGED}"
+        );
+        let id: Uuid = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(hash(key.expose_secret()))
+            .fetch_optional(&self.control)
+            .await?
+            .ok_or_else(unknown)?;
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, exclusive).await?;
-        let environment: TestEnvironment = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND key_hash=$2 AND deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days')")
-            .bind(id).bind(hash(key.expose_secret())).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthenticated)?;
-        if Self::honeycomb_fence(&mut tx, id).await?.is_some() {
-            return Err(AppError::Unauthenticated);
-        }
-        let credentials = self.credentials(&mut tx, id).await?;
-        self.lease(environment, credentials, tx).await
+        let sql = format!(
+            "SELECT * FROM public.testing_environments WHERE id=$1 AND key_hash=$2 AND deleted_at IS NULL AND {MANAGED} AND last_activity_at > clock_timestamp() - interval '15 days'"
+        );
+        let environment: TestEnvironment = sqlx::query_as(AssertSqlSafe(sql))
+            .bind(id)
+            .bind(hash(key.expose_secret()))
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(unknown)?;
+        Ok(EnvironmentLease {
+            pool: self.pool(environment.id).await?,
+            environment,
+            guard: tx,
+        })
     }
 
-    /// Admits a worker without counting its poll as user activity.
+    /// Admits the worker without counting its poll as use.
     ///
     /// # Errors
     ///
-    /// Returns a database or credential-decryption error; inactive environments return None.
+    /// Returns a database error; inactive environments return `None`.
     pub async fn enter_worker(&self, id: Uuid) -> Result<Option<EnvironmentLease>, AppError> {
         let mut tx = self.control.begin().await?;
         lock(&mut tx, id, false).await?;
-        let row: Option<TestEnvironment> = sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days')")
-            .bind(id).fetch_optional(&mut *tx).await?;
-        if Self::honeycomb_fence(&mut tx, id)
-            .await?
-            .is_some_and(|f| f.state != "active")
-        {
-            return Ok(None);
-        }
+        let sql = format!(
+            "SELECT * FROM public.testing_environments WHERE id=$1 AND deleted_at IS NULL AND {MANAGED} AND last_activity_at > clock_timestamp() - interval '15 days'"
+        );
+        let row: Option<TestEnvironment> = sqlx::query_as(AssertSqlSafe(sql))
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
         match row {
-            Some(environment) => {
-                let credentials = self.credentials(&mut tx, id).await?;
-                if credentials.iam_app_secret.is_none() && environment.iam_control_version.is_some()
-                {
-                    return Ok(None);
-                }
-                Ok(Some(self.lease(environment, credentials, tx).await?))
-            }
+            Some(environment) => Ok(Some(EnvironmentLease {
+                pool: self.pool(environment.id).await?,
+                environment,
+                guard: tx,
+            })),
             None => Ok(None),
         }
     }
 
-    /// Removes all environment data while the caller holds its exclusive lease.
+    /// Removes all of an environment's data while the caller holds its exclusive lease.
     ///
     /// # Errors
     ///
     /// Returns a database error if the atomic truncate cannot complete.
     pub async fn clean(&self, lease: &mut EnvironmentLease) -> Result<(), AppError> {
-        // The production audit trigger is copied verbatim into each replica.
-        // Suspend only its truncate guard under the exclusive lifecycle lock,
-        // in this transaction; success re-enables it and rollback restores it.
+        // The production audit trigger is copied into each environment. Its
+        // truncate guard is suspended only in this transaction, under the
+        // exclusive lock; a rollback restores it.
         let schema = schema(lease.environment.id);
-        sqlx::raw_sql(AssertSqlSafe(format!("ALTER TABLE {schema}.audit_records DISABLE TRIGGER audit_records_reject_truncate; TRUNCATE {schema}.iam_organization_bindings, {schema}.organization_lifecycle, {schema}.silicon_identities, {schema}.schedules, {schema}.executions, {schema}.deleted_reminders, {schema}.hook_destinations, {schema}.idempotency_records, {schema}.internal_event_receipts, {schema}.telemetry_events, {schema}.bug_reports, {schema}.audit_records RESTART IDENTITY CASCADE; ALTER TABLE {schema}.audit_records ENABLE TRIGGER audit_records_reject_truncate")))
+        let tables = [
+            "iam_organization_bindings",
+            "organization_lifecycle",
+            "silicon_identities",
+            "schedules",
+            "executions",
+            "deleted_reminders",
+            "hook_destinations",
+            "idempotency_records",
+            "internal_event_receipts",
+            "telemetry_events",
+            "bug_reports",
+            "audit_records",
+            "accounts",
+            "account_keys",
+            "identity_links",
+            "reminder_viewers",
+            "silicon_allowances",
+        ]
+        .map(|table| format!("{schema}.{table}"))
+        .join(", ");
+        sqlx::raw_sql(AssertSqlSafe(format!("ALTER TABLE {schema}.audit_records DISABLE TRIGGER audit_records_reject_truncate; TRUNCATE {tables} RESTART IDENTITY CASCADE; ALTER TABLE {schema}.audit_records ENABLE TRIGGER audit_records_reject_truncate")))
             .execute(&mut *lease.guard).await?;
         Ok(())
     }
 
-    /// Finds active Remind replicas bound to an authenticated IAM test key.
+    /// A bounded page of active environment ids for the worker.
     ///
     /// # Errors
     ///
-    /// Returns unauthorized for malformed keys or a database error.
-    pub async fn webhook_environment_ids(&self, key: &str) -> Result<Vec<Uuid>, AppError> {
-        if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return Err(AppError::Unauthenticated);
-        }
-        Ok(sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE (iam_key_hash=$1 OR webhook_key_digest=$2) AND deleted_at IS NULL ORDER BY id")
-            .bind(hash(key)).bind(hex::encode(hash(key))).fetch_all(&self.control).await?)
-    }
-
-    /// Bounded active environment page for workers.
-    ///
-    /// # Errors
-    ///
-    /// Returns a database error if the bounded page cannot be read.
+    /// Returns a database error.
     pub async fn active_ids(&self, after: Option<Uuid>) -> Result<Vec<Uuid>, AppError> {
-        Ok(sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE deleted_at IS NULL AND (iam_control_version IS NOT NULL OR last_activity_at > clock_timestamp() - interval '15 days') AND ($1::uuid IS NULL OR id > $1) ORDER BY id LIMIT 100")
-            .bind(after).fetch_all(&self.control).await?)
+        let sql = format!(
+            "SELECT id FROM public.testing_environments WHERE deleted_at IS NULL AND {MANAGED} AND last_activity_at > clock_timestamp() - interval '15 days' AND ($1::uuid IS NULL OR id > $1) ORDER BY id LIMIT 100"
+        );
+        Ok(sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(after)
+            .fetch_all(&self.control)
+            .await?)
     }
 
     /// Applies inactivity retirement and permanent removal in bounded batches.
     ///
     /// # Errors
     ///
-    /// Returns database errors while retiring or dropping an environment under its lifecycle lock.
+    /// Returns database errors while retiring or dropping an environment.
     pub async fn sweep(&self) -> Result<(), AppError> {
-        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM public.testing_environments WHERE (iam_control_version IS NULL AND deleted_at IS NULL AND last_activity_at <= clock_timestamp() - interval '15 days') OR purge_after <= clock_timestamp() ORDER BY id LIMIT 100")
-            .fetch_all(&self.control).await?;
+        let sql = format!(
+            "SELECT id FROM public.testing_environments WHERE {MANAGED} AND ((deleted_at IS NULL AND last_activity_at <= clock_timestamp() - interval '15 days') OR purge_after <= clock_timestamp()) ORDER BY id LIMIT 100"
+        );
+        let ids: Vec<Uuid> = sqlx::query_scalar(AssertSqlSafe(sql))
+            .fetch_all(&self.control)
+            .await?;
         for id in ids {
             let mut tx = self.control.begin().await?;
             lock(&mut tx, id, true).await?;
@@ -550,54 +583,13 @@ impl TestEnvironments {
         Ok(())
     }
 
-    async fn lease(
-        &self,
-        environment: TestEnvironment,
-        credentials: Credentials,
-        guard: Transaction<'static, Postgres>,
-    ) -> Result<EnvironmentLease, AppError> {
-        if credentials.iam_key.is_empty() {
-            // Release the shared fence before discovery may need an exclusive clean.
-            guard.commit().await?;
-            let secret = credentials
-                .iam_app_secret
-                .ok_or(AppError::Unauthenticated)?;
-            return Box::pin(self.discover(&SecretString::from(secret))).await;
-        }
-        let iam_key = EnvironmentKey::new(credentials.iam_key).map_err(iam_error)?;
-        let iam = credentials
-            .iam_app_secret
-            .map(|secret| {
-                IamClient::new(&self.iam_settings)
-                    .map(|client| {
-                        client.in_environment(
-                            environment.iam_environment_id,
-                            iam_key.clone(),
-                            &SecretString::from(secret),
-                        )
-                    })
-                    .map_err(|error| AppError::internal("test_iam", error))
-            })
-            .transpose()?;
-        Ok(EnvironmentLease {
-            pool: self.pool(environment.id).await?,
-            environment,
-            iam,
-            iam_key: Some(iam_key),
-            webhook_key_digest: None,
-            guard,
-        })
-    }
-
     async fn pool(&self, id: Uuid) -> Result<PgPool, AppError> {
         let mut pools = self.pools.lock().await;
         if let Some(pool) = pools.get(&id) {
             return Ok(pool.clone());
         }
-        // Keep the cache small because every cached pool can open several
-        // PostgreSQL connections. A large environment fleet must not be able
-        // to consume the shared database's entire connection budget merely by
-        // waiting for the worker to visit each sandbox once.
+        // Every cached pool can open connections; keep the cache small so a
+        // large fleet of environments cannot exhaust the shared database.
         if pools.len() >= MAX_CACHED_TEST_POOLS
             && let Some(oldest) = pools.keys().min().copied()
         {
@@ -650,16 +642,17 @@ impl TestEnvironments {
     }
 }
 
-fn require_manager(actor: &Actor, environment: &TestEnvironment) -> Result<(), AppError> {
-    if environment.iam_control_version.is_some() {
-        return Err(AppError::Forbidden);
-    }
-    if actor.id == environment.creator_id
-        || matches!(actor.org_role.as_deref(), Some("owner" | "admin"))
-    {
+fn require_manager(
+    access: &EnvironmentAccess,
+    environment: &TestEnvironment,
+) -> Result<(), AppError> {
+    if access.manages(environment) {
         Ok(())
     } else {
-        Err(AppError::Forbidden)
+        Err(AppError::forbidden(
+            "not_environment_manager",
+            "Only the environment's owner, or the custodian of the Silicon that owns it, can rotate, delete or restore it.",
+        ))
     }
 }
 
@@ -699,9 +692,6 @@ fn generate_key() -> String {
         .map(char::from)
         .collect()
 }
-fn iam_error(_error: silicon_iam_client::Error) -> AppError {
-    AppError::conflict("iam_test_binding_invalid")
-}
 
 const QUOTA_SQL: &str = r"
 CREATE FUNCTION enforce_test_reminder_limit() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -716,8 +706,7 @@ $$;
 CREATE TRIGGER test_reminder_limit BEFORE INSERT ON schedules FOR EACH ROW EXECUTE FUNCTION enforce_test_reminder_limit();
 ";
 
-// A shared migration source prevents future production changes from silently
-// leaving already-created test environments on an older schema.
+// One shared migration source keeps every environment on the production schema.
 async fn migrate_data_schema(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
     static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
     sqlx::raw_sql("CREATE TABLE IF NOT EXISTS _sqlx_migrations (version bigint PRIMARY KEY, description text NOT NULL, installed_on timestamptz NOT NULL DEFAULT now(), success boolean NOT NULL, checksum bytea NOT NULL, execution_time bigint NOT NULL)").execute(&mut **tx).await?;
@@ -746,10 +735,7 @@ async fn migrate_data_schema(tx: &mut Transaction<'_, Postgres>) -> Result<(), A
 // Deadlines apply independently of when a background sweep physically runs.
 fn logical_lifecycle(mut environment: TestEnvironment) -> TestEnvironment {
     let retired_at = environment.last_activity_at + chrono::Duration::days(15);
-    if environment.iam_control_version.is_none()
-        && environment.deleted_at.is_none()
-        && retired_at <= Utc::now()
-    {
+    if environment.deleted_at.is_none() && retired_at <= Utc::now() {
         environment.deleted_at = Some(retired_at);
         environment.purge_after = Some(retired_at + chrono::Duration::days(30));
     }
@@ -758,15 +744,58 @@ fn logical_lifecycle(mut environment: TestEnvironment) -> TestEnvironment {
 
 async fn guarded_get(
     tx: &mut Transaction<'_, Postgres>,
-    actor: &Actor,
+    access: &EnvironmentAccess,
     id: Uuid,
 ) -> Result<TestEnvironment, AppError> {
-    sqlx::query_as("SELECT * FROM public.testing_environments WHERE id=$1 AND org_id=$2 AND (COALESCE(purge_after,last_activity_at+interval '45 days')>clock_timestamp())")
-        .bind(id).bind(&actor.org_id).fetch_optional(&mut **tx).await?.map(logical_lifecycle).ok_or(AppError::NotFound)
+    let sql = format!(
+        "SELECT * FROM public.testing_environments WHERE id=$1 AND owner_uuid = ANY($2) AND {MANAGED} AND COALESCE(purge_after,last_activity_at+interval '45 days')>clock_timestamp()"
+    );
+    sqlx::query_as(AssertSqlSafe(sql))
+        .bind(id)
+        .bind(&access.readers)
+        .fetch_optional(&mut **tx)
+        .await?
+        .map(logical_lifecycle)
+        .ok_or(AppError::NotFound)
 }
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod honeycomb_tests;
+async fn check_environment_capacity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner: &str,
+    creating: bool,
+) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("remind.environment-capacity:{owner}"))
+        .execute(&mut **tx)
+        .await?;
+    let active: i64 = sqlx::query_scalar("SELECT count(*) FROM public.testing_environments WHERE owner_uuid = $1 AND deleted_at IS NULL AND last_activity_at > clock_timestamp() - interval '15 days'")
+        .bind(owner).fetch_one(&mut **tx).await?;
+    if active >= 5 {
+        return Err(AppError::described(
+            http::StatusCode::CONFLICT,
+            "account_environment_limit",
+            "An account can have at most 5 active test environments. Retire an unused environment first.",
+        ));
+    }
+    // Retiring and recreating must not allocate unbounded recoverable schemas.
+    // Restoration reuses an existing schema and only consumes active capacity.
+    if creating {
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM public.testing_environments WHERE owner_uuid = $1",
+        )
+        .bind(owner)
+        .fetch_one(&mut **tx)
+        .await?;
+        if retained >= 20 {
+            return Err(AppError::described(
+                http::StatusCode::CONFLICT,
+                "account_retained_environment_limit",
+                "An account can retain at most 20 test environments, including retired ones. Restore an existing environment or wait for expired environments to be purged.",
+            ));
+        }
+    }
+    Ok(())
+}

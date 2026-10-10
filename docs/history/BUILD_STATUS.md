@@ -1,0 +1,87 @@
+# Silicon Remind build and acceptance status
+
+Implemented and manually exercised locally on 2026-09-06 IST against hosted IAM
+sandbox identities and the real local configured webhook receiver backend. Scope follows
+[UNDERSTANDING.md](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/UNDERSTANDING.md). The SolidJS frontend is now available
+under [frontend](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/frontend/README.md). This historical acceptance record is supplemented by the [September update](UPDATE_2026_09_13.md).
+
+## Current local implementation
+
+The September 16 update adds Honeycomb lifecycle participant operations, durable receipts, cleanup and dispatch fences, activity reporting, and six-target release packaging. Honeycomb now owns CLI updates; the Rust client never updates dependencies at runtime. See [lifecycle integration](honeycomb-lifecycle.md) and [release packaging](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/releases.md). The historical deployment and acceptance records below describe earlier behavior, including the retired standalone updater and legacy environment management; they are not evidence of deployment of this update.
+
+Local verification: 149 Rust tests passed across the serial workspace suite and the final focused authorization/CLI checks; formatting and strict all-target Clippy passed. The frontend built and all three tests passed. OpenAPI validation passed. The documentation build verified 19 pages and 554 local links/assets. Release packaging accepted the local native CLI and rejected missing/wrong-format inputs. All six optimized platform binaries were subsequently built locally, validated and uploaded to Honeycomb as version 0.2.0. Both macOS builds and both Linux builds passed runtime smoke checks, and an isolated Honeycomb installation passed on macOS aarch64. Windows runtime checks and deployment of the backend update remain unverified. Public distribution awaits Honeycomb validator approval; see the [release record](RELEASE_0.2.0_HONEYCOMB.md).
+
+## Delivered
+
+- Minimal SolidJS frontend covering IAM sessions, reminders, archive, execution
+  history, Silicon discovery, optional multiple webhooks, and testing environments.
+  Its visual reference is the hosted IAM console, checked on 2026-09-08, using
+  its Plex typography, pale navigation, white panels and blue actions.
+  Deployed at [remind.teamofsilicons.com](https://remind.teamofsilicons.com)
+  on the standalone AWS server; see the [frontend deployment verification](deploy/frontend-2026-09-08.md).
+- Official `silicon-iam-client` 1.2.1 integration for `remind`: SLT exchange,
+  refresh, logout, live app/org/test authorization and signed lifecycle receiver.
+- Reminder create/list/get/edit, one-time and recurring five-field cron, IANA
+  timezones with UTC default, stored next UTC occurrence, individual and atomic
+  batch pause/resume, owner archive and org-wide read permissions.
+- Owner-configured webhook destinations, current signed delivery contract, durable
+  execution history, retry after receiver outages and concurrent worker claims.
+- One-time automatic archive, 45-day readability, eventual physical purge and
+  full deletion snapshots capped to the latest 100000 text records.
+- Organization-owned test environments in a dedicated shared test database,
+  with isolated schemas and mandatory IAM test binding. Creation needs name and
+  IAM root key; test app configuration can follow separately. Root keys are
+  encrypted at rest and can be retrieved, rotated, imported and forgotten.
+- Sandbox clean, delete, restore with a fresh key, 15-day inactivity retirement,
+  30-day recovery and permanent purge. Logical expiry is enforced before sweep.
+  All retained reminders count toward the explicit sandbox-only limit of 100.
+- Stateless typed Rust client and stateful CLI covering public operations.
+  CLI secrets live in permission-restricted `~/.remind/` state; refresh operation
+  identities are persisted before rotating credentials to allow crash recovery.
+- Default-on hourly command-triggered update maintenance with opt-out. CLI
+  installation uses its existing Cargo root; source builds report availability.
+  Library updates affect the consuming lockfile and require a rebuild.
+- Segregated [API](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/api/README.md), [client](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/client/README.md),
+  [CLI](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/cli/README.md), [IAM](iam.md), [sandbox](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/testing-environments.md),
+  [webhook](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/webhook-delivery.md) and [internal API](internal-api-iam-era.md) guides, plus OpenAPI.
+
+## Evidence
+
+[MANUAL_ACCEPTANCE.md](MANUAL_ACCEPTANCE.md) records actual CLI/API actions,
+SQL-prepared large/aged fixtures and inspected worker/webhook outcomes. Coverage
+includes real Carbon and Silicon sessions, permissions across identities and
+organizations, cross-sandbox reads, all CLI command groups, rotation/recovery,
+quota and byte limits, idempotency conflicts, atomic batch rollback, retention
+boundaries, DST gaps/repeats, signed event replay/tampering, real IAM removal,
+logout, interrupted refresh recovery and two-worker outage/retry delivery.
+
+Development regression checks passed independently of that manual stage:
+125 existing workspace tests, formatting, strict all-target Clippy and OpenAPI
+validation. The final Docker image built and ran as UID/GID 10001 with a
+read-only filesystem and dropped capabilities; readiness returned 200 and a
+real IAM test Silicon request returned 200. The temporary verification container
+was stopped and removed after inspection.
+
+Production secrets are in git-ignored mode-0600 `.env`; protected manual fixtures
+are ignored under `target/manual-secrets`. The source scan found none of those
+configured secret values in tracked or newly added source files.
+
+## Public deployment: 2026-09-06
+
+The dedicated AWS production stack is deployed. Public TLS/readiness, healthy
+API and worker containers, production Carbon login, test Silicon login and
+isolated sandbox creation passed. See [release record](RELEASE_0.1.0.md).
+
+## Public release verified
+
+The public backend is deployed with healthy API and worker tasks. IAM reports
+its webhook active; a signed event is recorded as processed in the production
+receiver, and the app dead-letter list is empty. Both client and CLI are published
+at 0.1.0. Registry archive checksums and Rust source match this checkout, and a
+fresh crates.io installation passed version, public readiness, authentication
+and current-version update checks. See [release record](RELEASE_0.1.0.md) for
+exact evidence and the remaining limitation on newer-version updater testing.
+
+webhook delivery is at least once. An ingress receipt is not proof of signature
+verification or application processing; the manual test separately inspected
+webhook verified history. Consumers must deduplicate the stable execution ID.

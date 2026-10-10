@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-10",
+  "environment": "isolated local stack; PostgreSQL5460; no production writes",
+  "mapping_rows": 211,
+  "mapping_sha256": "750423f3117e11f5eb42025b457ff0f1bf42bd463c31b7e106d9cd10978ca4d9",
+  "dry_apply_replay": "passed",
+  "http": {
+    "old_accounts_token_status": 401,
+    "old_app_token_status": 401,
+    "old_app_error": "account_uuid_migrated",
+    "carbon_hosted_signin": "passed",
+    "silicon_stk_slt_signin": "passed",
+    "mapped_uuid_and_public_handles": "passed",
+    "existing_reminder_and_custody_read": "passed",
+    "existing_webhook_subscription": "passed",
+    "actual_delivery_with_retained_signing_secret": "passed"
+  },
+  "storage": [
+    {
+      "database": "remind_e2e",
+      "retained": {
+        "account_storage_keys": 39,
+        "schedules": 43,
+        "hook_destinations": 7,
+        "environment_keys": 0
+      },
+      "private_storage_ids_and_credential_ciphertexts_preserved": true
+    },
+    {
+      "database": "remind_e2e_testing",
+      "retained": {
+        "account_storage_keys": 0,
+        "schedules": 0,
+        "hook_destinations": 0,
+        "environment_keys": 6
+      },
+      "private_storage_ids_and_credential_ciphertexts_preserved": true
+    }
+  ],
+  "live_e2e": {
+    "scenarios": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "passed": 131,
+    "failed": [],
+    "seconds": 138
+  }
+}

@@ -4,9 +4,12 @@
 *.log
 
 
+# Silicon Apps archives (scripts/package-apps.sh, scripts/build-release.py) and the release
+# workflow's downloaded binaries.
 /dist/
 /release-binaries/
 __pycache__/
 
-# Generated native payloads are delivered in the Honeycomb release archive.
-/targets/
+# Local development and end-to-end state (scripts/dev-accounts.sh, scripts/e2e-accounts.sh): logs, pids,
+# the development keyring and webhook secret, test homes and transcripts.
+/.mig/

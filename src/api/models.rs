@@ -2,17 +2,16 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Map, Value};
-use url::Url;
 use uuid::Uuid;
 
+pub use crate::infrastructure::postgres::ScheduleResponse;
 use crate::{
     domain::{
-        CreateScheduleCommand, ExecutionStatus, PatchScheduleCommand, PatchValue, ScheduleKind,
-        ScheduleSection, ScheduleStatus,
+        AccountRef, CreateScheduleCommand, ExecutionStatus, PatchScheduleCommand, PatchValue,
+        Relation, ScheduleKind, ScheduleSection, ScheduleStatus,
     },
     error::AppError,
-    infrastructure::postgres::{ExecutionRow, ScheduleRow},
+    infrastructure::postgres::ExecutionRow,
 };
 
 /// Public schedule creation body.
@@ -172,61 +171,6 @@ pub struct PageQuery {
     pub limit: Option<u32>,
 }
 
-/// Public schedule representation matching `openapi.yaml`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ScheduleResponse {
-    /// Schedule UUID.
-    pub id: Uuid,
-    /// Organization scope.
-    pub org_id: String,
-    /// Owner Silicon.
-    pub silicon_id: String,
-    /// Reminder content.
-    pub text: String,
-    /// IANA timezone identifier.
-    pub timezone: String,
-    /// One-time or recurring materialization behavior.
-    pub kind: String,
-    /// Five-field Linux cron expression.
-    pub cron: String,
-    /// Public lifecycle status.
-    pub status: String,
-    /// Product-facing current or archived section.
-    pub section: ScheduleSection,
-    /// Next due instant or null.
-    pub next_run_at: Option<DateTime<Utc>>,
-    /// Time at which the reminder entered the archive, if applicable.
-    pub archived_at: Option<DateTime<Utc>>,
-    /// Permanent-deletion deadline for archived reminders.
-    pub purge_after: Option<DateTime<Utc>>,
-    /// Creation timestamp.
-    pub created_at: DateTime<Utc>,
-    /// Last mutation timestamp.
-    pub updated_at: DateTime<Utc>,
-}
-
-impl From<&ScheduleRow> for ScheduleResponse {
-    fn from(row: &ScheduleRow) -> Self {
-        let archived_at = row.archived_at();
-        Self {
-            id: row.id,
-            org_id: row.org_id.clone(),
-            silicon_id: row.silicon_id.clone(),
-            text: row.text.clone(),
-            timezone: row.timezone.clone(),
-            kind: row.schedule_kind.clone(),
-            cron: row.cron.clone(),
-            status: row.status.clone(),
-            section: row.section(),
-            next_run_at: row.next_run_at,
-            archived_at,
-            purge_after: row.purge_after,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }
-    }
-}
-
 /// Public execution-history representation.
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionResponse {
@@ -281,35 +225,18 @@ pub struct PageResponse<T> {
     pub next_cursor: Option<String>,
 }
 
-/// Service-authenticated outbound webhook registration body.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookDestinationRequest {
-    /// Organization scope supplied by the trusted provisioning caller.
-    pub org_id: String,
-    /// Stable IAM UUID of the destination Silicon principal.
-    pub principal_id: Uuid,
-    /// Public global destination Silicon identifier.
-    pub silicon_id: String,
-    /// Any absolute HTTP(S) endpoint URL owned by the caller.
-    pub endpoint_url: Url,
-    /// Optional HMAC signing credential for receivers that require one.
-    #[serde(default)]
-    pub signing_secret: secrecy::SecretString,
-}
-
-/// Non-secret destination registration response.
+/// Non-secret subscription registration response.
 #[derive(Clone, Debug, Serialize)]
 pub struct HookDestinationResponse {
     /// Subscription registry UUID.
     pub id: Uuid,
-    /// Organization scope.
-    pub org_id: String,
-    /// Destination Silicon.
+    /// The owner Silicon's current public id.
     pub silicon_id: String,
-    /// Registry version after upsert.
+    /// The owner Silicon's Silicon Accounts uuid.
+    pub silicon_uuid: String,
+    /// Registry version.
     pub version: i64,
-    /// Last replacement time.
+    /// Last change time.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -318,8 +245,10 @@ pub struct HookDestinationResponse {
 pub struct WebhookSubscriptionResponse {
     /// Subscription registry UUID.
     pub id: Uuid,
-    /// Owning Silicon identifier.
+    /// The owner Silicon's current public id.
     pub silicon_id: String,
+    /// The owner Silicon's account, when Remind knows it.
+    pub owner: Option<AccountRef>,
     /// Configured endpoint URL.
     pub endpoint_url: String,
     /// Monotonic subscription version.
@@ -328,139 +257,57 @@ pub struct WebhookSubscriptionResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-/// HMAC-authenticated Silicon IAM application webhook envelope.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct IamWebhookEvent {
-    /// IAM webhook specification version.
-    pub spec_version: String,
-    /// Sender-stable idempotency identifier.
-    pub event_id: Uuid,
-    /// Published event schema.
-    pub event_type: IamWebhookEventType,
-    /// Event occurrence timestamp.
-    pub occurred_at: DateTime<Utc>,
-    /// Versioned aggregate which produced this event.
-    pub aggregate: IamWebhookAggregate,
-    /// Event-specific minimal projection.
-    pub data: Map<String, Value>,
-}
-
-/// Validated, versioned Silicon IAM application event name.
-///
-/// IAM's event vocabulary is additive. Remind interprets the lifecycle events
-/// it owns and durably records every other syntactically valid event as a no-op,
-/// allowing a newer IAM producer to add projections without breaking delivery.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct IamWebhookEventType(String);
-
-impl IamWebhookEventType {
-    /// Organization disablement may revoke the entire tenant.
-    pub const ORGANIZATION_UPDATED: &'static str = "organization.updated.v1";
-    /// Silicon membership removal may revoke one principal.
-    pub const ORGANIZATION_MEMBERSHIP_REMOVED: &'static str = "organization.membership.removed.v1";
-
-    /// Returns the exact validated event-type spelling used on the wire.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Returns whether this is the exact supplied event schema.
-    #[must_use]
-    pub fn is(&self, event_type: &str) -> bool {
-        self.0 == event_type
-    }
-
-    fn parse(value: String) -> Option<Self> {
-        is_versioned_iam_event_name(&value).then_some(Self(value))
-    }
-}
-
-impl<'de> Deserialize<'de> for IamWebhookEventType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(value).ok_or_else(|| {
-            serde::de::Error::custom("event_type must be a versioned dotted IAM event name")
-        })
-    }
-}
-
-impl Serialize for IamWebhookEventType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-fn is_versioned_iam_event_name(value: &str) -> bool {
-    if value.is_empty() || value.len() > 255 {
-        return false;
-    }
-    let mut segments = value.split('.').peekable();
-    let mut semantic_segments = 0_usize;
-    while let Some(segment) = segments.next() {
-        if segments.peek().is_none() {
-            let Some(version) = segment.strip_prefix('v') else {
-                return false;
-            };
-            return semantic_segments >= 2
-                && !version.is_empty()
-                && !version.starts_with('0')
-                && version.bytes().all(|byte| byte.is_ascii_digit());
-        }
-        let mut bytes = segment.bytes();
-        if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
-            || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-        {
-            return false;
-        }
-        semantic_segments += 1;
-    }
-    false
-}
-
-/// Aggregate metadata carried by each IAM webhook event.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct IamWebhookAggregate {
-    /// Bounded IAM aggregate key: a resource UUID or canonical identity ID.
-    #[serde(deserialize_with = "deserialize_aggregate_id")]
-    pub id: String,
-    /// Stable aggregate type.
-    #[serde(rename = "type")]
-    pub aggregate_type: String,
-    /// Positive aggregate-local ordering version.
-    pub version: i64,
-}
-
-fn deserialize_aggregate_id<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<String, D::Error> {
-    let id = String::deserialize(deserializer)?;
-    if id.is_empty() || id.len() > 255 || id.trim() != id {
-        return Err(serde::de::Error::custom("invalid IAM aggregate key"));
-    }
-    Ok(id)
-}
-
-/// Durable internal-event acceptance response.
+/// One Silicon visible to the caller (`GET /silicons`).
 #[derive(Clone, Debug, Serialize)]
-pub struct InternalEventAccepted {
-    /// Stored receipt identifier.
-    pub receipt_id: Uuid,
-    /// Stable accepted state.
+pub struct VisibleSiliconResponse {
+    /// Silicon Accounts uuid.
+    pub uuid: String,
+    /// Current public id.
+    pub silicon_id: String,
+    /// Display name.
+    pub display_name: String,
+    /// Profile photo URL.
+    pub pfp_url: String,
+    /// Why the caller sees it: `self`, `custodian` (the caller looks after it),
+    /// `sibling` (same custodian) or `shared` (it granted the caller view).
+    pub relation: Relation,
+    /// Retained reminders (current and archived).
+    pub reminder_count: i64,
+}
+
+/// Body that names an account to share with or to allow.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountTargetRequest {
+    /// `c:handle`, `si:handle`, or a Silicon Accounts uuid.
+    pub id: String,
+    /// Which of the caller's Silicons this is about (required for Carbons).
+    #[serde(default)]
+    pub silicon_id: Option<String>,
+}
+
+/// Query naming which of the caller's Silicons a sharing request is about.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiliconSelector {
+    /// `si:handle` or uuid of a Silicon the caller looks after (Carbons).
+    pub silicon_id: Option<String>,
+}
+
+/// Acknowledgement of one Silicon Accounts webhook delivery.
+#[derive(Clone, Debug, Serialize)]
+pub struct AccountsEventAccepted {
+    /// The delivery's event id.
+    pub event_id: String,
+    /// `processed`, `duplicate` or `ignored`.
     pub status: &'static str,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BulkScheduleStatusRequest, CreateScheduleRequest, IamWebhookEvent, IamWebhookEventType,
-        ListSchedulesQuery, NullablePatch, PatchScheduleRequest,
+        AccountTargetRequest, BulkScheduleStatusRequest, CreateScheduleRequest, ListSchedulesQuery,
+        NullablePatch, PatchScheduleRequest,
     };
     use crate::{
         domain::{CreateScheduleCommand, PatchScheduleCommand, ScheduleSection},
@@ -573,58 +420,14 @@ mod tests {
     }
 
     #[test]
-    fn iam_webhook_model_matches_the_published_envelope() -> anyhow::Result<()> {
-        let event = serde_json::from_str::<IamWebhookEvent>(
-            r#"{
-                "spec_version":"1.0",
-                "event_id":"0198f74d-7ef7-7c9f-95bf-7d403a61e5ca",
-                "event_type":"organization.membership.removed.v1",
-                "occurred_at":"2026-08-31T12:00:00Z",
-                "aggregate":{
-                    "id":"0198f74d-7ef7-7c9f-95bf-7d403a61e5cb",
-                    "type":"membership",
-                    "version":7
-                },
-                "data":{
-                    "org_id":"tos",
-                    "principal_id":"0198f74d-7ef7-7c9f-95bf-7d403a61e5cc",
-                    "principal_type":"silicon"
-                }
-            }"#,
-        )?;
-
-        assert_eq!(
-            event.event_type.as_str(),
-            IamWebhookEventType::ORGANIZATION_MEMBERSHIP_REMOVED
+    fn account_target_names_an_account_and_optionally_a_silicon() -> anyhow::Result<()> {
+        let request: AccountTargetRequest =
+            serde_json::from_str(r#"{"id":"c:ada","silicon_id":"si:scout"}"#)?;
+        assert_eq!(request.id, "c:ada");
+        assert_eq!(request.silicon_id.as_deref(), Some("si:scout"));
+        assert!(
+            serde_json::from_str::<AccountTargetRequest>(r#"{"id":"c:ada","org":"tos"}"#).is_err()
         );
-        assert_eq!(event.aggregate.aggregate_type, "membership");
         Ok(())
-    }
-
-    #[test]
-    fn iam_webhook_accepts_additive_versioned_events_and_rejects_invalid_names() {
-        for event_type in [
-            "organization.silicon.created.v1",
-            "organization.silicon.updated.v1",
-            "organization.tag_archived.v2",
-        ] {
-            let parsed = serde_json::from_value::<IamWebhookEventType>(serde_json::Value::String(
-                event_type.to_owned(),
-            ));
-            assert!(parsed.is_ok(), "valid additive event {event_type} rejected");
-        }
-        for event_type in [
-            "silicon.updated",
-            "organization..updated.v1",
-            "Organization.updated.v1",
-            "organization.updated.v0",
-            "organization.updated.v01",
-            "organization.updated.v1.extra",
-        ] {
-            let parsed = serde_json::from_value::<IamWebhookEventType>(serde_json::Value::String(
-                event_type.to_owned(),
-            ));
-            assert!(parsed.is_err(), "invalid event {event_type} accepted");
-        }
     }
 }

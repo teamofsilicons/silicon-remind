@@ -1,105 +1,99 @@
 # Public HTTP API
 
-The production service origin is `https://backend.remind.teamofsilicons.com`.
-Ordinary routes begin with `/api/v1`. JSON requests use
-`Content-Type: application/json`; JSON errors contain `error.code`,
-`error.message`, and normally `error.request_id`. Quote the request ID when
-investigating a failed call. Bodies are bounded by the deployment's request limit.
+The production origin is `https://api.remind.teamofsilicons.com`. Routes begin with
+`/api/v2` (API contract 2); every request names it with `X-Remind-API-Version: 2`. JSON requests
+use `Content-Type: application/json`. Errors look like
+`{"error":{"code":"…","message":"…","hint":"…","request_id":"…"}}` (`hint` when there is a
+next step); quote the request id when reporting a problem. The OpenAPI document is
+[`openapi.yaml`](/openapi.yaml).
 
-## Authentication and organization selection
+Contract 1 (`/api/v1`) is retired: every `/api/v1` path answers `410 api_version_retired` with a
+pointer to v2.
 
-Authenticate with `Authorization: Bearer <application-access-token>` and
-`X-Org-ID: <org-handle>`. These are IAM Application tokens for `remind`.
-Remind introspects each request through the official `silicon-iam-client` and
-requires matching application audience, organization, principal, membership,
-expiry, and testing plane. An IAM refresh token cannot authorize reminder actions.
-An unavailable IAM dependency fails closed; it does not become a fabricated user.
+## Authentication
 
-Every current member can read their organization's reminders. Only the owner
-Silicon can create, edit, pause, resume, archive, or configure its webhook.
-Carbon access is read-only for reminders, even if that Carbon is an org owner.
-An org owner/admin can administer test environments; their reminder permissions
-are still those of a Carbon.
+Send a Silicon Accounts access token issued to Remind:
 
-A request carrying `X-Remind-Test-Key` with an imported IAM application secret
-(`ask_…`) or legacy 32-character root uses an isolated Remind sandbox. Its bearer must be from the linked IAM sandbox. Invalid keys never fall
-through to production. Environment lifecycle management uses production identity
-and rejects this test header. See [testing environments](../testing-environments.md).
-
-## Application sessions
-
-| Method and path | Request | Result |
-| --- | --- | --- |
-| `GET /auth/iam` | No session; optional test key | Public `app_id`, `iam_url`, and `iam_environment_id` (null in production); no credentials |
-| `POST /auth/login` | `{"slt":"…","org_id":"optional-for-testing-actor"}` | Access/refresh tokens, expiry seconds, actor and exactly one org |
-| `POST /auth/refresh` | `{"refresh_token":"…"}` | Successor access and rotating refresh tokens |
-| `POST /auth/logout` | `{"token":"…"}` | `204`; refresh token revokes the whole family |
-| `GET /auth/me` | Bearer and org headers | Current identity, disclosed org role and reminder-write capability |
-| `GET /auth/organizations` | Bearer; no org header required | `items` containing the single account and organization selected during login |
-
-The three POST endpoints accept a token in their JSON body. Remind's Application
-secret stays on the server. They do not ask for an IAM password, email, phone,
-OTP, or a browser redirect. Pass an `Idempotency-Key` on login and refresh when a
-retry must replay the same logical exchange. It must be 16–255 visible ASCII
-characters. Session responses use `Cache-Control: no-store`.
-
-Browser sign-in sends `app_id=remind` and `redirect_uri` to IAM. The user selects
-one Carbon or Silicon account and one organization in IAM. The returned SLT is
-already scoped to that context. `/auth/organizations` confirms the single bound
-organization. Every ordinary request must use that same `X-Org-ID`; sign in
-separately to add another account or organization. Legacy unscoped credentials
-require reauthentication. For a testing actor ID, supply `org_id` explicitly
-when the actor has more than one organization. Production never accepts account
-credentials or public IDs as a substitute for an issued SLT.
-
-Example, with a short-lived token supplied from a protected file:
-
-```sh
-curl --request POST "$REMIND_URL/api/v1/auth/login" \
-  --header 'Content-Type: application/json' \
-  --header "Idempotency-Key: $MUTATION_KEY" \
-  --data-binary @login.json
+```http
+Authorization: Bearer <access token>
+X-Remind-API-Version: 2
 ```
 
-`login.json` contains `{"slt":"the-token-from-IAM"}`. Keep tokens out of application
-logs. Access and refresh tokens are separate: do not retry a spent refresh token
-with a different idempotency key after a successful rotation.
+The token is an EdDSA JWT with `aud` = `remind`, checked against Silicon Accounts' published
+keys (`iss`, `aud`, expiry). Before actions that cannot be undone or that reveal a secret
+(archiving a reminder, adding or ending webhook subscriptions, sharing, allow-lists, test
+environment keys, retiring an environment), Remind also asks Silicon Accounts whether the token
+is still active. Sign-in happens between your client and Silicon Accounts; Remind never sees a
+refresh token:
 
-## Webhook configuration and Silicon discovery
+- Carbons: the device flow (`POST {ACCOUNTS}/v1/device/authorize` with `client_id=remind`, then
+  poll `POST {ACCOUNTS}/v1/oauth/token`), as `remind login` does.
+- Silicons: a short-lived token from `silicon-accounts login --app remind -q`, exchanged at
+  `POST {ACCOUNTS}/v1/oauth/token` with `grant_type=urn:silicon:params:oauth:grant-type:slt`,
+  `slt` and `client_id=remind`.
+- Websites: the hosted sign-in pages and a code exchange with Remind's app secret, on a server.
 
-| Method and path | Behavior |
+[Signing in and who sees what](../accounts.md) explains both flows and the rules below.
+
+| 401 code | meaning |
+|---|---|
+| `unauthenticated` | no credential, or one Remind cannot read |
+| `token_expired` | the access token expired; refresh it |
+| `token_revoked` | issued before the account signed out, was removed or deleted; sign in again |
+| `token_wrong_audience` | issued to another app; another app reads with a verification proof instead |
+| `token_kind_mismatch` | the token's `kind` differs from what Remind knows for that account |
+| `legacy_token_rejected` | a token from contract 1 (`oat_`/`ort_`); sign in with Silicon Accounts |
+| `proof_as_bearer` | a `sap_` proof sent as `Bearer`; send it as `Proof` |
+| `account_deleted` | the account was deleted |
+
+Every 401 carries `WWW-Authenticate: Bearer realm="remind"`.
+
+### Other apps: verification proofs
+
+Another app reads on an account's behalf with a Silicon Accounts User verification proof:
+`Authorization: Proof sap_…`. Remind verifies it with Silicon Accounts and requires that it is
+valid, a User verification proof for receiving app `remind`, carries the scope
+`remind.schedules.read`, and comes from an app the deployment allows for that scope
+(`REMIND_PROOF_ISSUERS`). It is accepted only on `GET /schedules`, `GET /schedules/{id}`,
+`GET /schedules/{id}/executions`, `GET /silicons` and `GET /auth/me` (elsewhere
+`401 proof_not_accepted`), and reads exactly what that account may read.
+
+## Who may do what
+
+Every reminder belongs to the Silicon that created it. Accounts are identified by their Silicon
+Accounts `uuid` (short, case-sensitive text) and shown by their current `c:`/`si:` id.
+
+- A Silicon reads its own reminders and those of its custodian's other Silicons, and changes only
+  its own.
+- A Carbon reads the reminders of the Silicons it looks after (it is their custodian). Carbons
+  never create, change, pause or archive reminders, and never subscribe webhooks.
+- Anyone reads what a Silicon (or its custodian) shared with them (`/viewers`).
+- Sharing with a Silicon outside the owner's custodian and its other Silicons needs that Silicon
+  (or its custodian) to have allowed the owner first (`/allowed-accounts`).
+
+A reminder you cannot read answers 404, as if it did not exist.
+
+## The calling account
+
+| Method and path | Result |
 | --- | --- |
-| `PUT /webhook` | Set the webhook endpoint for the authenticated Silicon |
-| `GET /webhook` | Read its endpoint URL and version, without the signing secret |
-| `DELETE /webhook` | Disable the endpoint; returns `204` |
-| `POST /webhooks` | Add another independent webhook subscription |
-| `GET /webhooks` | List active subscriptions, possibly empty |
-| `DELETE /webhooks/{subscription_id}` | Disable one subscription; returns `204` |
-| `GET /silicons?after=<uuid>&limit=50` | List registered Silicons in this org with reminder counts |
+| `GET /auth/me` | `{uuid, kind, id, display_name, pfp_url, custodian, can_manage_reminders, credential, issuing_app, visible_silicons}` |
+| `GET /silicons?after=<uuid>&limit=50` | The Silicons whose reminders you can read: `{uuid, silicon_id, display_name, pfp_url, relation, reminder_count}`; `relation` is `self`, `custodian`, `sibling` or `shared` |
 
-Configuration input is `{"endpoint_url":"…","signing_secret":"…"}`; omit `signing_secret` for unsigned delivery. Use any URL
-and an optional textual `signing_secret` chosen for the receiver. The backend validates the endpoint
-as an absolute HTTP(S) URL and verifies the Silicon's canonical public ID.
-See [the exact sender and receipt contract](../webhook-delivery.md).
-Ownership and public routing identity are derived from IAM, never supplied by a
-public caller. Endpoint URL and signing secret are encrypted at rest.
-
-Webhook subscriptions are optional. Reminders can be created with no configured
-receiver and will begin fan-out delivery when subscriptions are added.
+`credential` is `access_token` or `proof` (then `issuing_app` names the app). `/silicons` pages
+by uuid: pass `next_cursor` as `after`.
 
 ## Reminders
 
 | Method and path | Required input | Result |
 | --- | --- | --- |
 | `POST /schedules` | `text`, `kind`, `cron`, `timezone`; `Idempotency-Key` | `201` reminder |
-| `GET /schedules` | Optional filters below | Page of reminders |
-| `GET /schedules/{id}` | Reminder UUID | Visible reminder |
-| `PATCH /schedules/{id}` | Changed fields; `Idempotency-Key` | Updated reminder |
-| `PATCH /schedules` | `schedule_ids`, `status`; `Idempotency-Key` | Atomic results in supplied ID order |
-| `DELETE /schedules/{id}` | Owner identity | `204`; archives the reminder |
-| `GET /schedules/{id}/executions` | Optional cursor and limit | Delivery history |
-
-Creation example:
+| `GET /schedules` | optional filters below | page of reminders |
+| `GET /schedules/{id}` | reminder id | the reminder |
+| `PATCH /schedules/{id}` | changed fields; `Idempotency-Key` | updated reminder |
+| `PATCH /schedules` | `schedule_ids`, `status`; `Idempotency-Key` | results in the order given |
+| `DELETE /schedules/{id}` | owner Silicon | `204`; archives it |
+| `GET /schedules/{id}/executions` | optional `cursor`, `limit` | delivery history |
 
 ```json
 {
@@ -110,110 +104,150 @@ Creation example:
 }
 ```
 
-`kind` is `recurring` or `one_time`. Both use five-field Linux cron in the order
-minute, hour, day of month, month, day of week. One-time means the first future
-matching occurrence, not a separate timestamp format. An IANA timezone is
-mandatory on creation: provide `"timezone": "Asia/Kolkata"` or another IANA
-identifier in the JSON body. To schedule in UTC, provide `"timezone": "UTC"`
-explicitly. Missing, null, or blank timezones return `422 timezone_required` with
-guidance to supply the `timezone` JSON field. Invalid identifiers are also
-rejected; Remind does not choose a default. Display names and fixed offsets are
-not IANA identifiers.
+`kind` is `recurring` or `one_time`. Both use five-field Linux cron: minute, hour, day of month,
+month, day of week. One-time means the first future match; the reminder then moves to the
+archive. An IANA timezone is mandatory on creation (`"timezone": "UTC"` for UTC); a missing,
+null or blank one answers `422 timezone_required`, and unknown identifiers, display names and
+fixed offsets are refused.
 
-Cron supports Linux/Vixie lists, ranges, steps and named months/weekdays. Sunday
-is 0 or 7. When both day-of-month and day-of-week are restricted, either may
-match. Quartz extensions such as `L`, `W` and `#` are rejected. A nonexistent DST
-wall-clock time is skipped; both real instants in a repeated interval are
-eligible. The next occurrence is recalculated in UTC after each trigger.
+Cron supports Linux/Vixie lists, ranges, steps and named months and weekdays. Sunday is 0 or 7.
+When both day of month and day of week are restricted, either may match. Quartz extensions (`L`,
+`W`, `#`) are refused. A wall-clock time skipped by a DST change is skipped; both real instants in
+a repeated hour are eligible. The next occurrence is recalculated in UTC after each trigger.
 
-Text must be nonblank and no more than 100,000 UTF-8 bytes. Responses include the
-UUID, org, public Silicon ID, text, kind, cron, timezone, status, section, next UTC
-occurrence, archive/deletion deadline, and creation/update timestamps.
+Text must be non-blank and at most 100,000 UTF-8 bytes. A reminder carries `id`, `owner`
+(`{uuid, id, kind}`), `silicon_id` (the owner's current id), `text`, `kind`, `cron`,
+`timezone`, `status`, `section`, `next_run_at`, `archived_at`, `purge_after`, `created_at` and
+`updated_at`.
 
-Listing filters are `silicon_id`, `section=current|archived`,
-`status=active|paused|completed`, `cursor`, and `limit` (1–100). Current is the
-default section. Pass `next_cursor` unchanged into the next request, keeping the
-same filters and organization. An empty result has `items: []`.
+Listing filters: `silicon_id` (`si:` id or uuid), `section=current|archived`,
+`status=active|paused|completed`, `cursor`, `limit` (1 to 100). `current` is the default. Pass
+`next_cursor` unchanged with the same filters for the next page.
 
-PATCH accepts text, timezone, kind, cron and status. Omitted fields are unchanged.
-Cron cannot be cleared. Timing changes recalculate the next future occurrence;
-a text-only change preserves it. Only `active` and `paused` are client-writable
-statuses. `completed` is assigned by the backend when a one-time occurrence is
-materialized. Archived reminders are immutable.
+PATCH accepts `text`, `timezone`, `kind`, `cron` and `status`; omitted fields are unchanged and
+cron cannot be cleared. Timing changes recalculate the next occurrence; a text-only change keeps
+it. Only `active` and `paused` can be written; `completed` is set when a one-time reminder fires.
+Archived reminders cannot change.
 
-For atomic pause/resume, send 1–100 distinct UUIDs:
+Pause or resume 1 to 100 distinct reminders at once:
 
 ```json
 {"schedule_ids":["0198f74d-7ef7-7c9f-95bf-7d403a61e5ca"],"status":"paused"}
 ```
 
-All IDs must identify current reminders owned by the caller. Any invalid owner,
-missing reminder, or invalid lifecycle state fails the entire batch. Pausing
-suppresses future materialization; already-materialized occurrences retain their
-delivery lifecycle. Resuming calculates the next future cron match. Reapplying
-the same state is a no-op. Reuse the same idempotency key only with the exact same
-operation and input; changing input returns `409 idempotency_conflict`.
+Every id must be a current reminder of the caller, or the whole batch fails. Pausing stops
+future occurrences; resuming computes the next future match; repeating the same state changes
+nothing. Reuse an `Idempotency-Key` (16 to 255 visible ASCII characters) only with the exact same
+request; a different body answers `409 idempotency_conflict`.
+
+## Sharing and allow-lists
+
+| Method and path | Who | Result |
+| --- | --- | --- |
+| `GET /viewers` | anyone | `{granted, received}`: grants on your (or your Silicons') reminders, and grants you hold |
+| `POST /viewers` | the Silicon, or its custodian | `{id, silicon_id?}` → `201` grant (`200` when it already existed) |
+| `DELETE /viewers/{viewer}?silicon_id=` | the Silicon, or its custodian | `204` |
+| `GET /allowed-accounts?silicon_id=` | the Silicon, or its custodian | `{items}` |
+| `POST /allowed-accounts` | the Silicon, or its custodian | `{id, silicon_id?}` → `201` entry (`200` when it already existed) |
+| `DELETE /allowed-accounts/{account}?silicon_id=` | the Silicon, or its custodian | `204`; also ends the grants the entry made possible |
+
+`id` names the other account by `c:`/`si:` id or uuid (Remind looks it up at Silicon Accounts).
+A Carbon names which of its Silicons the request is about with `silicon_id`; a Silicon may omit
+it. A grant is `{id, owner, viewer, granted_by, created_at}` and an allow-list entry
+`{id, silicon, allowed, created_by, created_at}`, accounts as `{uuid, id, kind}`. Granting to a
+Silicon outside the owner's custodian and its other Silicons answers `403 silicon_not_open` until
+that Silicon allows the owner (or the granting custodian). Both are refused inside a test
+environment (`403 not_in_test_environment`).
+
+## Webhook subscriptions
+
+| Method and path | Behavior |
+| --- | --- |
+| `POST /webhooks` | Add a subscription for the calling Silicon |
+| `GET /webhooks?silicon_id=` | A Silicon's own subscriptions, or (read-only, for a Carbon) those of the Silicons it looks after |
+| `DELETE /webhooks/{subscription_id}` | End one subscription; `204` |
+| `PUT /webhook` | Older single-endpoint form of `POST /webhooks` |
+| `GET /webhook` | The first active subscription, without the signing secret |
+| `DELETE /webhook` | End every subscription of the calling Silicon; `204` |
+
+Input is `{"endpoint_url":"…","signing_secret":"…"}`; leave out `signing_secret` for unsigned
+delivery. The endpoint must be an absolute https URL in production (credentials and fragments
+are refused). Endpoint and secret are encrypted at rest and the secret is never returned. A
+receipt is `{id, silicon_id, silicon_uuid, version, updated_at}`. Subscriptions are optional:
+reminders created without any simply have nowhere to go until one is added. See the
+[delivery contract](../webhook-delivery.md).
 
 ## Delivery, archive and retention
 
-The worker stores an immutable occurrence before sending it to the configured webhook endpoint.
-Execution ID is stable across retries; it is also webhook's idempotency identifier.
-The snapshot contains the reminder text at trigger time, schedule identity,
-Silicon ID, timezone, and intended trigger instant. Transient/ambiguous failures
-retry with bounded backoff; terminal errors are retained in execution history.
+When a reminder comes due, the worker stores an immutable occurrence, then posts it to every
+subscription. The execution id is stable across retries and is the delivery's idempotency key.
+The snapshot holds the text at trigger time, the reminder and owner identity, the timezone and
+the intended instant. Passing failures retry with bounded backoff; final failures stay in the
+execution history. Reminders of an account that removed Remind from its apps stop firing until
+it signs in again.
 
-The owner can archive a reminder at any time. One-time reminders automatically
-enter the archive when their occurrence is materialized. Archived reminders and
-history remain readable for 45 days. Read and delivery queries enforce that
-expiry even if the cleanup worker is delayed. Before permanent removal, the
-worker writes one JSON text line with reminder, trigger and creator snapshots;
-the ledger retains the newest 100,000 records within that database/schema.
-The deletion ledger is backend-internal and is not exposed by the client or CLI.
+The owner can archive a reminder at any time; a one-time reminder enters the archive when it
+fires. Archived reminders and their history stay readable for 45 days. Before a reminder is
+removed for good, one JSON line with the reminder, trigger and creator snapshots is written to
+the deleted-reminders log, which keeps the newest 100,000 records. The log is internal and not
+exposed through the API.
 
-## Environment lifecycle
+## Test environments
 
-See the [dedicated sandbox guide](../testing-environments.md) for setup and
-permissions. For new sandboxes send the IAM application `app_secret` in `X-Remind-Test-Key`; `GET /testing-environment` discovers its metadata automatically. Ordinary operations require a sandbox user bearer and its actual permissions. IAM owns cleanup and retirement. The following management operations are retained for **legacy manually paired sandboxes**:
+See the [testing guide](../testing-environments.md). Management is a production action with your
+access token (a request carrying `X-Remind-Test-Key` here answers `403 test_key_not_allowed_here`):
 
 | Method and path | Result |
 | --- | --- |
-| `POST /test-environments` | `{environment, key}` |
-| `GET /test-environments` | Page; `include_deleted`, UUID `after`, and 1–100 `limit` |
-| `GET /test-environments/{id}` | Metadata |
+| `POST /test-environments` | `{name, description?}` → `201 {environment, key}` |
+| `GET /test-environments` | page; `include_deleted`, `after` (environment id), `limit` 1 to 100 |
+| `GET /test-environments/{id}` | metadata: `{id, owner_uuid, owner, name, description, version, created_at, last_activity_at, deleted_at, purge_after}` |
 | `GET /test-environments/{id}/key` | `{environment_id, key}` |
-| `POST /test-environments/{id}/key-rotations` | New key; previous key revoked |
-| `DELETE /test-environments/{id}` | `204`; retires for 30-day recovery |
-| `POST /test-environments/{id}/restorations` | Fresh key and restored environment |
-| `GET /testing-environment` | Selected sandbox metadata (app_secret or legacy key) |
-| `POST /testing-environment/cleanings` | Root-key-only atomic clear; `204` |
+| `POST /test-environments/{id}/key-rotations` | a new key; the old one stops working |
+| `DELETE /test-environments/{id}` | `204`; retired, restorable for 30 days |
+| `POST /test-environments/{id}/restorations` | restored, with a new key |
+
+Use an environment by adding `X-Remind-Test-Key: <key>` to ordinary requests, with your normal
+access token. `GET /testing-environment` and `POST /testing-environment/cleanings` (`204`) work
+with the key alone; without a key they answer `400 test_environment_required`. Owners and, for a
+Silicon owner, its custodian manage an environment; the owner's custodian and its other Silicons
+(or a Carbon owner's Silicons) see it and read its key; anyone with the key uses and cleans it.
+An environment holds at most 100 reminders (`409 test_reminder_limit`), retires after 15 days
+without activity, and is restorable for 30 days. Sending the test key or app secret fields that
+contract 1 took answers `422 test_key_field_retired`.
 
 ## Errors and operational endpoints
 
-`401` means missing, expired, revoked or mismatched authority. `403` means a
-recognized actor lacks the action's permission. `404` also hides resources in
-other organizations. `409` reports lifecycle/idempotency conflicts, absent
-webhook configuration, duplicate active environment names, or the sandbox's
-legacy 100-reminder limit. `422` reports invalid data. `429` may include `Retry-After`.
-`503` means an authority or storage dependency could not answer safely.
+`401` means no usable credential (codes above). `403` means a known account lacks the
+permission (`not_reminder_owner`, `silicon_only`, `not_custodian`, `not_environment_manager`,
+`proof_cannot_write`…). `404` also hides what you cannot read. `409` reports lifecycle or
+idempotency conflicts, duplicate active environment names and the test environment reminder
+limit. `410 api_version_retired` answers contract 1 paths. `422` reports invalid data. `429` may
+include `Retry-After`. `503` means Silicon Accounts or the database could not answer safely; it
+never becomes a guessed identity.
 
-Origin-relative `/health/live` reports process liveness. `/health/ready` verifies
-production schema readiness. `/metrics` is an operational endpoint and should be
-restricted by deployment networking. The IAM receiver is the origin-relative
-`POST /webhook/`; it verifies signed raw bodies and is not the user configuration
-route `/api/v1/webhook`.
+`/health/live` reports process liveness and `/health/ready` database readiness (no credential).
+`/metrics` is operational; restrict it by deployment networking. `POST /webhook/` (also
+`/webhook`) receives Silicon Accounts' signed account events (id and profile changes, custodian
+changes, sign-outs, access removal, deletion); it is not the subscription route `/api/v2/webhook`.
 
-Legacy manual sandbox creation accepts an optional `iam_app_secret`. If omitted, root metadata,
-cleaning and configuration are available immediately; authenticated actions wait
-for `PUT /testing-environment/iam` with `{"iam_app_secret":"<test-only-secret>"}`
-and the Remind root header. That route returns 204 and requires no actor bearer.
-See [the sandbox setup guide](../testing-environments.md).
+## Contract negotiation
 
-## Wire version negotiation
+`GET /api/versions` lists the contracts this server serves and their state. Send
+`X-Remind-API-Version: 2` with `/api/v2` requests; an unsupported or conflicting selection answers
+`406` before anything runs, and the selected version comes back on the response. See the
+[version policy](../version-policy.md).
 
-`GET /api/versions` is relative to the server origin and advertises supported protocols and lifecycle state. Send `X-Remind-API-Version: 1` with `/api/v1` requests; unsupported or conflicting selections return 406 before execution. The selected version appears on responses. See [version policy](../version-policy.md) for the compatibility matrix and seven-day idle sunset rule.
+## Reports and telemetry
 
-## Reports and operational telemetry
+`POST /api/v2/reports` takes `{"message":"steps, expected result, actual result","pr":null}` with
+your access token and an `Idempotency-Key`. Messages are at most 16,384 UTF-8 bytes, at most 10
+new reports per account per hour, and `pr` must link a pull request of this repository. It
+answers `202 {id, status, failure_reason}`; replaying the same key and body answers `200` with the
+same receipt, a different body `409`. `GET /api/v2/reports/{id}` is visible only to the account
+that sent it. Without the email transport configured, production answers `503`; inside a test
+environment reports are `simulated`.
 
-`POST /api/v1/reports` accepts `{ "message": "reproduction details", "pr": null }` with bearer, organization, and `Idempotency-Key` headers. Maximum message length is 16384 UTF-8 bytes and the rate limit is 10 new reports per actor per hour. An optional PR must point to this repository's pull request. Returns HTTP 202 with `{id,status,failure_reason}`; replaying the same key/body returns HTTP 200 with the same receipt, and changing the body returns 409. `GET /api/v1/reports/{id}` is visible only to the submitting actor in the same organization/environment. Missing production Postmark configuration returns 503. Test reports immediately return `simulated`.
-
-`POST /api/v1/telemetry/events` accepts only the bounded `TelemetryEvent` schema in OpenAPI and requires the same normal IAM session. `X-Remind-Telemetry: off` disables observations for any request. Production uses Space Station; testing writes only its own `telemetry_events` table. Telemetry submission itself is excluded from request observations to prevent recursion. [Diagnostics and operator setup](../diagnostics.md).
+`POST /api/v2/telemetry/events` takes only the bounded `TelemetryEvent` schema, with your access
+token. `X-Remind-Telemetry: off` turns observations off for any request. See
+[diagnostics](../diagnostics.md).

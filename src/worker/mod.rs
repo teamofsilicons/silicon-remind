@@ -10,7 +10,9 @@ use crate::{
     application::ports::{Clock, SystemClock},
     config::{RuntimeEnvironment, Settings},
     infrastructure::{
+        accounts::AccountsGateway,
         crypto::SecretCipherKeyring,
+        identity::IdentityStore,
         postgres::{self, PostgresRepository},
         webhook::WebhookClient,
     },
@@ -23,8 +25,8 @@ pub mod retention;
 pub mod scheduler;
 
 struct WorkerRuntime {
+    identity: IdentityStore,
     telemetry: crate::telemetry::Recorder,
-    honeycomb_base_url: Option<url::Url>,
     tests: Option<crate::infrastructure::testing::TestEnvironments>,
     repository: PostgresRepository,
     encryption: SecretCipherKeyring,
@@ -55,15 +57,24 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         settings.webhook.connect_timeout,
         settings.webhook.request_timeout,
         settings.webhook.max_response_bytes,
-    )?;
+    )?
+    .public_destinations_only(
+        settings.environment == crate::config::RuntimeEnvironment::Production,
+    );
     let worker_id = format!("remind-worker-{}", Uuid::now_v7());
     let batch_size = u32::try_from(settings.worker.batch_size.get())?;
     let delivery_concurrency = u32::try_from(settings.worker.max_delivery_concurrency.get())?;
     let retention_batch_size = u32::try_from(settings.retention.batch_size.get())?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let metrics = Metrics::new();
+    let identity = IdentityStore::new(
+        pool.clone(),
+        AccountsGateway::new(&settings.accounts)?,
+        settings.accounts.lookup_ttl,
+    );
     let delivery = delivery::DeliveryProcessor::new(
         repository.clone(),
+        identity.clone(),
         webhook_client,
         encryption.clone(),
         delivery::DeliveryProcessorConfig {
@@ -81,18 +92,14 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         tokio::net::TcpListener::bind(settings.worker.operational_bind_addr).await?;
     let tests = match &settings.testing_database {
         Some(database) => Some(
-            crate::infrastructure::testing::TestEnvironments::connect(
-                database,
-                &settings.iam,
-                encryption.clone(),
-            )
-            .await?,
+            crate::infrastructure::testing::TestEnvironments::connect(database, encryption.clone())
+                .await?,
         ),
         None => None,
     };
     let runtime = WorkerRuntime {
+        identity,
         telemetry: crate::telemetry::Recorder::new(&settings),
-        honeycomb_base_url: settings.honeycomb_base_url.clone(),
         tests,
         repository,
         encryption,
@@ -194,6 +201,20 @@ async fn serve_worker(
             }
             _ = heartbeat.tick() => {
                 record_heartbeat(runtime).await;
+                if let Err(error) = runtime.identity.refresh_due_accounts(100).await {
+                    tracing::warn!(%error, "account refresh sweep failed");
+                }
+                if let Some(tests) = &runtime.tests {
+                    match sqlx::query_scalar::<_, String>("SELECT uuid FROM accounts WHERE status = 'deleted'")
+                        .fetch_all(runtime.repository.pool()).await {
+                        Ok(deleted) => for uuid in deleted {
+                            if let Err(error) = tests.retire_owned_by(&uuid).await {
+                                tracing::warn!(%error, "deleted account environment cleanup will be retried");
+                            }
+                        },
+                        Err(error) => tracing::warn!(%error, "deleted account sweep will be retried"),
+                    }
+                }
             }
             _ = work_interval.tick() => {
                 run_work_cycle(
@@ -270,7 +291,7 @@ async fn run_work_cycle(
                 schedules_deleted = result.schedules_deleted,
                 executions_failed = result.executions_failed,
                 destinations_disabled = result.destinations_disabled,
-                "cleaned resources blocked by IAM lifecycle tombstones"
+                "cleaned resources revoked before the move to Silicon Accounts"
             );
         }
         Ok(_) => {}
@@ -324,11 +345,7 @@ async fn run_test_cycles(
             .await?
         {
             let repository = PostgresRepository::new(lease.pool.clone());
-            let delivery = runtime.delivery.with_repository(
-                repository.clone(),
-                tests.clone(),
-                lease.environment.clone(),
-            );
+            let delivery = runtime.delivery.with_repository(repository.clone());
             run_work_cycle(
                 &repository,
                 &delivery,
@@ -354,11 +371,6 @@ async fn run_test_cycles(
 }
 
 async fn sweep_test_environments(runtime: &WorkerRuntime) {
-    if let (Some(tests), Some(origin)) = (&runtime.tests, &runtime.honeycomb_base_url)
-        && let Err(error) = tests.report_honeycomb_activity(origin).await
-    {
-        tracing::error!(error = %error, "Honeycomb activity report failed; retained for retry");
-    }
     if let Some(tests) = &runtime.tests
         && let Err(error) = tests.sweep().await
     {

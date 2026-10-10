@@ -705,3 +705,29 @@ Session reload rechecks the grants, dropping a removed selection. Access tokens
 remain server-side, and every API request retains live IAM authorization checks.
 The login page no longer asks for an organization handle or offers a production
 SLT form. The sandbox SLT form remains for testing-environment credentials.
+
+## 2026-10-10 — D-040 — Remind signs in with Silicon Accounts
+
+**Status:** Accepted. Supersedes D-004, D-005, D-013 (idempotency is now per account), D-020, D-021, D-025, D-030,
+D-033, D-035 and both 2026-09-08 entries; amends D-026 (destination secrets now bind to the owner's storage key, AAD version
+2, with version 1 rows still readable).
+
+Remind now signs every request in with Silicon Accounts: one account per request with no shared groups, visibility
+from custodian data (a Silicon, its custodian and the custodian's other Silicons), explicit viewer grants and Silicon
+allow-lists for sharing, verification proofs for the Silicon Interface, contract 2 at `/api/v2`, and all existing
+data kept and re-keyed by `remind-migrate link-identities`. The full record of these decisions is
+`docs/migration/decisions.md`; the production steps are in `docs/migration/cutover.md`.
+
+## 2026-10-10 — D-041 — Remind ships through Silicon Apps
+
+**Status:** Accepted. Supersedes the Honeycomb release packaging and the Honeycomb-managed updates that earlier
+release records describe.
+
+Silicon Apps distributes the `remind` CLI and keeps installed copies current; nothing in Remind updates itself. Each
+release is one archive per target (`apps.yaml` listing that target, plus `bin/remind[.exe]`), made by
+`scripts/package-apps.sh`, which refuses a binary that is not native to its target, needs a glibc newer than the 2.28
+baseline, or answers `remind --help`, `remind accounts --json` and `remind login status --json` wrongly. The release
+workflow checks each binary on its own runner, packs every target once on Linux and publishes nothing. Production
+deployment reads Remind's Silicon Accounts app and webhook secrets, and the Next.js web replaces the SolidJS web on
+the same host. Dated records from the IAM and Honeycomb era moved to `docs/history/`. The full record is
+`docs/migration/decisions.md` (sections 14 to 17); the production steps are in `docs/migration/cutover.md`.

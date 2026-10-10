@@ -61,7 +61,9 @@ def main():
     sm=boto3.client('secretsmanager')
     def secret(arn):return json.loads(sm.get_secret_value(SecretId=arn)['SecretString'])
     app=secret(os.environ['APP_SECRET_ARN'])
-    keys=['REMIND_IAM_APP_SECRET','REMIND_IAM_WEBHOOK_KEYRING','REMIND_ENCRYPTION_KEYRING','REMIND_INTERNAL_API_TOKEN']
+    # Remind's Silicon Accounts app secret, its app-webhook secret (whsec_, comma-separated during a
+    # rotation) and the destination encryption keyring are copied into the restricted runtime secret.
+    keys=['REMIND_APP_SECRET','REMIND_ACCOUNTS_WEBHOOK_SECRET','REMIND_ENCRYPTION_KEYRING']
     for k in keys+['REMIND_RUNTIME_DATABASE_PASSWORD','REMIND_TEST_DATABASE_PASSWORD']:
         if not isinstance(app.get(k),str) or not app[k] or any(c in app[k] for c in '\r\n\0'):
             raise RuntimeError('Missing or invalid secret field: '+k)

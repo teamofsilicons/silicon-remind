@@ -9,8 +9,9 @@ const RECIPIENTS: &str = "saketdev12@gmail.com,shubhastro2@gmails.com,bugs@teamo
 #[derive(FromRow)]
 struct PendingReport {
     id: Uuid,
-    org_id: String,
     actor_id: String,
+    reporter_id: Option<String>,
+    reporter_kind: Option<String>,
     message: String,
     pr: Option<String>,
     attempts: i32,
@@ -40,7 +41,7 @@ async fn deliver_one(
     endpoint: &str,
 ) -> anyhow::Result<()> {
     // Claim before external I/O, with a bounded lease recovered after worker failure.
-    let report: Option<PendingReport> = sqlx::query_as("UPDATE bug_reports SET status='sending', attempts=attempts+1, next_attempt_at=now()+interval '60 seconds' WHERE id=(SELECT id FROM bug_reports WHERE status IN ('queued','sending') AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,org_id,actor_id,message,pr,attempts").fetch_optional(pool).await?;
+    let report: Option<PendingReport> = sqlx::query_as("UPDATE bug_reports SET status='sending', attempts=attempts+1, next_attempt_at=now()+interval '60 seconds' WHERE id=(SELECT id FROM bug_reports WHERE status IN ('queued','sending') AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,actor_id,(SELECT NULLIF(a.public_id,'') FROM accounts a WHERE a.uuid=bug_reports.actor_id) AS reporter_id,(SELECT a.kind FROM accounts a WHERE a.uuid=bug_reports.actor_id) AS reporter_kind,message,pr,attempts").fetch_optional(pool).await?;
     let Some(report) = report else {
         return Ok(());
     };
@@ -84,7 +85,7 @@ async fn deliver_one(
 fn payload(report: &PendingReport) -> serde_json::Value {
     json!({"From":"remind@teamofsilicons.com","To":RECIPIENTS,
         "Subject":format!("Remind bug report {}",report.id),
-        "TextBody":format!("Report: {}\nOrganization: {}\nReporter: {}\n\n{}\n\nProposed fix: {}",report.id,report.org_id,report.actor_id,report.message,report.pr.as_deref().unwrap_or("none")),
+        "TextBody":format!("Report: {}\nReporter: {} ({}, Silicon Accounts uuid {})\n\n{}\n\nProposed fix: {}",report.id,report.reporter_id.as_deref().unwrap_or("unknown id"),report.reporter_kind.as_deref().unwrap_or("unknown kind"),report.actor_id,report.message,report.pr.as_deref().unwrap_or("none")),
         "MessageStream":"outbound","TrackOpens":false,"TrackLinks":"None",
         "Headers":[{"Name":"Message-ID","Value":format!("<{}@remind.teamofsilicons.com>",report.id)}]})
 }
@@ -96,8 +97,9 @@ mod tests {
     fn only_bug_report_recipients_and_plain_text_are_used() {
         let value = payload(&PendingReport {
             id: Uuid::nil(),
-            org_id: "tos".into(),
-            actor_id: "actor".into(),
+            actor_id: "zQo".into(),
+            reporter_id: Some("si:scout".into()),
+            reporter_kind: Some("silicon".into()),
             message: "<html> stays text".into(),
             pr: None,
             attempts: 1,
@@ -106,31 +108,27 @@ mod tests {
         assert_eq!(value["To"], RECIPIENTS);
         assert!(value.get("HtmlBody").is_none());
         assert_eq!(value["TrackOpens"], false);
+        let body = value["TextBody"].as_str().unwrap_or_default();
+        assert!(body.contains("Reporter: si:scout (silicon, Silicon Accounts uuid zQo)"));
+        assert!(!body.contains("Organization"));
     }
 }
 
 #[cfg(test)]
 mod delivery_tests {
     use super::*;
-    use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
-    use testcontainers_modules::postgres::Postgres;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
     };
     #[tokio::test]
     async fn retries_real_queue_but_never_sends_simulated_reports() -> anyhow::Result<()> {
-        let container = Postgres::default().with_tag("17-alpine").start().await?;
-        let pool = PgPool::connect(&format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        ))
-        .await?;
+        let container = crate::test_support::TestPostgres::start().await?;
+        let pool = PgPool::connect(&container.url).await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
         let id = Uuid::now_v7();
         for (report_id, status) in [(id, "queued"), (Uuid::now_v7(), "simulated")] {
-            sqlx::query("INSERT INTO bug_reports(id,org_id,actor_id,idempotency_key,request_hash,message,status) VALUES($1,'tos','actor',$2,'hash','example reproduction',$3)")
+            sqlx::query("INSERT INTO bug_reports(id,org_id,actor_id,idempotency_key,request_hash,message,status) VALUES($1,NULL,'zQo',$2,'hash','example reproduction',$3)")
                 .bind(report_id).bind(report_id.to_string()).bind(status).execute(&pool).await?;
         }
         let server = MockServer::start().await;

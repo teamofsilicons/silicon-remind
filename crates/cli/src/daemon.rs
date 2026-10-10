@@ -1,124 +1,104 @@
-//! Removal and inspection of the retired standalone update service.
-use crate::{args::Daemon, state::Store};
-use anyhow::{Context as _, bail};
+//! Hidden `remind daemon uninstall|status`: removes the hourly updater service that Remind
+//! 0.1 installed (a macOS LaunchAgent or a systemd user unit). Remind runs no updater of its
+//! own any more; Silicon Apps keeps it up to date. Kept for one release.
+use crate::{
+    args::Daemon,
+    output::{CliError, EXIT_OK, Output},
+};
+use anyhow::Context as _;
+use serde_json::json;
 use std::{path::PathBuf, process::Command};
 
-pub async fn execute(command: &Daemon) -> anyhow::Result<()> {
-    if matches!(command, Daemon::Run | Daemon::Install) {
-        bail!(
-            "Honeycomb manages Remind updates. Run `honeycomb update 'remind'`; remove the old updater with `remind daemon uninstall`."
-        );
-    }
-    let os_home = PathBuf::from(
-        std::env::var_os("HOME").context("HOME is required to install the user service")?,
-    );
-    let store = Store::open()?;
-    let silicon_home = store.home_dir().to_owned();
-    drop(store);
-    let executable = std::env::current_exe()?;
-    let (path, content, install, uninstall, status) = if cfg!(target_os = "macos") {
-        let path = os_home.join("Library/LaunchAgents/com.teamofsilicons.remind.plist");
+struct Unit {
+    path: PathBuf,
+    stop: Vec<String>,
+    inspect: Vec<String>,
+}
+
+fn unit() -> anyhow::Result<Option<Unit>> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    if cfg!(target_os = "macos") {
         let uid = Command::new("id").arg("-u").output()?;
-        let domain = format!("gui/{}", String::from_utf8(uid.stdout)?.trim());
-        let service = format!("{domain}/com.teamofsilicons.remind");
-        let xml = |v: &str| {
-            v.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-                .replace('"', "&quot;")
-                .replace('\'', "&apos;")
-        };
-        let content = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>com.teamofsilicons.remind</string><key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>run</string></array><key>EnvironmentVariables</key><dict><key>SILICON_HOME</key><string>{}</string><key>PATH</key><string>{}</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>60</integer></dict></plist>",
-            xml(&executable.to_string_lossy()),
-            xml(&silicon_home.to_string_lossy()),
-            xml(&std::env::var("PATH").unwrap_or_default())
+        let service = format!(
+            "gui/{}/com.teamofsilicons.remind",
+            String::from_utf8(uid.stdout)?.trim()
         );
-        let install = vec![
-            "launchctl".into(),
-            "bootstrap".into(),
-            domain,
-            path.to_string_lossy().into_owned(),
-        ];
-        (
-            path,
-            content,
-            install,
-            vec!["launchctl".into(), "bootout".into(), service.clone()],
-            vec!["launchctl".into(), "print".into(), service],
-        )
+        Ok(Some(Unit {
+            path: home.join("Library/LaunchAgents/com.teamofsilicons.remind.plist"),
+            stop: vec!["launchctl".into(), "bootout".into(), service.clone()],
+            inspect: vec!["launchctl".into(), "print".into(), service],
+        }))
     } else if cfg!(target_os = "linux") {
-        let path = os_home.join(".config/systemd/user/silicon-remind.service");
-        let quote = |v: &str| {
-            v.replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('%', "%%")
-                .replace('$', "$$")
-        };
-        let content = format!(
-            "[Unit]\nDescription=Silicon Remind hourly updater\n[Service]\nType=simple\nExecStart=\"{}\" daemon run\nEnvironment=\"SILICON_HOME={}\"\nEnvironment=\"PATH={}\"\nRestart=always\nRestartSec=60\n[Install]\nWantedBy=default.target\n",
-            quote(&executable.to_string_lossy()),
-            quote(&silicon_home.to_string_lossy()),
-            quote(&std::env::var("PATH").unwrap_or_default())
-        );
-        (
-            path,
-            content,
-            vec![
-                "systemctl".into(),
-                "--user".into(),
-                "enable".into(),
-                "--now".into(),
-                "silicon-remind.service".into(),
-            ],
-            vec![
+        let name = "silicon-remind.service".to_owned();
+        Ok(Some(Unit {
+            path: home.join(".config/systemd/user").join(&name),
+            stop: vec![
                 "systemctl".into(),
                 "--user".into(),
                 "disable".into(),
                 "--now".into(),
-                "silicon-remind.service".into(),
+                name.clone(),
             ],
-            vec![
-                "systemctl".into(),
-                "--user".into(),
-                "status".into(),
-                "silicon-remind.service".into(),
-            ],
-        )
+            inspect: vec!["systemctl".into(), "--user".into(), "status".into(), name],
+        }))
     } else {
-        bail!(
-            "Automatic service installation supports macOS and Linux. On this platform, supervise `remind daemon run` with your operating system's service manager."
-        );
+        Ok(None)
+    }
+}
+
+/// Runs `remind daemon …`.
+pub fn execute(out: Output, command: &Daemon) -> anyhow::Result<u8> {
+    if matches!(command, Daemon::Install | Daemon::Run) {
+        return Err(CliError::usage(
+            "Remind no longer runs an updater of its own: Silicon Apps keeps it up to date.",
+            "Remove the old updater with `remind daemon uninstall`.",
+        )
+        .into());
+    }
+    let Some(unit) = unit()? else {
+        out.either(
+            &json!({"installed": false}),
+            "Remind never installed an updater service on this platform.",
+        )?;
+        return Ok(EXIT_OK);
     };
+    let installed = unit.path.exists();
     match command {
-        Daemon::Install => {
-            if path.exists() {
-                let _ = invoke(&uninstall);
+        Daemon::Status => {
+            out.either(
+                &json!({"installed": installed, "path": unit.path}),
+                &if installed {
+                    format!(
+                        "The retired updater is still installed at {}; remove it with `remind daemon uninstall`.",
+                        unit.path.display()
+                    )
+                } else {
+                    "The retired updater is not installed.".to_owned()
+                },
+            )?;
+            if installed && !out.json {
+                let _ = Command::new(&unit.inspect[0])
+                    .args(&unit.inspect[1..])
+                    .status();
             }
-            std::fs::create_dir_all(path.parent().context("service path has no parent")?)?;
-            std::fs::write(&path, content)?;
-            if cfg!(target_os = "linux") {
-                invoke(&["systemctl".into(), "--user".into(), "daemon-reload".into()])?;
-            }
-            invoke(&install)?;
-            println!("Hourly updater installed. Configure with remind config auto-update on|off.");
         }
         Daemon::Uninstall => {
-            invoke(&uninstall)?;
-            if path.exists() {
-                std::fs::remove_file(path)?;
+            if installed {
+                // The service may already be stopped; removing its file is what matters.
+                let _ = Command::new(&unit.stop[0]).args(&unit.stop[1..]).status();
+                std::fs::remove_file(&unit.path)
+                    .with_context(|| format!("could not delete {}", unit.path.display()))?;
             }
+            out.either(
+                &json!({"removed": installed, "path": unit.path}),
+                &if installed {
+                    format!("Removed the retired updater ({}).", unit.path.display())
+                } else {
+                    "The retired updater is not installed; nothing to remove.".to_owned()
+                },
+            )?;
         }
-        Daemon::Status => invoke(&status)?,
-        Daemon::Run => unreachable!(),
+        Daemon::Install | Daemon::Run => unreachable!("refused above"),
     }
-    Ok(())
-}
-fn invoke(args: &[String]) -> anyhow::Result<()> {
-    if !Command::new(&args[0]).args(&args[1..]).status()?.success() {
-        bail!(
-            "Service manager rejected the action; check your user service session and run remind daemon status"
-        );
-    }
-    Ok(())
+    Ok(EXIT_OK)
 }

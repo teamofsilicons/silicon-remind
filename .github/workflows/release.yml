@@ -1,4 +1,11 @@
-name: Build validated Honeycomb release
+name: Build Silicon Apps release
+
+# Builds the remind CLI for every target it ships and checks each binary on that target's own runner: the native
+# format, the glibc 2.28 baseline on Linux, and the three discovery commands Silicon Apps runs (`remind --help`,
+# `remind accounts --json`, `remind login status --json`, signed out in an empty home). One Linux job then packs one
+# Silicon Apps archive per target with scripts/package-apps.sh (`silicon-apps validate` + `silicon-apps pack`) and
+# uploads them with SHA256SUMS as the workflow artifact `remind-silicon-apps-release`. It publishes nothing: uploads
+# to Silicon Apps and crates.io are separate, reviewed steps (docs/releases.md).
 
 on:
   workflow_dispatch:
@@ -8,8 +15,32 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_TOOLCHAIN: 1.98.0
+  SILICON_APPS_CLI_VERSION: 0.2.0
+
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the CLI version and check the release tag against it
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/cli/Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "v$version" ]; then
+            echo "::error::The release tag $REF_NAME must be v$version, the version in crates/cli/Cargo.toml."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   binaries:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -46,67 +77,75 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.0
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.triple }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-      - run: python scripts/sync-package-docs.py && git diff --exit-code -- crates/cli/docs crates/client/docs
-      - run: cargo test --locked -p silicon-remind-cli --target ${{ matrix.triple }}
+          key: ${{ matrix.target }}
       - uses: actions/setup-python@v5
-        if: runner.os == 'Linux'
         with:
           python-version: "3.12"
+      - name: Check the bundled manuals
+        run: python scripts/sync-package-docs.py --check
+      - name: Test the CLI on its target
+        run: cargo test --locked -p silicon-remind-cli --target ${{ matrix.triple }}
       - name: Install the Linux baseline toolchain
         if: runner.os == 'Linux'
         run: |
           python3 -m pip install 'cargo-zigbuild==0.23.4' 'ziglang==0.15.2'
           python3 -c 'from pathlib import Path; import ziglang; print("CARGO_ZIGBUILD_ZIG_PATH=" + str(Path(ziglang.__file__).with_name("zig")))' >> "$GITHUB_ENV"
-      - name: Build Linux CLI for the existing glibc 2.28 baseline
+      - name: Build the Linux CLI for the glibc 2.28 baseline
         if: runner.os == 'Linux'
         run: cargo zigbuild --release --locked -p silicon-remind-cli --target ${{ matrix.triple }}.2.28
-      - name: Build native CLI
+      - name: Build the native CLI
         if: runner.os != 'Linux'
         run: cargo build --release --locked -p silicon-remind-cli --target ${{ matrix.triple }}
-      - run: ./target/${{ matrix.triple }}/release/${{ matrix.binary }} --version
+      - name: Check the binary on its own runner (format, glibc baseline, discovery commands)
+        env:
+          PACKAGE_DISCOVERY: require
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          BINARY: target/${{ matrix.triple }}/release/${{ matrix.binary }}
+        run: scripts/package-apps.sh --check-only "$VERSION" "$TARGET" "$BINARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: remind-bin-${{ matrix.target }}
           path: target/${{ matrix.triple }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
   package:
-    needs: binaries
+    needs: [version, binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: remind-bin-*
           path: release-binaries
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.0
-      - name: Install the pinned Honeycomb packager
-        run: cargo install --locked --git https://github.com/teamofsilicons/silicon-honeycomb --rev 40f54d08b2cd9171c375e6f812764a140b6408f3 silicon-honeycomb-cli
-      - name: Check release tag against the CLI version
-        if: startsWith(github.ref, 'refs/tags/')
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install the Silicon Apps packer
+        run: cargo install --locked silicon-apps-cli --version "$SILICON_APPS_CLI_VERSION"
+      - name: Pack one archive per target and write SHA256SUMS
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          python - <<'PY'
-          import os, tomllib
-          with open('crates/cli/Cargo.toml', 'rb') as source:
-              version = tomllib.load(source)['package']['version']
-          assert os.environ['RELEASE_TAG'] == f'v{version}', 'Release tag must match the CLI version'
-          PY
-      - run: python scripts/package-release.py --binaries-dir release-binaries
+          set -euo pipefail
+          for target in linux-x86_64 linux-aarch64 windows-x86_64 windows-aarch64 macos-x86_64 macos-aarch64; do
+            case "$target" in windows-*) binary=remind.exe ;; *) binary=remind ;; esac
+            scripts/package-apps.sh "$VERSION" "$target" "release-binaries/remind-bin-$target/$binary"
+          done
+          cd dist/apps
+          sha256sum remind-"$VERSION"-*.tar.gz > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          cat SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: remind-honeycomb-release
-          path: dist/*
+          name: remind-silicon-apps-release
+          path: dist/apps/*
           if-no-files-found: error
 
-# This workflow produces reviewable artifacts; it does not publish a release.
+# Silicon Apps validates uploads on its Linux workers today (linux-x86_64, linux-i686, linux-aarch64, linux-armv7hf).
+# The macOS and Windows archives are built, checked on their own runners and kept for when those workers go live.

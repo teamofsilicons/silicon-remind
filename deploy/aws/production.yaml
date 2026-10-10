@@ -16,16 +16,22 @@ Parameters:
     Type: String
   AppSecretArn:
     Type: String
-    Description: Secrets Manager secret holding the IAM application and webhook credentials.
+    Description: Secrets Manager secret holding Remind's Silicon Accounts app secret, its webhook secret and the
+      encryption keyring.
   BackendImageUri:
     Type: String
     Description: Immutable ARM64 ECR runtime image with the AWS RDS CA bundle baked in.
   PublicHostName:
     Type: String
     Default: backend.remind.teamofsilicons.com
-  IamBaseUrl:
+  AccountsUrl:
     Type: String
-    Default: https://backend.iam.teamofsilicons.com/
+    Default: https://accounts.teamofsilicons.com
+    Description: Silicon Accounts public origin; it must equal the issuer of Remind's access tokens.
+  ProofIssuers:
+    Type: String
+    Default: remind.schedules.read=interface
+    Description: Apps allowed to read reminders for an account with a User verification proof (scope=app_id pairs).
   BootstrapImageUri:
     Type: String
     Description: ARM64 image containing the reviewed one-off bootstrap script and Remind migrator.
@@ -351,7 +357,7 @@ Resources:
       - Field: path-pattern
         PathPatternConfig:
           Values:
-          - /api/v1/*
+          - /api/*
           - /webhook
           - /webhook/
           - /health/*
@@ -363,7 +369,7 @@ Resources:
     Type: AWS::WAFv2::WebACL
     Properties:
       Name: silicon-remind-production
-      Description: IP rate protection for the Remind API and signed IAM callbacks
+      Description: IP rate protection for the Remind API and the signed Silicon Accounts webhook
       Scope: REGIONAL
       DefaultAction:
         Allow: {}
@@ -689,11 +695,14 @@ Resources:
         - Name: REMIND_PUBLIC_BASE_URL
           Value:
             Fn::Sub: https://${PublicHostName}
-        - Name: REMIND_IAM_BASE_URL
+        - Name: ACCOUNTS_URL
           Value:
-            Ref: IamBaseUrl
-        - Name: REMIND_IAM_APP_ID
+            Ref: AccountsUrl
+        - Name: REMIND_APP_ID
           Value: remind
+        - Name: REMIND_PROOF_ISSUERS
+          Value:
+            Ref: ProofIssuers
         - Name: REMIND_ENCRYPTION_CURRENT_VERSION
           Value: '1'
         - Name: REMIND_DATABASE_MAX_CONNECTIONS
@@ -701,18 +710,15 @@ Resources:
         - Name: REMIND_LOG_FILTER
           Value: info,silicon_remind=info
         Secrets:
-        - Name: REMIND_IAM_APP_SECRET
+        - Name: REMIND_APP_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:REMIND_IAM_APP_SECRET::'
-        - Name: REMIND_IAM_WEBHOOK_KEYRING
+            Fn::Sub: '${RuntimeSecret}:REMIND_APP_SECRET::'
+        - Name: REMIND_ACCOUNTS_WEBHOOK_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:REMIND_IAM_WEBHOOK_KEYRING::'
+            Fn::Sub: '${RuntimeSecret}:REMIND_ACCOUNTS_WEBHOOK_SECRET::'
         - Name: REMIND_ENCRYPTION_KEYRING
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:REMIND_ENCRYPTION_KEYRING::'
-        - Name: REMIND_INTERNAL_API_TOKEN
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:REMIND_INTERNAL_API_TOKEN::'
         - Name: REMIND_DATABASE_URL
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:REMIND_DATABASE_URL::'
@@ -828,11 +834,14 @@ Resources:
         - Name: REMIND_PUBLIC_BASE_URL
           Value:
             Fn::Sub: https://${PublicHostName}
-        - Name: REMIND_IAM_BASE_URL
+        - Name: ACCOUNTS_URL
           Value:
-            Ref: IamBaseUrl
-        - Name: REMIND_IAM_APP_ID
+            Ref: AccountsUrl
+        - Name: REMIND_APP_ID
           Value: remind
+        - Name: REMIND_PROOF_ISSUERS
+          Value:
+            Ref: ProofIssuers
         - Name: REMIND_ENCRYPTION_CURRENT_VERSION
           Value: '1'
         - Name: REMIND_DATABASE_MAX_CONNECTIONS
@@ -840,18 +849,15 @@ Resources:
         - Name: REMIND_LOG_FILTER
           Value: info,silicon_remind=info
         Secrets:
-        - Name: REMIND_IAM_APP_SECRET
+        - Name: REMIND_APP_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:REMIND_IAM_APP_SECRET::'
-        - Name: REMIND_IAM_WEBHOOK_KEYRING
+            Fn::Sub: '${RuntimeSecret}:REMIND_APP_SECRET::'
+        - Name: REMIND_ACCOUNTS_WEBHOOK_SECRET
           ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:REMIND_IAM_WEBHOOK_KEYRING::'
+            Fn::Sub: '${RuntimeSecret}:REMIND_ACCOUNTS_WEBHOOK_SECRET::'
         - Name: REMIND_ENCRYPTION_KEYRING
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:REMIND_ENCRYPTION_KEYRING::'
-        - Name: REMIND_INTERNAL_API_TOKEN
-          ValueFrom:
-            Fn::Sub: '${RuntimeSecret}:REMIND_INTERNAL_API_TOKEN::'
         - Name: REMIND_DATABASE_URL
           ValueFrom:
             Fn::Sub: '${RuntimeSecret}:REMIND_DATABASE_URL::'

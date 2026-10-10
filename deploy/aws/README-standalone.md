@@ -1,34 +1,69 @@
 # Standalone EC2 deployment
 
-`standalone.yaml` runs the production API and worker on one ARM64 `t4g.small` in
-`vpc-04b23a487cfe0bd8e`, public subnet `subnet-07945746462c26b2d`. It does not
-create or attach an Application Load Balancer. The instance receives a public
-IPv4 address, and Caddy terminates TLS for `backend.remind.teamofsilicons.com`.
+## Current parallel Accounts release
 
-The instance has no SSH key or public application ports. Use SSM Session Manager.
-Its role can read only the configured runtime secret and pull only the
-`silicon-remind-production` ECR repository. RDS access is granted to the
-existing security group `sg-0fbecb17f3e0c2521` on port 5432 from the new instance
-security group. The runtime secret must contain these non-empty values:
-`REMIND_IAM_APP_SECRET`, `REMIND_IAM_WEBHOOK_KEYRING`,
-`REMIND_ENCRYPTION_KEYRING`, `REMIND_INTERNAL_API_TOKEN`,
-`REMIND_DATABASE_URL`, and `REMIND_TEST_DATABASE_URL`.
+Follow [parallel-production.md](../../docs/migration/parallel-production.md).
+The old IAM API/worker, `backend.remind` origin, `silicon_remind` databases, runtime
+secret and fleet remain live. New Accounts containers are `remind-accounts-api`
+and `remind-accounts-worker`, using `silicon_remind_accounts` and
+`silicon_remind_accounts_test`, secret `silicon-remind/accounts-production`, and
+`api.remind.teamofsilicons.com`. These stores start empty; no IAM identities or
+subscriptions are imported. Do not rerun the legacy CloudFormation bootstrap.
 
-Honeycomb shared testing additionally needs `REMIND_HONEYCOMB_BASE_URL` and a
-dedicated `REMIND_HONEYCOMB_SERVICE_TOKEN` in that secret. Configure the matching
-token and Remind participant in Honeycomb before enabling imports. Caddy exposes
-only `/internal/honeycomb/organizations/*` from the internal namespace; those
-handlers require the dedicated service token independently of user sessions.
+The new Next.js website uses `http://remind-accounts-api:8080/api/v2`. Its installer
+switches public website ingress and may run only after the coordinated website GO.
+The remaining sections describe the original host and historical replacement path;
+they do not authorize replacing the old API/worker or database.
 
-The restricted `remind_testing` role needs `CREATE` and `TEMPORARY` on
-`silicon_remind_test`: each isolated schema replays migrations that use temporary
-canonical-ID mapping tables. `bootstrap-task.py` grants these only to the testing
-role. Keep database privileges revoked from `PUBLIC`; production `remind_runtime`
-retains only database `CONNECT` plus its existing table/sequence grants.
+Production Remind runs on one ARM64 `t4g.small` in `vpc-04b23a487cfe0bd8e`, public subnet
+`subnet-07945746462c26b2d`, created by the CloudFormation stack `silicon-remind-standalone`
+([standalone.yaml](standalone.yaml)). There is no load balancer: the instance has a public IPv4 address and
+Caddy terminates TLS for three names, all on this host:
 
-Build the ARM64 base image, then wrap it with `deploy/aws/Dockerfile.runtime`
-before pushing. The wrapper installs the AWS RDS CA bundle required by the
-production database URLs; the base image alone cannot connect to RDS.
+| name | served by |
+| --- | --- |
+| `backend.remind.teamofsilicons.com` | `remind-api` (`/api/*`, `/health/*`, `/webhook`, `/webhook/`; everything else 404) |
+| `remind.teamofsilicons.com` | `remind-web`, the Next.js web ([install-web.sh](install-web.sh)) |
+| `docs.remind.teamofsilicons.com` | the static documentation site ([docs-site](../../docs-site/README.md)) |
+
+The worker (`remind-worker`) has no public route; its operational listener (`:9090`, health and metrics) and the
+API's `/metrics` stay inside the instance. The instance has no SSH key: use SSM Session Manager. Its role can read
+only the runtime secret and pull only the `silicon-remind-production` ECR repository. RDS access is granted to the
+existing security group `sg-0fbecb17f3e0c2521` on port 5432 from the instance's security group.
+
+## Runtime secret
+
+Secrets Manager `silicon-remind/runtime-production` holds the service's configuration. The bootstrap copies only
+known keys into `/etc/remind/runtime.env` (root, 0600), which the API and worker read. These must be present and
+non-empty:
+
+| key | what it is |
+| --- | --- |
+| `REMIND_APP_SECRET` | Remind's app secret at Silicon Accounts (app id `remind`). Server only; the web reads it from here too. |
+| `REMIND_ACCOUNTS_WEBHOOK_SECRET` | the `whsec_…` secret Silicon Accounts signs Remind's app webhook with; two, comma-separated, while a rotation overlaps |
+| `REMIND_ENCRYPTION_KEYRING` | the AES-256-GCM keyring for webhook subscription secrets |
+| `REMIND_DATABASE_URL`, `REMIND_TEST_DATABASE_URL` | the restricted runtime connections to `silicon_remind` and `silicon_remind_test` |
+
+Optional keys it passes on when present: `ACCOUNTS_URL` (default `https://accounts.teamofsilicons.com`),
+`ACCOUNTS_API_URL`, `REMIND_APP_ID` (default `remind`), `REMIND_PROOF_ISSUERS` (default
+`remind.schedules.read=interface`: the Silicon Interface may read reminders for an account with a User verification
+proof), `REMIND_ACCOUNTS_REQUEST_TIMEOUT_MS`, `REMIND_ACCOUNTS_LOOKUP_TTL_SECONDS`,
+`REMIND_ENCRYPTION_CURRENT_VERSION`, the database pool size, log filter, request and webhook timeouts and the
+delivery concurrency. Every setting is described in [.env.example](../../.env.example).
+
+Postmark (bug reports) and Space Station telemetry settings, and the telemetry spool mount, were added to the live
+host by hand (see the [deployment records](../../docs/history/deploy/)); the template does not create them. Carry them
+over before you re-provision the instance.
+
+The restricted `remind_testing` role needs `CREATE` and `TEMPORARY` on `silicon_remind_test`: each isolated schema
+replays migrations that use temporary mapping tables. `bootstrap-task.py` grants these only to the testing role.
+Keep database privileges revoked from `PUBLIC`; `remind_runtime` keeps only `CONNECT` plus the table and sequence
+grants in [runtime-grants.sql](../runtime-grants.sql).
+
+## Backend image
+
+Build the ARM64 image, then wrap it with [Dockerfile.runtime](Dockerfile.runtime) before pushing. The wrapper adds
+the AWS RDS CA bundle that the production database URLs need; the base image alone cannot connect to RDS.
 
 ```bash
 docker build --platform linux/arm64 -t silicon-remind:release .
@@ -38,8 +73,15 @@ docker build --platform linux/arm64 -f deploy/aws/Dockerfile.runtime \
 docker push <ecr-repository>:<release-tag>
 ```
 
-Resolve the wrapped image's digest, verify API startup and `/health/ready` in a
-temporary container using the existing runtime configuration, then deploy:
+The manual workflow `.github/workflows/deployment-builds.yml` builds the same image (and the web image) on an ARM64
+runner and keeps them as artifacts with their SHA-256 sums.
+
+Neither the template nor the containers run migrations. Before switching the image, run the migrator once against
+both databases with the migration owner's credentials (`/usr/local/bin/remind-migrate`), then re-apply
+[runtime-grants.sql](../runtime-grants.sql) as that owner so the runtime role can use new tables. Verify the API in a
+temporary container with the real runtime configuration (`/health/ready` answers 200), then roll out.
+
+## Provision or replace the instance
 
 ```bash
 AWS_PROFILE=silicon-production AWS_REGION=us-east-1 \
@@ -47,66 +89,59 @@ AWS_PROFILE=silicon-production AWS_REGION=us-east-1 \
   234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:<backend-digest>
 ```
 
-The script requires a digest-pinned backend URI. It creates/updates the stack
-`silicon-remind-standalone`, validates the parameter defaults, and prints the
-instance ID, public IP, and public URL. Point the Namecheap `backend.remind`
-record at the output `PublicIp`; Caddy obtains and renews the certificate once
-DNS resolves. Port 80 must remain reachable for ACME HTTP fallback.
+The script needs a digest-pinned backend URI. It creates or updates the stack, and prints the instance id, public
+IP and URL. Point the Namecheap `backend.remind` A record at the output `PublicIp`; `remind` and `docs.remind` are
+CNAMEs of it. Caddy obtains and renews certificates once DNS resolves; keep port 80 open for the ACME HTTP fallback.
+The instance's public IP is assigned automatically: after a stop/start or replacement, update the A record.
 
-The template intentionally does not run migrations: schema changes should be
-performed by the reviewed migration release procedure against the existing RDS
-before switching the image. After deployment, verify through SSM and the public
-health endpoint:
+Provisioning writes the backend Caddy route only. Install the web (below) and the documentation site again after
+provisioning or replacing the instance.
 
-```bash
-aws --profile silicon-production --region us-east-1 ssm start-session \
-  --target <InstanceId>
-curl --fail --show-error https://backend.remind.teamofsilicons.com/health/ready
-```
+Routine releases do not rerun CloudFormation: through SSM they replace the backend image references in
+`/usr/local/sbin/remind-start` and replace the API and worker containers with the new image (the deployment records
+show the exact steps).
 
-Container logs are available in SSM with `docker logs remind-api`,
-`docker logs remind-worker`, and `docker logs remind-caddy`.
+## Web
 
-## Frontend
-
-The SolidJS frontend and Node session gateway run on the same instance, with
-Caddy serving `https://remind.teamofsilicons.com`. No load balancer or public
-container port is added. Namecheap's `remind` CNAME points to
-`backend.remind.teamofsilicons.com`, so both names follow the backend A record.
-The instance currently has an automatically assigned public IP: after a
-stop/start or replacement, update the backend A record to the new IP.
-
-Build `frontend/Dockerfile` with the `frontend/` build context for `linux/arm64`,
-push it to `silicon-remind-production` ECR, then install using its resolved digest:
+The web is a Next.js server built from `frontend/` (a standalone build: `WORKDIR /app`, listening on `$PORT`, non-root).
+It signs Carbons in on the Silicon Accounts pages, keeps each session in a sealed httpOnly cookie, and calls the API
+over the private `remind` Docker network (`APP_API_URL=http://remind-accounts-api:8080/api/v2`). Push its ARM64 image to
+`silicon-remind-production`, then install it by digest:
 
 ```bash
 AWS_PROFILE=silicon-production AWS_REGION=us-east-1 \
-  python3 deploy/aws/deploy-frontend.py \
-  234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:<frontend-digest> \
+  python3 deploy/aws/deploy-web.py \
+  234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:<web-digest> \
   --instance <InstanceId>
 ```
 
-The SSM installer creates and enables `remind-frontend.service`, preserves the
-existing backend Caddy routes, validates the new configuration and reloads
-Caddy. Updates briefly restart only the frontend. To roll back, run the same
-command with the previous frontend digest. The installer preserves the session
-key in `/etc/remind/frontend.env` (root, mode 0600) and encrypted session files
-in `/var/lib/remind-frontend/sessions` (UID/GID 10001, mode 0700). Back up both
-together through a protected process before replacing the instance.
+The SSM installer writes `/etc/remind/web.env` (root, 0600): `APP_ID=remind`, `ACCOUNTS_URL`, `APP_API_URL`,
+`PUBLIC_URL=https://remind.teamofsilicons.com`, `PORT=3000`, `APP_SECRET` (read from `REMIND_APP_SECRET` in the
+runtime secret on every run) and `SESSION_SECRET` (generated once and kept; replacing it signs every browser out).
+Values an operator changes in the file are kept. It runs `remind-web.service` (read-only root filesystem, no Linux
+capabilities, 384 MiB, rotating logs), waits for the web to answer, points the `remind.teamofsilicons.com` vhost at
+`remind-web:3000` (validating the Caddyfile and restoring it on failure) and reloads Caddy.
 
-The frontend container has a read-only root filesystem, no Linux capabilities,
-256 MiB memory limit and rotating logs. Callback query strings are not access
-logged. Read logs with `journalctl -u remind-frontend` or `docker logs remind-frontend`.
-The frontend installation is separate from CloudFormation: rerun it after
-provisioning/replacing the backend host or rerunning its bootstrap.
+The first install also stops and disables `remind-frontend.service`, the SolidJS web it replaces. Its
+`/etc/remind/frontend.env` and the encrypted session files in `/var/lib/remind-frontend/sessions` are left in place
+and no longer read; nothing carries over (everyone signs in again).
 
-Verify the public page and gateway after deployment:
+Production sign-in needs `https://remind.teamofsilicons.com/auth/callback` among the redirect URIs of the app
+`remind` at Silicon Accounts. To roll back the web, run the same command with the previous web digest.
+
+## Check a deployment
 
 ```bash
-curl --fail --show-error https://remind.teamofsilicons.com/
-curl --fail --show-error https://remind.teamofsilicons.com/ui/api/health/ready
+aws --profile silicon-production --region us-east-1 ssm start-session --target <InstanceId>
+curl --fail --show-error https://backend.remind.teamofsilicons.com/health/ready
+curl --fail --show-error https://backend.remind.teamofsilicons.com/api/versions    # "current": 2
+curl --fail --show-error --head https://remind.teamofsilicons.com/
 ```
 
-See [the initial frontend deployment record](frontend-2026-09-08.md).
+Logs: `docker logs remind-api`, `docker logs remind-worker`, `docker logs remind-caddy`, `journalctl -u remind-web`.
+[inspect-webhook-receipts.py](inspect-webhook-receipts.py) lists the latest Silicon Accounts webhook receipts through
+the restricted runtime role.
 
-Current deployment: [0.3.0 explicit timezones](timezone-2026-09-20.md).
+The one-time switch from the previous identity service is in
+[docs/migration/cutover.md](../../docs/migration/cutover.md). Earlier deployments are recorded in
+[docs/history/deploy/](../../docs/history/deploy/).

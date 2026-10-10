@@ -2,6 +2,11 @@ name: Build deployment artifacts
 
 on:
   workflow_dispatch:
+    inputs:
+      web_only:
+        description: Build only the website candidate
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [backend, frontend]
+        image: ${{ fromJSON(inputs.web_only && '["frontend"]' || '["backend","frontend"]') }}
     env:
       IMAGE_KIND: ${{ matrix.image }}
     steps:
