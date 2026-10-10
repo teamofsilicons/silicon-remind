@@ -46,7 +46,8 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
     let settings = MigrationSettings::from_env()?;
-    telemetry::init_process(settings.environment, &settings.log_filter)?;
+    // Logs go to standard error: standard output carries link-identities' JSON report.
+    telemetry::init_command(settings.environment, &settings.log_filter)?;
     match cli.command.unwrap_or(Command::Migrate) {
         Command::Migrate => {
             let pool = postgres::connect(&settings.database).await?;

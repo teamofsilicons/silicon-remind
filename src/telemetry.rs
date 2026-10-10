@@ -24,6 +24,29 @@ pub fn init(settings: &Settings) -> anyhow::Result<()> {
 /// Returns an error when the configured filter is invalid or another global
 /// subscriber was installed first.
 pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow::Result<()> {
+    init_with_writer(environment, log_filter, std::io::stdout)
+}
+
+/// Installs tracing like [`init_process`], but writes every log line to
+/// standard error, for a command whose standard output is its result (the
+/// `remind-migrate link-identities` JSON report).
+///
+/// # Errors
+///
+/// Returns an error when the configured filter is invalid or another global
+/// subscriber was installed first.
+pub fn init_command(environment: RuntimeEnvironment, log_filter: &str) -> anyhow::Result<()> {
+    init_with_writer(environment, log_filter, std::io::stderr)
+}
+
+fn init_with_writer<W>(
+    environment: RuntimeEnvironment,
+    log_filter: &str,
+    writer: W,
+) -> anyhow::Result<()>
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
     install_tls_provider();
     let filter = build_filter(log_filter)?;
     let registry = tracing_subscriber::registry().with(filter);
@@ -34,7 +57,8 @@ pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow
                 tracing_subscriber::fmt::layer()
                     .compact()
                     .with_target(true)
-                    .with_thread_ids(false),
+                    .with_thread_ids(false)
+                    .with_writer(writer),
             )
             .try_init()?,
         RuntimeEnvironment::Production => registry
@@ -44,7 +68,8 @@ pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow
                     .flatten_event(true)
                     .with_ansi(false)
                     .with_current_span(true)
-                    .with_span_list(false),
+                    .with_span_list(false)
+                    .with_writer(writer),
             )
             .try_init()?,
     }
