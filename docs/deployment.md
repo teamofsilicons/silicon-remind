@@ -1,96 +1,87 @@
 # Production deployment and releases
 
-The current live deployment uses the [standalone EC2 setup](../deploy/aws/README-standalone.md).
-The latest backend digest and verification are recorded in the
-[0.1.2 release](RELEASE_0.1.2.md). The frontend image is recorded in the
-[unscoped IAM login release](../deploy/aws/unscoped-login-2026-09-08.md).
-The Fargate configuration below remains an alternative deployment template.
+Production Remind runs on one ARM64 EC2 host: the API, the worker, the web and the documentation site behind Caddy.
+The [standalone guide](../deploy/aws/README-standalone.md) has the commands. The AWS profile is
+`silicon-production`, account `234951665042`, region `us-east-1`. Public names:
 
-Remind uses the `silicon-production` AWS profile, account `234951665042`, region
-`us-east-1`. Its dedicated CloudFormation stack is `silicon-remind-production`.
-The public origin is `https://backend.remind.teamofsilicons.com`, with the IAM
-callback at `/webhook/`. The stack reuses the existing production VPC/subnets,
-but owns separate services, databases, security groups, logs, load balancer and
-rate-limiting WAF. It does not deploy any other Silicon product.
+- `https://backend.remind.teamofsilicons.com`: the API (`/api/*`, `/health/*`) and the Silicon Accounts app
+  webhook (`/webhook/`).
+- `https://remind.teamofsilicons.com`: the web, which signs Carbons in on the Silicon Accounts pages.
+- `https://docs.remind.teamofsilicons.com`: these docs.
+
+## Silicon Accounts and Silicon Apps
+
+Remind is the app `remind` at both. At Silicon Accounts its sign-in setup must have:
+
+- `timezone` among the details it asks for (reminders run on the account's clock);
+- the redirect URI `https://remind.teamofsilicons.com/auth/callback` and the origin `https://remind.teamofsilicons.com`
+  (the web);
+- `device_flow: true` (Carbons' `remind login`) and `public_client: true` (the CLI exchanges Silicons' short-lived
+  tokens and refreshes with `client_id=remind` alone; it never holds the secret).
+
+Its app webhook is `https://backend.remind.teamofsilicons.com/webhook/`, with `custodian_change` picked besides the
+default events. The app secret and the webhook secret go into the runtime secret (`REMIND_APP_SECRET`,
+`REMIND_ACCOUNTS_WEBHOOK_SECRET`); the web reads the app secret from the same place. `REMIND_PROOF_ISSUERS` is
+`remind.schedules.read=interface`, so the Silicon Interface can read reminders for an account with a User
+verification proof. The [service-only routes](internal-api.md) describe the webhook.
+
+At Silicon Apps, the app `remind` is public, with its description, its links (website and docs) and one package per
+target in each release.
 
 ## Runtime and data
 
-[`deploy/aws/production.yaml`](../deploy/aws/production.yaml) defines private ARM64
-Fargate API and worker tasks, initially one each at 0.5 vCPU and 2 GiB. Only the
-API is reachable through the load balancer. Public forwarding allows `/api/v1/*`,
-`/webhook`, `/webhook/` and `/health/*`; internal routes and metrics remain private.
-HTTPS uses ACM, and HTTP redirects to HTTPS. Container root filesystems are
-read-only, UID/GID is 10001, and Linux capabilities are dropped.
+The API and worker run from one image (the root [Dockerfile](../Dockerfile), wrapped with
+[Dockerfile.runtime](../deploy/aws/Dockerfile.runtime) for the RDS CA bundle). They use the existing RDS PostgreSQL 17
+instance: database `silicon_remind` through the restricted `remind_runtime` role, and `silicon_remind_test` (test
+environment control tables and one schema per test environment) through `remind_testing`. The production runtime role
+can operate data and read migration history but cannot change schemas. The testing role owns its control tables and
+replica schemas, because test-environment lifecycle operations create, clean and drop those schemas; it has no
+database-creation, role-creation, superuser or RLS-bypass rights. Every test-environment schema uses the same embedded
+migrations as production. Back up the databases and the encryption keyring together.
 
-Separate encrypted RDS PostgreSQL 17 instances hold production and test data.
-Production uses `db.t4g.small`, testing `db.t4g.micro`; these are initial,
-single-AZ sizes. Production backups retain seven days, testing one day. Both
-have deletion protection and snapshot retention on replacement/deletion.
-Their network endpoints are private; TLS uses hostname and RDS CA verification.
-Maintain database and encryption-key backups together.
-
-Application credentials and independent production encryption/internal secrets
-are held in Secrets Manager `silicon-remind/production`. Bootstrap writes the
-restricted data-plane configuration to `silicon-remind/runtime-production`.
-Runtime execution roles can inject only that restricted secret; database master
-secrets are available only to the one-off bootstrap role. No local test database
-or local test encryption key is deployed.
-
-The production runtime role can operate data and read migration history but
-cannot change schemas. The test runtime role owns its control tables and replica
-schemas, because test lifecycle operations legitimately create, clean and drop
-those schemas. It has no database-creation, role-creation, superuser or RLS-bypass
-rights. All test replicas use the same embedded migrations as production.
+Configuration comes from Secrets Manager `silicon-remind/runtime-production`; the host writes only known keys into
+`/etc/remind/runtime.env`. Every setting is described in [.env.example](../.env.example).
 
 ## Release procedure
 
-1. Build the root runtime image from reviewed source. Wrap it with
-   `deploy/aws/Dockerfile.runtime` to install the current AWS RDS CA bundle.
-   Build `deploy/aws/Dockerfile.bootstrap` from that CA-bearing runtime.
-2. Push unique, immutable tags to ECR `silicon-remind-production`; resolve both
-   digests and place digest-pinned URIs in the CloudFormation parameters.
-3. Validate the template with AWS and `cfn-lint`. Create and inspect a change set
-   scoped to this stack. Initial creation uses `RuntimeDesiredCount=0`.
-4. Run the stack's `BootstrapTaskDefinitionArn` once in its private subnets and
-   `TaskSecurityGroupId`. Inspect the specific stopped task and bootstrap log.
-   Success means both databases migrated, production grants applied and the
-   restricted runtime secret published. Bootstrap refuses silent credential or
-   encryption-key changes on reruns; rotation needs a coordinated procedure.
-5. Set `RuntimeDesiredCount=1` through a reviewed stack update after successful
-   bootstrap. Check API/worker container health, ALB target health and public
-   `/health/ready`, then authenticate a real IAM session and exercise a sandbox.
-6. Confirm the intended pending IAM webhook URL. Obtain a fresh direct-Carbon
-   step-up for action `application.webhook.approve` and the internal app UUID,
-   then run `iam app approve-webhook 'remind'`. Check IAM metadata and an
-   actual upstream delivery, not merely a manually signed fixture.
+1. **CLI.** Tag `v<version>` (equal to `crates/cli/Cargo.toml`). The release workflow builds and checks the six
+   targets and keeps one Silicon Apps archive per target as the artifact `remind-silicon-apps-release`. Upload the
+   Linux archives to Silicon Apps, make a development release, check it, then promote it
+   ([release guide](releases.md)). The macOS and Windows archives wait for their Silicon Apps validation workers.
+2. **Crates.** Run `python3 scripts/sync-package-docs.py --check`, inspect both package file lists for credentials and
+   server code, publish `silicon-remind-client`, wait for crates.io to index it, then publish `silicon-remind-cli`
+   (it depends on that version). Use the stored registry credential without putting it in shell arguments or logs.
+   Versions cannot be overwritten: record them before publishing.
+3. **Backend.** Build the image from reviewed source (or run `.github/workflows/deployment-builds.yml`), push a
+   unique tag to ECR `silicon-remind-production` and resolve its digest. Stop writers if the migration needs it, take
+   database backups, run `remind-migrate` with the migration owner's credentials, re-apply
+   [runtime-grants.sql](../deploy/runtime-grants.sql), check a temporary API container's `/health/ready` with the
+   real configuration, then replace the API and worker containers with the new digest.
+4. **Web.** Build the ARM64 image from `web/`, push it, and install it with `deploy/aws/deploy-web.py <digest>`.
+5. **Docs.** `npm ci && npm run build && npm run check` in `docs-site/`, then publish `docs-site/dist/` (see
+   [docs-site/README.md](../docs-site/README.md)).
 
-For updates, preserve all existing stack parameters unless explicitly changing
-one. Inspect proposed replacements. Use normal rollback for task-definition
-updates; disable-rollback does not support replacement changes. Database changes
-are forward-only; rolling back a task image does not undo migrations. Do not
-remove database deletion protection or purge retained secrets as routine cleanup.
+Migrations are forward-only: rolling back an image does not undo them. Check public `/health/ready`,
+`GET /api/versions` (`"current": 2`), a Silicon signing in with `remind login` and creating a reminder, and its
+custodian seeing it on the web.
+
+The one-time switch from the previous identity service is described in
+[docs/migration/cutover.md](migration/cutover.md).
+
+## Alternative: Fargate
+
+[`deploy/aws/production.yaml`](../deploy/aws/production.yaml) is an alternative, not live, deployment: private ARM64
+Fargate API and worker tasks behind a load balancer and a rate-limiting WAF, with separate encrypted RDS instances for
+production and test data. The load balancer forwards only `/api/*`, `/webhook`, `/webhook/` and `/health/*`; metrics
+stay private. Its one-off bootstrap task (`deploy/aws/bootstrap-task.py`) creates the restricted roles, runs the
+migrations and publishes the runtime secret from the app secret (`REMIND_APP_SECRET`,
+`REMIND_ACCOUNTS_WEBHOOK_SECRET`, `REMIND_ENCRYPTION_KEYRING` and two database passwords); it refuses to change
+database URLs or the keyring on a rerun. Start with `RuntimeDesiredCount=0`, run the bootstrap task once, then set it
+to 1. For updates, keep every existing stack parameter unless you mean to change it and inspect proposed replacements.
 
 ## DNS
 
-Namecheap manages `teamofsilicons.com`. `backend.remind` is a five-minute CNAME to
-the stack's `LoadBalancerDnsName`. Retain the ACM-provided validation CNAME for
-automatic certificate renewal. Change only these Remind records; never replace
-unrelated records from a stale zone snapshot. Exact assigned endpoints and image
-digests are captured in the checked-in production parameters and release record.
+Namecheap manages `teamofsilicons.com`. `backend.remind` is an A record to the host's public IP; `remind` and
+`docs.remind` are CNAMEs of it. Change only these records; never replace unrelated records from a stale zone snapshot.
 
-## Client and CLI publication
-
-The backend crate has `publish=false` and remains proprietary. Only
-`silicon-remind-client` and `silicon-remind-cli` are Apache-2.0 packages.
-
-Run `python3 scripts/sync-package-docs.py` before packaging. Inspect package file
-lists and archives for credentials and unrelated server code, build the client
-package, then publish it. Wait for the registry to index the client before
-packaging and publishing the CLI, which depends on that version. Use the stored
-Cargo registry credential without putting it in shell arguments or logs. Record
-version numbers before publication: registry versions cannot be overwritten.
-
-Install the released CLI into an isolated Cargo root and verify its help,
-version and public health command. For update maintenance, a current-version
-result proves registry discovery; replacement by an actually newer version
-requires a subsequent release. Library lockfile changes take effect on rebuild.
+Earlier deployments, with their digests and evidence, are recorded in [docs/history/deploy/](history/deploy/).

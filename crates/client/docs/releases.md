@@ -43,13 +43,28 @@ All three exit 0, need no network, and write nothing.
 
 ## Build and pack
 
-The release workflow (`.github/workflows/release.yml`) builds and tests each target on a native
-runner, then packs one archive per target with `scripts/package-apps.sh <version> <target>
-<binary>`. The script stages `apps.yaml` and the binary, refuses a binary that fails the three
-commands above (where the runner can execute it), and runs `silicon-apps validate` and
-`silicon-apps pack` (the packer comes from `cargo install --locked silicon-apps-cli@0.2.0`).
-The archives and their `SHA256SUMS` are uploaded as the workflow artifact
-`remind-silicon-apps-release`. The workflow publishes nothing.
+The release workflow (`.github/workflows/release.yml`) runs on a `v<version>` tag (it must equal the CLI version)
+or by hand. It builds and tests each target on a native runner (Linux with `cargo zigbuild` at the glibc 2.28
+baseline) and checks the binary there with `scripts/package-apps.sh --check-only`: the native format, the glibc
+baseline, and the three commands above in an empty home. One Linux job then packs every target with
+`scripts/package-apps.sh <version> <target> <binary>`, which stages `apps.yaml` and the binary, runs
+`silicon-apps validate` and `silicon-apps pack` (the packer comes from
+`cargo install --locked silicon-apps-cli@0.2.0`), and checks the archive holds exactly those two files. The archives
+and their `SHA256SUMS` are kept as the workflow artifact `remind-silicon-apps-release`. The workflow publishes
+nothing.
+
+To build and pack on one Mac instead (Xcode, `cargo-zigbuild` with Zig 0.15, and `cargo-xwin` with LLVM's
+`clang-cl` and `lld-link`):
+
+```sh
+python3 scripts/build-release.py                                  # all six targets into dist/apps/
+python3 scripts/build-release.py --targets linux-x86_64,linux-aarch64
+scripts/package-apps.sh 0.6.0 macos-aarch64 target/release/remind  # pack one binary you built
+```
+
+The script refuses a binary built for another target, a Linux binary that needs a glibc newer than 2.28, and a
+binary that answers the three commands wrongly or writes to its home. Packing the same binary twice gives the same
+archive, byte for byte.
 
 ## Publish (a Carbon's step)
 

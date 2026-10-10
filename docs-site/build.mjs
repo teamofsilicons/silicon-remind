@@ -11,6 +11,9 @@ const origin = "https://docs.remind.teamofsilicons.com";
 const cliManifest = await readFile(path.join(root, "crates/cli/Cargo.toml"), "utf8");
 const releaseVersion = cliManifest.match(/^version\s*=\s*"([^"\n]+)"/m)?.[1];
 if (!releaseVersion) throw new Error("CLI release version is missing from Cargo.toml");
+// The wire contract is the major version of openapi.yaml's info.version (2.0.0 -> contract 2).
+const contract = (await readFile(path.join(root, "openapi.yaml"), "utf8")).match(/^info:\n(?:[ \t].*\n)*?[ \t]+version:\s*['"]?(\d+)\./m)?.[1];
+if (!contract) throw new Error("The API contract version is missing from openapi.yaml info.version");
 const escape = (value) =>
   String(value).replace(
     /[&<>"']/g,
@@ -92,7 +95,7 @@ for (const file of documents) {
         `<a href="${route(f)}"${f === file ? ' aria-current="page"' : ""}>${escape(titles.get(f))}</a>`,
     )
     .join("");
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)} · Remind Docs</title><meta name="description" content="Silicon Remind v1 documentation: ${escape(title)}"><link rel="canonical" href="${url}"><meta property="og:title" content="${escape(title)} · Remind Docs"><meta property="og:url" content="${url}"><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/styles.css"><script src="/search.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/"><span>▣</span> Remind <small>Docs</small></a><label class="search-label" for="search">Search docs<input id="search" type="search" placeholder="Search the documentation" autocomplete="off" aria-controls="search-results"></label><a class="app-link" href="https://remind.teamofsilicons.com">Open Remind ↗</a></header><div id="search-results" hidden role="region" aria-label="Search results"></div><div class="layout"><aside><span class="version">VERSION · ${escape(releaseVersion)}</span><nav aria-label="Documentation">${nav}</nav><a class="source" href="https://github.com/teamofsilicons/silicon-remind">Source on GitHub ↗</a></aside><main id="main"><div class="eyebrow">SILICON REMIND / DOCUMENTATION</div><article>${body}</article><footer>Silicon Remind · Client ${escape(releaseVersion)} · API v1 · <a href="/version-policy/">Version policy</a></footer></main><nav class="toc" aria-label="On this page"><strong>On this page</strong>${headings.map((h) => `<a href="#${h.id}">${escape(h.text)}</a>`).join("")}</nav></div></body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)} · Remind Docs</title><meta name="description" content="Silicon Remind documentation (API contract ${escape(contract)}): ${escape(title)}"><link rel="canonical" href="${url}"><meta property="og:title" content="${escape(title)} · Remind Docs"><meta property="og:url" content="${url}"><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/styles.css"><script src="/search.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/"><span>▣</span> Remind <small>Docs</small></a><label class="search-label" for="search">Search docs<input id="search" type="search" placeholder="Search the documentation" autocomplete="off" aria-controls="search-results"></label><a class="app-link" href="https://remind.teamofsilicons.com">Open Remind ↗</a></header><div id="search-results" hidden role="region" aria-label="Search results"></div><div class="layout"><aside><span class="version">VERSION · ${escape(releaseVersion)}</span><nav aria-label="Documentation">${nav}</nav><a class="source" href="https://github.com/teamofsilicons/silicon-remind">Source on GitHub ↗</a></aside><main id="main"><div class="eyebrow">SILICON REMIND / DOCUMENTATION</div><article>${body}</article><footer>Silicon Remind · Client ${escape(releaseVersion)} · API contract ${escape(contract)} · <a href="/version-policy/">Version policy</a></footer></main><nav class="toc" aria-label="On this page"><strong>On this page</strong>${headings.map((h) => `<a href="#${h.id}">${escape(h.text)}</a>`).join("")}</nav></div></body></html>`;
   const directory = path.join(output, route(file));
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, "index.html"), html);
@@ -114,7 +117,7 @@ for (const file of ["styles.css", "search.js"])
   await cp(path.join(root, "docs-site", file), path.join(output, file));
 await cp(path.join(source, "install.sh"), path.join(output, "install.sh"));
 await cp(path.join(root, "openapi.yaml"), path.join(output, "openapi.yaml"));
-await cp(path.join(root, "frontend/public/brand/mark.svg"), path.join(output, "favicon.svg"));
+await cp(path.join(root, "docs-site/favicon.svg"), path.join(output, "favicon.svg"));
 await writeFile(path.join(output, "search-index.json"), JSON.stringify(search));
 await writeFile(
   path.join(output, "robots.txt"),
