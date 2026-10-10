@@ -580,3 +580,20 @@ through a refused share, shows its name and photo to its custodian once it signe
   it does not deliver every missed slot.
 - Every Silicon Accounts delivery to Remind during the runs was answered 200 (none failed or stayed pending), and the
   API and worker logged no warning or error.
+
+
+## Account capacity and outbound destinations (2026-10-10)
+
+A Silicon retains at most1000 reminders (archived rows included) and20 active
+subscriptions per environment. An account has at most5 active and20 retained
+test environments; retired schemas count until purged. Creation uses transaction
+locks over the account, so parallel requests and legacy storage aliases cannot
+exceed the limit. A successful idempotent creation remains replayable at capacity.
+Authenticated requests allow300/minute/account per API process; the edge must
+apply the deployment-wide budget when more than one API process is used.
+
+Production outbound webhooks use public HTTPS only. The worker resolves every
+address before sending and pins the validated answers, disables redirects/proxies,
+and rejects private/reserved/local address ranges. Production test receivers also
+need public HTTPS; development uses the configured exact receiver allow-list.
+An inactive production account cannot send from another account's test environment.

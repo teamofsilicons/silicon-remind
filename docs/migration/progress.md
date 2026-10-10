@@ -550,3 +550,25 @@ budget regressions and three sensitive-route/custody API checks. Strict workspac
 Still pending before signoff: shared-open-signup capacity caps, production outbound destination address validation,
 and suspended/deleted owner enforcement inside other owners' test environments. Full Next.js frontend, browser
 journeys, release package verification and cutover evidence also remain. Nothing deployed by this recovery pass.
+
+
+### Outbound and account capacity follow-up
+
+Added per-process authenticated request admission (300/minute/account), atomic
+per-Silicon limits of1000 retained reminders and20 active subscriptions per
+environment, and account limits of5 active/20 retained test environments. The
+locks cover all migrated storage keys and idempotent replays still succeed at
+capacity. Restoring an environment consumes active capacity and reuses storage.
+
+Production webhook delivery requires HTTPS and public IP destinations, validates
+all DNS answers and pins those addresses in the request client, disables proxies
+and redirects, and rejects private/local/mapped/transition address ranges. Test
+receiver URLs in production must also be public HTTPS. In development the explicit
+sandbox receiver allow-list continues to work with loopback. Sandbox delivery
+checks the production account's active status even when its sandbox copy is stale.
+
+167 library tests and the remaining workspace/all-target suites passed, including
+concurrent last-slot admission, archived-row accounting, replay-at-limit,
+environment retire/restore limits, address rules and sandbox owner enforcement.
+Strict clippy is a commit gate. Full live E2E and the new cross-app standard UUID
+migration remain in progress; no production changes.

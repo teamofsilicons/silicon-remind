@@ -18,6 +18,7 @@ use crate::{
 
 mod accounts;
 mod bulk_status;
+mod capacity;
 mod lifecycle;
 mod links;
 mod migrations;

@@ -242,6 +242,17 @@ impl DeliveryProcessor {
             .await
             .map_err(|_| retryable("Reminder owner lookup failed"))?
             .remove(&owner_key);
+        if let Some(owner) = &owner {
+            let active = self
+                .identity
+                .find(&owner.uuid)
+                .await
+                .map_err(|_| retryable("Reminder owner lookup failed"))?
+                .is_some_and(|row| row.status == "active");
+            if !active {
+                return Err(terminal("Reminder owner is no longer active"));
+            }
+        }
         let destinations = rows
             .iter()
             .map(|row| self.decrypt_destination(row))
@@ -392,6 +403,72 @@ mod tests {
     use super::{DeliveryProcessor, DeliveryProcessorConfig, retry_delay};
 
     #[tokio::test]
+    async fn a_test_environment_cannot_deliver_for_an_owner_removed_in_production()
+    -> anyhow::Result<()> {
+        let production_db = crate::test_support::TestPostgres::start().await?;
+        let environment_db = crate::test_support::TestPostgres::start().await?;
+        let production_pool = production_db.pool(2).await?;
+        let environment_pool = environment_db.pool(2).await?;
+        let key = Uuid::now_v7();
+        for pool in [&production_pool, &environment_pool] {
+            crate::infrastructure::postgres::migrate(pool).await?;
+            sqlx::query("INSERT INTO accounts(uuid,kind,public_id,status,looked_up_at) VALUES('Owner','silicon','si:owner','active',clock_timestamp())").execute(pool).await?;
+            sqlx::query("INSERT INTO account_keys(storage_id,account_uuid,origin) VALUES($1,'Owner','accounts')").bind(key).execute(pool).await?;
+        }
+        let schedule = Uuid::now_v7();
+        let execution_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO schedules(id,org_id,owner_principal_id,silicon_id,reminder_text,schedule_kind,cron_expression) VALUES($1,NULL,$2,'si:owner','fixture','one_time','* * * * *')")
+            .bind(schedule).bind(key).execute(&environment_pool).await?;
+        sqlx::query("INSERT INTO executions(id,schedule_id,org_id,silicon_id,schedule_version,schedule_kind,scheduled_for,reminder_text,timezone,next_attempt_at) VALUES($1,$2,NULL,'si:owner',1,'one_time',clock_timestamp(),'fixture','UTC',clock_timestamp())")
+            .bind(execution_id).bind(schedule).execute(&environment_pool).await?;
+        let execution =
+            sqlx::query_as("SELECT *, reminder_text AS text FROM executions WHERE id=$1")
+                .bind(execution_id)
+                .fetch_one(&environment_pool)
+                .await?;
+        let encryption = SecretCipherKeyring::from_base64url(
+            1,
+            &BTreeMap::from([(1, SecretString::from(URL_SAFE_NO_PAD.encode([7; 32])))]),
+        )?;
+        let processor = DeliveryProcessor::new(
+            PostgresRepository::new(production_pool.clone()),
+            crate::test_support::identity_store(production_pool.clone(), "http://127.0.0.1:9")?,
+            WebhookClient::new(Duration::from_secs(1), Duration::from_secs(1), 1024)?,
+            encryption,
+            DeliveryProcessorConfig {
+                production: false,
+                worker_id: "removed-owner".into(),
+                lease_duration: Duration::from_secs(60),
+                max_concurrency: 1,
+                retry: policy(),
+            },
+            Arc::new(SystemClock),
+            Metrics::new(),
+        )
+        .with_repository(PostgresRepository::new(environment_pool.clone()));
+        assert!(processor.resolve_destinations(&execution).await.is_ok());
+        for status in ["access_removed", "deleted"] {
+            sqlx::query("UPDATE accounts SET status=$1 WHERE uuid='Owner'")
+                .bind(status)
+                .execute(&production_pool)
+                .await?;
+            assert!(matches!(
+                processor.resolve_destinations(&execution).await,
+                Err(WebhookDeliveryError::Terminal { .. })
+            ));
+        }
+        let still_active: String =
+            sqlx::query_scalar("SELECT status FROM accounts WHERE uuid='Owner'")
+                .fetch_one(&environment_pool)
+                .await?;
+        assert_eq!(
+            still_active, "active",
+            "the sandbox copy cannot override production lifecycle state"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn decrypted_destination_respects_development_production_and_sandbox_policy()
     -> anyhow::Result<()> {
         let encryption = SecretCipherKeyring::from_base64url(
@@ -456,7 +533,7 @@ mod tests {
                     processor.production = production;
                     processor.testing = testing;
                     let result = processor.decrypt_destination(&row);
-                    if production && !testing && scheme == "http" {
+                    if production && !testing {
                         assert!(matches!(result, Err(WebhookDeliveryError::Terminal { .. })));
                     } else {
                         assert_eq!(result?.endpoint_url.as_str(), endpoint);

@@ -57,7 +57,10 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         settings.webhook.connect_timeout,
         settings.webhook.request_timeout,
         settings.webhook.max_response_bytes,
-    )?;
+    )?
+    .public_destinations_only(
+        settings.environment == crate::config::RuntimeEnvironment::Production,
+    );
     let worker_id = format!("remind-worker-{}", Uuid::now_v7());
     let batch_size = u32::try_from(settings.worker.batch_size.get())?;
     let delivery_concurrency = u32::try_from(settings.worker.max_delivery_concurrency.get())?;

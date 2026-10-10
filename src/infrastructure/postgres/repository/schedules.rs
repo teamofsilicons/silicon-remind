@@ -318,6 +318,15 @@ impl PostgresRepository {
             });
         }
         lock_owner_for_write(&mut transaction, schedule.owner_key).await?;
+        let keys = super::capacity_keys(&mut transaction, schedule.owner_key).await?;
+        let retained: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM schedules WHERE owner_principal_id = ANY($1)")
+                .bind(&keys)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if retained >= 1000 {
+            return Err(RepositoryError::ResourceLimit("reminders"));
+        }
 
         let sql = format!(
             "INSERT INTO schedules (\

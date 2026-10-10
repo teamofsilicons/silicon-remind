@@ -249,6 +249,7 @@ impl TestEnvironments {
         let key = generate_key();
         let sealed = self.seal(id, &Credentials { key: key.clone() })?;
         let mut transaction = self.control.begin().await?;
+        check_environment_capacity(&mut transaction, owner_uuid, true).await?;
         sqlx::query("INSERT INTO public.testing_environments (id,org_id,creator_id,owner_uuid,name,description,iam_environment_id,key_hash,secrets) VALUES ($1,NULL,$2,$2,$3,$4,NULL,$5,$6)")
             .bind(id).bind(owner_uuid)
             .bind(input.name.trim()).bind(input.description).bind(hash(&key)).bind(sealed)
@@ -364,6 +365,9 @@ impl TestEnvironments {
         require_manager(access, &row)?;
         if row.deleted_at.is_some() != restore {
             return Err(AppError::conflict("environment_state_conflict"));
+        }
+        if restore && let Some(owner) = &row.owner_uuid {
+            check_environment_capacity(&mut tx, owner, false).await?;
         }
         let key = generate_key();
         sqlx::query("UPDATE public.testing_environments SET key_hash=$2,secrets=$3,deleted_at=NULL,purge_after=NULL,last_activity_at=clock_timestamp(),version=version+1 WHERE id=$1")
@@ -757,3 +761,41 @@ async fn guarded_get(
 
 #[cfg(test)]
 mod tests;
+
+async fn check_environment_capacity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner: &str,
+    creating: bool,
+) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("remind.environment-capacity:{owner}"))
+        .execute(&mut **tx)
+        .await?;
+    let active: i64 = sqlx::query_scalar("SELECT count(*) FROM public.testing_environments WHERE owner_uuid = $1 AND deleted_at IS NULL AND last_activity_at > clock_timestamp() - interval '15 days'")
+        .bind(owner).fetch_one(&mut **tx).await?;
+    if active >= 5 {
+        return Err(AppError::described(
+            http::StatusCode::CONFLICT,
+            "account_environment_limit",
+            "An account can have at most 5 active test environments. Retire an unused environment first.",
+        ));
+    }
+    // Retiring and recreating must not allocate unbounded recoverable schemas.
+    // Restoration reuses an existing schema and only consumes active capacity.
+    if creating {
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM public.testing_environments WHERE owner_uuid = $1",
+        )
+        .bind(owner)
+        .fetch_one(&mut **tx)
+        .await?;
+        if retained >= 20 {
+            return Err(AppError::described(
+                http::StatusCode::CONFLICT,
+                "account_retained_environment_limit",
+                "An account can retain at most 20 test environments, including retired ones. Restore an existing environment or wait for expired environments to be purged.",
+            ));
+        }
+    }
+    Ok(())
+}

@@ -119,7 +119,7 @@ pub async fn set(
     ))
 }
 
-/// `POST /api/v2/webhooks`: adds one subscription (any number may be active).
+/// `POST /api/v2/webhooks`: adds one subscription (up to 20 may be active).
 ///
 /// # Errors
 ///

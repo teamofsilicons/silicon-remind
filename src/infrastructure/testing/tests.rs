@@ -49,6 +49,57 @@ fn access(readers: &[&str], managers: &[&str]) -> EnvironmentAccess {
 }
 
 #[tokio::test]
+async fn environment_capacity_serializes_create_restore_and_bounds_retained_schemas()
+-> anyhow::Result<()> {
+    let fixture = fixture().await?;
+    let tests = &fixture.tests;
+    let owner = access(&["Own"], &["Own"]);
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        ids.push(tests.create("Own", input(&format!("slot-{i}"))).await?.0.id);
+    }
+    let (a, b) = tokio::join!(
+        tests.create("Own", input("last-a")),
+        tests.create("Own", input("last-b"))
+    );
+    let winner = match (a, b) {
+        (Ok((environment, _)), Err(error)) | (Err(error), Ok((environment, _))) => {
+            assert_eq!(error.code(), "account_environment_limit");
+            environment.id
+        }
+        _ => anyhow::bail!("only one concurrent creation may take the last slot"),
+    };
+    tests.delete(&owner, winner).await?;
+    tests.create("Own", input("replacement")).await?;
+    assert!(
+        matches!(tests.rotate(&owner, winner, true).await, Err(error) if error.code() == "account_environment_limit")
+    );
+    tests.delete(&owner, ids[0]).await?;
+    tests.rotate(&owner, winner, true).await?;
+    tests.create("Other", input("independent")).await?;
+
+    // Production's retirement recovery window keeps schemas; repeated churn is bounded.
+    for i in 0..20 {
+        let (environment, _) = tests
+            .create("Churn", input(&format!("retired-{i}")))
+            .await?;
+        tests
+            .delete(&access(&["Churn"], &["Churn"]), environment.id)
+            .await?;
+    }
+    assert!(
+        matches!(tests.create("Churn", input("too-many")).await, Err(error) if error.code() == "account_retained_environment_limit")
+    );
+    let retired = tests
+        .list(&access(&["Churn"], &["Churn"]), true, None, 50)
+        .await?;
+    tests
+        .rotate(&access(&["Churn"], &["Churn"]), retired[0].id, true)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "One environment's whole lifecycle is clearest as one ordered scenario"

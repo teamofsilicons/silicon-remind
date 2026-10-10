@@ -432,6 +432,32 @@ fn lease_deadline(
         ))
 }
 
+/// Serializes creation across all storage keys belonging to an account.
+async fn capacity_keys(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: Uuid,
+) -> Result<Vec<Uuid>, RepositoryError> {
+    let uuid: Option<String> =
+        sqlx::query_scalar("SELECT account_uuid FROM account_keys WHERE storage_id = $1")
+            .bind(key)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let identity = uuid.clone().unwrap_or_else(|| key.to_string());
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("remind.capacity:{identity}"))
+        .execute(&mut **transaction)
+        .await?;
+    match uuid {
+        Some(uuid) => Ok(sqlx::query_scalar(
+            "SELECT storage_id FROM account_keys WHERE account_uuid = $1",
+        )
+        .bind(uuid)
+        .fetch_all(&mut **transaction)
+        .await?),
+        None => Ok(vec![key]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::{Postgres, QueryBuilder};

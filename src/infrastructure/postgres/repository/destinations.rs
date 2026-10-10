@@ -18,7 +18,7 @@ use crate::infrastructure::postgres::{
 impl PostgresRepository {
     /// Creates one encrypted webhook subscription (associated-data version 2).
     /// No plaintext endpoint or secret crosses this boundary. A Silicon may have
-    /// any number of active subscriptions.
+    /// up to 20 active subscriptions per environment.
     ///
     /// # Errors
     ///
@@ -33,6 +33,13 @@ impl PostgresRepository {
         validate_hook_destination(destination)?;
         let mut transaction = self.pool.begin().await?;
         lock_owner_for_write(&mut transaction, destination.owner_key).await?;
+        let keys = super::capacity_keys(&mut transaction, destination.owner_key).await?;
+        let active: i64 = sqlx::query_scalar("SELECT count(*) FROM hook_destinations WHERE owner_principal_id = ANY($1) AND disabled_at IS NULL")
+            .bind(&keys).fetch_one(&mut *transaction).await?;
+        if active >= 20 {
+            return Err(RepositoryError::ResourceLimit("subscriptions"));
+        }
+
         let sql = format!(
             "INSERT INTO hook_destinations (\
                  id, org_id, owner_principal_id, silicon_id, endpoint_url_ciphertext, \

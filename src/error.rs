@@ -320,6 +320,16 @@ impl From<crate::infrastructure::postgres::RepositoryError> for AppError {
         use crate::infrastructure::postgres::RepositoryError;
 
         match error {
+            RepositoryError::ResourceLimit("reminders") => Self::described(
+                StatusCode::CONFLICT,
+                "account_reminder_limit",
+                "A Silicon can retain at most 1,000 reminders per environment, including archived reminders awaiting deletion.",
+            ),
+            RepositoryError::ResourceLimit(_) => Self::described(
+                StatusCode::CONFLICT,
+                "account_subscription_limit",
+                "A Silicon can have at most 20 active webhook subscriptions per environment. Remove an unused subscription first.",
+            ),
             RepositoryError::IdempotencyConflict => Self::conflict("idempotency_conflict"),
             RepositoryError::IdempotencyIncomplete => Self::conflict("idempotency_in_progress"),
             RepositoryError::EventReceiptConflict => Self::conflict("event_id_conflict"),

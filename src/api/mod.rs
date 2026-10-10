@@ -29,6 +29,7 @@ use crate::{
     metrics::Metrics,
 };
 
+mod budget;
 pub mod contracts;
 pub mod handlers;
 pub mod middleware;
@@ -54,6 +55,7 @@ pub struct ApiState {
     pub(crate) environment: RuntimeEnvironment,
     pub(crate) metrics: Metrics,
     pub(crate) request_timeout: Duration,
+    pub(crate) request_budget: budget::RequestBudget,
 }
 
 impl ApiState {
@@ -93,6 +95,7 @@ impl ApiState {
             environment: settings.environment,
             metrics: Metrics::new(),
             request_timeout: settings.server.request_timeout,
+            request_budget: budget::RequestBudget::default(),
         })
     }
 }

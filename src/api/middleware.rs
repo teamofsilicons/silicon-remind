@@ -147,6 +147,7 @@ pub async fn authenticate(
                     .verify_access_token(token.expose_secret())
                     .await
                     .map_err(map_accounts_error)?;
+                state.request_budget.admit(&claims.sub)?;
                 if INTROSPECTED_ROUTES.contains(&(method.as_str(), route.as_str()))
                     && !gateway
                         .token_is_active(token.expose_secret())
@@ -187,6 +188,7 @@ pub async fn authenticate(
                         )
                     })?;
                 check_proof(&state, &proof)?;
+                if let Some(user) = &proof.user { state.request_budget.admit(&user.uuid)?; }
                 state
                     .identity
                     .resolve_proof(&proof, proof.scopes.clone())
