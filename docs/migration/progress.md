@@ -283,7 +283,9 @@ ed81753 Build Silicon Apps archives in the release workflow ·
 a1277a1 Suggest the cutover identity mapping from a link-identities dry run ·
 6901ed6 Check every deploy and packaging script's syntax in CI ·
 d52b849 Explain the retired contract without naming account groupings ·
-and the commit that records this stage.
+987b335 Record the packaging stage: decisions, cutover runbook, proposal, progress ·
+755eb91 Note that the web, not Caddy, sets the Content-Security-Policy ·
+and the commit that completes this list.
 
 ### Tests and proofs
 
