@@ -1271,6 +1271,12 @@ def main(argv=None):
         check_one_time_delivery(run, people, state)
         suspension_check(run, people, state)
     finally:
+        for key in ("s1_home", "c1_home"):  # leave no live refresh token behind in the test homes
+            if state.get(key):
+                try:
+                    run.remind_cli(state[key], "logout", "--json")
+                except (OSError, subprocess.SubprocessError):
+                    pass
         summary = {"run": suffix, "scenarios": selected, "passed": len(run.passed), "failed": run.failed,
                    "seconds": round(time.time() - started),
                    "accounts": {role: c["id"] for role, c in people.carbons.items()}
