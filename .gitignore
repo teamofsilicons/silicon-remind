@@ -9,3 +9,7 @@
 /dist/
 /release-binaries/
 __pycache__/
+
+# Local development and end-to-end state (scripts/dev-accounts.sh, scripts/e2e-accounts.sh): logs, pids,
+# the development keyring and webhook secret, test homes and transcripts.
+/.mig/

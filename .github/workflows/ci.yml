@@ -121,11 +121,13 @@ jobs:
       - run: cargo fetch --locked
       - name: Check the manuals bundled in the client and CLI
         run: python3 scripts/sync-package-docs.py --check
-      - name: Check the packaging scripts
+      - name: Check the packaging and development scripts
         run: |
           python3 -m py_compile scripts/*.py deploy/aws/*.py
-          for script in scripts/package-apps.sh deploy/aws/deploy-standalone.sh deploy/aws/install-web.sh docs/install.sh; do bash -n "$script"; done
+          for script in scripts/package-apps.sh scripts/dev-accounts.sh scripts/dev-accounts-stop.sh scripts/e2e-accounts.sh deploy/aws/deploy-standalone.sh deploy/aws/install-web.sh docs/install.sh; do bash -n "$script"; done
           scripts/package-apps.sh --help > /dev/null
+          python3 -I scripts/dev_accounts.py --help > /dev/null
+          python3 -I scripts/e2e_accounts.py --help > /dev/null
       - run: npm ci --prefix docs-site
       - run: npm run build --prefix docs-site
       - run: npm run check --prefix docs-site

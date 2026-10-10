@@ -113,6 +113,31 @@ both expose `/health/live`, `/health/ready` and `/metrics`. Readiness has a two-
 embedded migration ledger and critical schema fields, so a reachable but unmigrated or drifted database is not
 ready. The worker's metrics are the source for scheduler, delivery, retry and worker-error counters.
 
+### Run against a local Silicon Accounts stack
+
+`scripts/dev-accounts.sh` runs Remind on this machine against a local Silicon Accounts stack, described by the stack's
+JSON file (the shape of the Silicon Accounts testkit's: `accounts_public_url`, `accounts_api_url`,
+`apps.remind.app_secret`, `apps.remind.webhook_secret_seeded`):
+
+```sh
+REMIND_TEST_STACK=/path/to/test-stack.json scripts/dev-accounts.sh --build
+```
+
+It creates and migrates `remind_e2e` and `remind_e2e_testing` on `postgres://postgres@127.0.0.1:5460`, starts
+`remind-api` on `127.0.0.1:4181`, `remind-worker` (operational listener `127.0.0.1:4182`) and a receiver on
+`127.0.0.1:4183` that records every reminder posted to `http://127.0.0.1:4183/hook`, and points Remind's app webhook at
+the stack to `http://127.0.0.1:4181/webhook/`, proven with a test ping. Running it again starts only what is not
+running. `scripts/dev-accounts-stop.sh` stops everything and points the webhook back where it was (`--drop` also drops
+the two databases). Logs, pids, the development keyring and a generated webhook secret stay in `.mig/`, which git
+ignores; `python3 scripts/dev_accounts.py --help` lists every setting. It refuses any Silicon Accounts URL that is not
+on this machine.
+
+`scripts/e2e-accounts.sh` runs the end-to-end checks against that stack, with new test accounts every run: a Carbon
+on the API, a Silicon on the CLI, the device flow, custodians and sharing, every Silicon Accounts webhook event,
+verification proofs, the discovery commands of the packaged archive, and a restart. It needs the stack's mint helper
+and testkit (`python3 scripts/e2e_accounts.py --help`), starts the stack when it is not running and stops it
+afterwards, and writes a transcript with every token masked to `.mig/e2e/<run>/`.
+
 ## Development checks
 
 ```sh
