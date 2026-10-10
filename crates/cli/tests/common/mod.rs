@@ -32,6 +32,10 @@ impl Home {
             .env("HOME", &self.path)
             .env("REMIND_TELEMETRY_ENABLED", "false")
             .stdin(Stdio::null());
+        // Winsock loads its providers relative to SystemRoot on Windows.
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
         if let Some(url) = remind_url {
             command.env("REMIND_URL", url);
         }
