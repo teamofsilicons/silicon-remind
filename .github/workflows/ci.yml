@@ -23,6 +23,22 @@ jobs:
     name: Rust quality gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      # The database tests create and drop one remind_t_<uuid> database each on this server
+      # (src/test_support.rs); without REMIND_TEST_POSTGRES_URL they would start a container per test.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      REMIND_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,6 +70,9 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace --all-targets --all-features
 
+      - name: Run documentation tests
+        run: cargo test --locked -p silicon-remind-client --doc
+
   openapi:
     name: OpenAPI contract
     runs-on: ubuntu-latest
@@ -73,21 +92,40 @@ jobs:
       - name: Validate OpenAPI
         run: python -m openapi_spec_validator openapi.yaml
 
-  interfaces:
-    name: Website and documentation
+  web:
+    # The SolidJS web and its session gateway, until the Next.js web replaces them.
+    name: Website
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Install Rust for the public source bundle
-        run: rustup toolchain install 1.98.0 --profile minimal
-      - run: cargo fetch --locked
       - run: npm ci --prefix frontend
       - run: npm run build --prefix frontend
       - run: npm test --prefix frontend
-      - run: python3 scripts/sync-package-docs.py && git diff --exit-code -- crates/client/docs crates/cli/docs crates/client/openapi.yaml crates/cli/openapi.yaml
+
+  docs:
+    name: Documentation and packaging scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Rust for the public source bundle
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - run: cargo fetch --locked
+      - name: Check the manuals bundled in the client and CLI
+        run: python3 scripts/sync-package-docs.py --check
+      - name: Check the packaging scripts
+        run: |
+          python3 -m py_compile scripts/*.py deploy/aws/*.py
+          bash -n scripts/package-apps.sh deploy/aws/deploy-standalone.sh deploy/aws/install-frontend.sh
+          scripts/package-apps.sh --help > /dev/null
       - run: npm ci --prefix docs-site
       - run: npm run build --prefix docs-site
       - run: npm run check --prefix docs-site

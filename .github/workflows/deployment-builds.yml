@@ -29,7 +29,13 @@ jobs:
             docker build --platform linux/arm64 "${labels[@]}" --tag "$base" .
             docker build --platform linux/arm64 "${labels[@]}" --file deploy/aws/Dockerfile.runtime --build-arg "BACKEND_IMAGE=$base" --tag "$image" .
           else
-            docker build --platform linux/arm64 "${labels[@]}" --file frontend/Dockerfile --tag "$image" frontend
+            # The Next.js web (Silicon Accounts sign-in, Next.js standalone server). The SolidJS frontend/ image
+            # signed in with the previous identity service and must not be deployed again.
+            if [ ! -f web/Dockerfile ]; then
+              echo "::error::web/Dockerfile is missing: the Next.js web is not in this revision yet."
+              exit 1
+            fi
+            docker build --platform linux/arm64 "${labels[@]}" --file web/Dockerfile --tag "$image" web
           fi
           mkdir artifacts
           docker image inspect "$image" > "artifacts/${IMAGE_KIND}.metadata.json"
