@@ -445,7 +445,9 @@ CARGO_BUILD_JOBS=3`.
   scripts/e2e-accounts.sh`, run `101010125c2`): **131 passed, 0 failed in 147 s**: 1 Carbon on the API 15, 2 Silicon
   on the CLI 20, 3 device flow 6, 4 circle and sharing 19, 5 webhooks 45, 6 proofs 13, 7 discovery 7, 8 restart 6.
   Afterwards no process left, no pid file, the webhook back at `http://127.0.0.1:9593/remind/webhooks`, no token
-  pattern in the transcript (`grep -cE 'slt_…{20,}|sar_…|eyJ…|stk-[0-9a-f]{8,}|whsec_…'` = 0).
+  pattern in the transcript (`grep -cE 'slt_…{20,}|sar_…|eyJ…|stk-[0-9a-f]{8,}|whsec_…'` = 0). The committed suite,
+  re-run from nothing after the sign-out change (run `10101017ef5`): 131 passed, 0 failed in 169 s; both CLI test
+  homes ended with no sign-in. Then `scripts/dev-accounts-stop.sh --drop`: no `remind%` database left on 5460.
 - Silicon Accounts' own record of the final run (`GET /v1/apps/remind/webhook/deliveries`): 9 deliveries, every one
   `delivered` with 200: `account.deleted`, `account.id_changed`, `account.updated`, `silicon.custodian_changed`,
   `membership.access_removed` ×2, `membership.signed_out` ×2 (`app_revoked`, `stk_rotated`), `ping`; none failed or
