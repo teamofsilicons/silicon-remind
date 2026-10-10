@@ -78,9 +78,10 @@ The sign-in lives in `{home}/.remind/state.json`, where `{home}` is `$SILICON_HO
 otherwise `~` (`remind config home <directory>` moves it). The directory is readable only by
 you (0700, files 0600) and the file is replaced atomically.
 
-One sign-in is kept per Remind origin, plus one per test environment if you signed in with
-`--test` (otherwise a test environment uses the production sign-in of the same origin). Give
-every Silicon its own `SILICON_HOME` so their sign-ins never replace each other.
+One sign-in is kept per Remind origin, plus one per test environment you signed in to with
+`--test <id>`. Any other test environment, including one selected with `remind env use`, uses the
+production sign-in of the same origin, and `remind login` without `--test` always signs in for
+production. Give every Silicon its own `SILICON_HOME` so their sign-ins never replace each other.
 
 The access token lasts 30 minutes. `remind` refreshes it when less than a minute is left, under
 an exclusive lock on `state.lock`, so two `remind` processes sharing a home never present the

@@ -26,9 +26,10 @@ pub async fn login(ctx: &Ctx, args: &LoginArgs) -> anyhow::Result<u8> {
         (None, None, true) => Some(read_slt_from_stdin()?),
         (None, None, false) => None,
     };
-    // Check everything local first: a short-lived token is used up by its first exchange.
-    ctx.home()?;
-    ctx.client()?;
+    // Check everything local first: a short-lived token is used up by its first exchange, so
+    // make sure the sign-in can be saved and Remind's origin is usable before exchanging it.
+    drop(ctx.home()?.lock()?);
+    sign_in_client(ctx)?;
     let sign_in = ctx.sign_in_at(&ctx.accounts_url, &ctx.app_id)?;
     let (tokens, method) = match slt {
         Some(slt) => (sign_in.exchange_slt(&slt).await?, "slt"),
@@ -63,7 +64,7 @@ fn read_slt_from_stdin() -> anyhow::Result<Secret> {
 
 /// The device sign-in. `None` when this home is already signed in and `--force` is absent.
 async fn device(ctx: &Ctx, sign_in: &SignIn, args: &LoginArgs) -> anyhow::Result<Option<Tokens>> {
-    let slot = ctx.slot();
+    let slot = ctx.sign_in_slot();
     if let Some(stored) = ctx.snapshot.state.sign_ins.get(&slot)
         && !args.force
         && !stored.ended(now())
@@ -134,7 +135,7 @@ async fn device(ctx: &Ctx, sign_in: &SignIn, args: &LoginArgs) -> anyhow::Result
 /// in this slot) and reports who signed in.
 async fn finish(ctx: &Ctx, sign_in: &SignIn, tokens: Tokens, method: &str) -> anyhow::Result<u8> {
     let mut stored = stored_from(tokens, sign_in.accounts_url(), sign_in.app_id(), method);
-    let client = ctx.client()?.with_session(stored.access_token.clone())?;
+    let client = sign_in_client(ctx)?.with_session(stored.access_token.clone())?;
     let (identity, warning) = match client.me().await {
         Ok(identity) => (Some(identity), None),
         Err(
@@ -169,7 +170,7 @@ async fn finish(ctx: &Ctx, sign_in: &SignIn, tokens: Tokens, method: &str) -> an
                 .clone_from(&identity.display_name);
         }
     }
-    let slot = ctx.slot();
+    let slot = ctx.sign_in_slot();
     let saved = stored.clone();
     let (previous, notices) = ctx
         .home()?
@@ -193,7 +194,14 @@ async fn finish(ctx: &Ctx, sign_in: &SignIn, tokens: Tokens, method: &str) -> an
             ctx.url
         ));
     }
-    let mut body = status_json(ctx, &stored, identity.is_some(), false, identity.as_ref());
+    let fallback = ctx.test.is_some() && ctx.explicit_test.is_none();
+    let mut body = status_json(
+        ctx,
+        &stored,
+        identity.is_some(),
+        fallback,
+        identity.as_ref(),
+    );
     body["method"] = json!(method);
     if let Some(warning) = warning {
         body["warning"] = json!(warning);
@@ -204,6 +212,16 @@ async fn finish(ctx: &Ctx, sign_in: &SignIn, tokens: Tokens, method: &str) -> an
     )?;
     ctx.out.suggest(&next_steps(&stored));
     Ok(EXIT_OK)
+}
+
+/// The Remind client a new sign-in is checked with: inside the test environment named with
+/// `--test`, else production (a selected environment uses the production sign-in).
+fn sign_in_client(ctx: &Ctx) -> anyhow::Result<silicon_remind_client::Client> {
+    if ctx.explicit_test.is_some() {
+        ctx.client()
+    } else {
+        ctx.production_client()
+    }
 }
 
 fn next_steps(stored: &StoredSignIn) -> String {
@@ -506,9 +524,13 @@ fn signed_out(ctx: &Ctx, reason: Option<(&str, String)>) -> anyhow::Result<u8> {
 /// `remind logout`: ends this machine's sign-in at Silicon Accounts and forgets it.
 pub async fn logout(ctx: &Ctx) -> anyhow::Result<u8> {
     let home = ctx.home()?;
-    let own = ctx.slot();
+    let own = ctx.sign_in_slot();
     let nothing = |ctx: &Ctx| -> anyhow::Result<u8> {
-        let (reason, text) = if ctx.effective(&ctx.snapshot.state).is_some() {
+        let (reason, text) = if ctx.explicit_test.is_some()
+            && ctx
+                .effective_for(&ctx.snapshot.state, ctx.explicit_test)
+                .is_some()
+        {
             (
                 "no_test_environment_sign_in",
                 "This test environment has no sign-in of its own; it uses your production sign-in. End that with `remind logout` (without --test).".to_owned(),

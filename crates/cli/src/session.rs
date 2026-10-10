@@ -46,8 +46,11 @@ pub struct Ctx {
     pub accounts_url: String,
     /// Remind's app id at Silicon Accounts (its public `client_id`).
     pub app_id: String,
-    /// The test environment this command runs in, if any.
+    /// The test environment this command runs in, if any (`--test`, else the one selected with
+    /// `remind env use`, unless `--production`).
     pub test: Option<Uuid>,
+    /// The test environment named with `--test` on this command line.
+    pub explicit_test: Option<Uuid>,
     /// Telemetry is on.
     pub telemetry: bool,
     /// `--idempotency-key`.
@@ -116,6 +119,7 @@ impl Ctx {
             accounts_url,
             app_id,
             test,
+            explicit_test: if inputs.production { None } else { inputs.test },
             telemetry,
             idempotency_key: inputs.idempotency_key,
             snapshot,
@@ -135,9 +139,10 @@ impl Ctx {
         })
     }
 
-    /// This command's own sign-in slot.
-    pub fn slot(&self) -> String {
-        slot(&self.url, self.test)
+    /// Where `remind login` saves and `remind logout` ends a sign-in: a test environment's own
+    /// slot only when `--test` names it; a selected environment uses the production sign-in.
+    pub fn sign_in_slot(&self) -> String {
+        slot(&self.url, self.explicit_test)
     }
 
     /// A Remind client for this origin with telemetry set and, inside a test environment, its

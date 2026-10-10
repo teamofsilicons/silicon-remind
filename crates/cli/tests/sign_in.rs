@@ -510,3 +510,69 @@ async fn signing_in_while_remind_is_down_keeps_the_sign_in_unverified() -> Resul
     assert!(home.state_path().exists());
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_selected_test_environment_signs_in_for_production_unless_named_with_test() -> Result<()>
+{
+    let (accounts, remind) = servers().await;
+    let home = Home::new()?;
+    let id = "01992000-0000-7000-8000-000000000004";
+    let key = "12345678901234567890123456789012";
+    home.write_state(&json!({
+        "version": 2, "url": remind.uri(),
+        "test_keys": {format!("{}#{id}", remind.uri()): key},
+        "selected_tests": {remind.uri(): id},
+        "test_names": {format!("{}#{id}", remind.uri()): "release-qa"}
+    }))?;
+    for (access, refresh) in [("at-1", "sar_1"), ("at-2", "sar_2")] {
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(tokens(access, refresh, "silicon")),
+            )
+            .up_to_n_times(1)
+            .mount(&accounts)
+            .await;
+    }
+    remind_accepts(&remind, "at-1", "silicon").await;
+    remind_accepts(&remind, "at-2", "silicon").await;
+    let selected = ok_json(
+        home.remind(None, Some(&accounts.uri()))
+            .args(["login", "slt_one", "--json"])
+            .output()?,
+    )?;
+    assert_eq!(selected["uses_production_sign_in"], true);
+    assert_eq!(selected["test_environment"], id);
+    let state = home.state()?;
+    assert_eq!(
+        state["sign_ins"][format!("{}#production", remind.uri())]["refresh_token"],
+        "sar_1"
+    );
+    assert!(state["sign_ins"][format!("{}#{id}", remind.uri())].is_null());
+    let named = ok_json(
+        home.remind(None, Some(&accounts.uri()))
+            .args(["--test", id, "login", "slt_two", "--json"])
+            .output()?,
+    )?;
+    assert!(named.get("uses_production_sign_in").is_none());
+    let state = home.state()?;
+    assert_eq!(
+        state["sign_ins"][format!("{}#{id}", remind.uri())]["refresh_token"],
+        "sar_2"
+    );
+    assert_eq!(
+        state["sign_ins"][format!("{}#production", remind.uri())]["refresh_token"],
+        "sar_1"
+    );
+    let requests = remind.received_requests().await.context("requests")?;
+    let keyed: Vec<bool> = requests
+        .iter()
+        .map(|r| r.headers.contains_key("x-remind-test-key"))
+        .collect();
+    assert_eq!(
+        keyed,
+        vec![false, true],
+        "only the --test sign-in is checked inside the environment"
+    );
+    Ok(())
+}
