@@ -9,7 +9,7 @@
 //!   while a sign-in is refreshed, never while waiting for a person (device sign-in).
 //! - Reading never creates anything, so discovery commands leave a clean home untouched.
 //! - A `state.json` from Remind 0.5 or earlier (sign-ins tied to the previous identity
-//!   service) is read without its sign-ins and archived as `state.iam-<time>.json` on the
+//!   service) is read without its sign-ins and archived as `state.legacy-<time>.json` on the
 //!   next write; an unreadable `state.json` is moved aside as `state.corrupt-<time>.json`.
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
@@ -258,7 +258,7 @@ impl Locked {
                 aside.display()
             ));
         } else if snapshot.exists && snapshot.legacy {
-            let archive = self.home.dir.join(format!("state.iam-{stamp}.json"));
+            let archive = self.home.dir.join(format!("state.legacy-{stamp}.json"));
             copy_private(&path, &archive)?;
             notices.push(if snapshot.legacy_sign_ins {
                 format!(
@@ -608,7 +608,7 @@ mod tests {
         assert!(notices[0].contains("Sign in again"), "{}", notices[0]);
         let archived: Vec<_> = std::fs::read_dir(home.dir())?
             .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with("state.iam-"))
+            .filter(|e| e.file_name().to_string_lossy().starts_with("state.legacy-"))
             .collect();
         assert_eq!(archived.len(), 1);
         let written: serde_json::Value =

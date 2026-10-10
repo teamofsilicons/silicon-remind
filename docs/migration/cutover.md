@@ -81,7 +81,7 @@ In the window, at the same time as the service:
 
 3. **Silicons on the old CLI (0.5, installed by Honeycomb).** It speaks contract 1, so after the service switch every
    command answers `410 api_version_retired`; `remind login <SLT>` cannot work either. Installing 0.6.0 through Silicon
-   Apps fixes it. On its first change 0.6.0 archives the old `state.json` as `state.iam-<time>.json` and asks to sign
+   Apps fixes it. On its first change 0.6.0 archives the old `state.json` as `state.legacy-<time>.json` and asks to sign
    in again; nothing else is needed on the machine. A machine that still runs the 0.1 updater service can remove it
    with `remind daemon uninstall` (hidden, kept for one release).
 4. **The Silicon runtime** (`silicon connect` in stemcell) keeps running `remind login <SLT>` and `remind iam --json`;

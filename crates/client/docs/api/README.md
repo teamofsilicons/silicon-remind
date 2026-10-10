@@ -213,8 +213,8 @@ with the key alone; without a key they answer `400 test_environment_required`. O
 Silicon owner, its custodian manage an environment; the owner's custodian and its other Silicons
 (or a Carbon owner's Silicons) see it and read its key; anyone with the key uses and cleans it.
 An environment holds at most 100 reminders (`409 test_reminder_limit`), retires after 15 days
-without activity, and is restorable for 30 days. Sending the retired `iam_test_key` or
-`iam_app_secret` fields answers `422 test_key_field_retired`.
+without activity, and is restorable for 30 days. Sending the test key or app secret fields that
+contract 1 took answers `422 test_key_field_retired`.
 
 ## Errors and operational endpoints
 

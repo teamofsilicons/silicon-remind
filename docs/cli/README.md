@@ -70,7 +70,7 @@ One sign-in is kept per Remind origin, and one per test environment when you sig
 `--test`. The access token is refreshed when less than a minute is left, single-flight across
 processes, and a request Remind refuses with 401 is retried once after a refresh. A state file
 from Remind 0.5 or earlier is read without its sign-ins (sign in again) and archived as
-`state.iam-<time>.json` on the next change; an unreadable `state.json` is moved aside as
+`state.legacy-<time>.json` on the next change; an unreadable `state.json` is moved aside as
 `state.corrupt-<time>.json`.
 
 ## Reminders

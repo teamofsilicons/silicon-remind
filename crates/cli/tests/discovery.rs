@@ -246,7 +246,7 @@ fn a_state_file_from_the_previous_release_asks_to_sign_in_again() -> Result<()> 
     assert!(
         home.files()
             .iter()
-            .any(|name| name.starts_with("state.iam-")),
+            .any(|name| name.starts_with("state.legacy-")),
         "{:?}",
         home.files()
     );

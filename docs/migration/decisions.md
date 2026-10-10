@@ -350,7 +350,7 @@ status}, docs_url}`, offline, exit 0 even with no usable home. `REMIND_APP_ID` o
 (production and the Apps validators never set it).
 
 12.10 **Old state.** A 0.5 `state.json` is read without its sign-ins (status: `reason: sign_in_again`); the next write
-archives it as `state.iam-<time>.json` and keeps the API origin, telemetry and 32-character test keys (keys of the
+archives it as `state.legacy-<time>.json` and keeps the API origin, telemetry and 32-character test keys (keys of the
 previous identity service's sandboxes and selections pointing at them are dropped). An unreadable file is reported
 by discovery commands and moved aside as `state.corrupt-<time>.json` on the next write.
 
