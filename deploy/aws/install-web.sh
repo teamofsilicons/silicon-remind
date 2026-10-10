@@ -87,6 +87,11 @@ for attempt in {1..30}; do
   fi
   sleep 1
 done
+# Stage independently before the coordinated public switch.
+if [ "${STAGE_ONLY:-0}" = 1 ]; then
+  echo 'Accounts web ready on the private network; public website and legacy frontend unchanged.'
+  exit 0
+fi
 # The SolidJS frontend and its session gateway are replaced; keep their files for the record.
 if [ -f /etc/systemd/system/remind-frontend.service ]; then
   systemctl disable --now remind-frontend.service || true
