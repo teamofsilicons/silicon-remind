@@ -2,12 +2,12 @@
 
 Implemented and manually exercised locally on 2026-09-06 IST against hosted IAM
 sandbox identities and the real local configured webhook receiver backend. Scope follows
-[UNDERSTANDING.md](../UNDERSTANDING.md). The SolidJS frontend is now available
-under [frontend](../frontend/README.md). This historical acceptance record is supplemented by the [September update](UPDATE_2026_09_13.md).
+[UNDERSTANDING.md](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/UNDERSTANDING.md). The SolidJS frontend is now available
+under [frontend](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/frontend/README.md). This historical acceptance record is supplemented by the [September update](UPDATE_2026_09_13.md).
 
 ## Current local implementation
 
-The September 16 update adds Honeycomb lifecycle participant operations, durable receipts, cleanup and dispatch fences, activity reporting, and six-target release packaging. Honeycomb now owns CLI updates; the Rust client never updates dependencies at runtime. See [lifecycle integration](honeycomb-lifecycle.md) and [release packaging](releases.md). The historical deployment and acceptance records below describe earlier behavior, including the retired standalone updater and legacy environment management; they are not evidence of deployment of this update.
+The September 16 update adds Honeycomb lifecycle participant operations, durable receipts, cleanup and dispatch fences, activity reporting, and six-target release packaging. Honeycomb now owns CLI updates; the Rust client never updates dependencies at runtime. See [lifecycle integration](honeycomb-lifecycle.md) and [release packaging](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/releases.md). The historical deployment and acceptance records below describe earlier behavior, including the retired standalone updater and legacy environment management; they are not evidence of deployment of this update.
 
 Local verification: 149 Rust tests passed across the serial workspace suite and the final focused authorization/CLI checks; formatting and strict all-target Clippy passed. The frontend built and all three tests passed. OpenAPI validation passed. The documentation build verified 19 pages and 554 local links/assets. Release packaging accepted the local native CLI and rejected missing/wrong-format inputs. All six optimized platform binaries were subsequently built locally, validated and uploaded to Honeycomb as version 0.2.0. Both macOS builds and both Linux builds passed runtime smoke checks, and an isolated Honeycomb installation passed on macOS aarch64. Windows runtime checks and deployment of the backend update remain unverified. Public distribution awaits Honeycomb validator approval; see the [release record](RELEASE_0.2.0_HONEYCOMB.md).
 
@@ -18,7 +18,7 @@ Local verification: 149 Rust tests passed across the serial workspace suite and 
   Its visual reference is the hosted IAM console, checked on 2026-09-08, using
   its Plex typography, pale navigation, white panels and blue actions.
   Deployed at [remind.teamofsilicons.com](https://remind.teamofsilicons.com)
-  on the standalone AWS server; see the [frontend deployment verification](../deploy/aws/frontend-2026-09-08.md).
+  on the standalone AWS server; see the [frontend deployment verification](deploy/frontend-2026-09-08.md).
 - Official `silicon-iam-client` 1.2.1 integration for `remind`: SLT exchange,
   refresh, logout, live app/org/test authorization and signed lifecycle receiver.
 - Reminder create/list/get/edit, one-time and recurring five-field cron, IANA
@@ -41,9 +41,9 @@ Local verification: 149 Rust tests passed across the serial workspace suite and 
 - Default-on hourly command-triggered update maintenance with opt-out. CLI
   installation uses its existing Cargo root; source builds report availability.
   Library updates affect the consuming lockfile and require a rebuild.
-- Segregated [API](api/README.md), [client](client/README.md),
-  [CLI](cli/README.md), [IAM](iam.md), [sandbox](testing-environments.md),
-  [webhook](webhook-delivery.md) and [internal API](internal-api.md) guides, plus OpenAPI.
+- Segregated [API](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/api/README.md), [client](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/client/README.md),
+  [CLI](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/cli/README.md), [IAM](iam.md), [sandbox](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/testing-environments.md),
+  [webhook](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/webhook-delivery.md) and [internal API](internal-api-iam-era.md) guides, plus OpenAPI.
 
 ## Evidence
 

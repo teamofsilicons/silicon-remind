@@ -24,11 +24,14 @@ const slug = (text) =>
     .replace(/[^a-z0-9\s-]/g, "")
     .trim()
     .replace(/\s+/g, "-");
+// Records of the past (history/) and of the move to Silicon Accounts (migration/) stay in the repository only.
+const unpublished = new Set(["history", "migration"]);
 async function inventory(dir, prefix = "") {
   const entries = await readdir(dir, { withFileTypes: true });
   const result = [];
   for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const relative = path.posix.join(prefix, e.name);
+    if (e.isDirectory() && !prefix && unpublished.has(e.name)) continue;
     if (e.isDirectory()) result.push(...(await inventory(path.join(dir, e.name), relative)));
     else result.push(relative);
   }

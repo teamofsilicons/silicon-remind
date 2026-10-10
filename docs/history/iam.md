@@ -69,7 +69,7 @@ accepted for compatible retained deliveries. Live introspection makes an expired
 or revoked caller token unusable even before asynchronous events arrive.
 
 For sandbox setup, test Application credentials and wrapped events, see
-[testing environments](testing-environments.md) and the official
+[testing environments](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/testing-environments.md) and the official
 [IAM client manual](https://github.com/teamofsilicons/silicon-iam/tree/main/docs/client).
 
 ## Configuration still requires deployment proof

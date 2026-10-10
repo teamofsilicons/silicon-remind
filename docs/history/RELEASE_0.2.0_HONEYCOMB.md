@@ -27,7 +27,7 @@ before automatic publication can proceed; public activation is not yet verified.
 
 Generated payloads and archives are ignored by Git. Reproduce them using
 `scripts/build-honeycomb-release.py` and `scripts/package-release.py` as documented
-in [release packaging](releases.md). Uploaded version bytes are immutable.
+in [release packaging](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/docs/releases.md). Uploaded version bytes are immutable.
 
 ## Registration and publication evidence
 

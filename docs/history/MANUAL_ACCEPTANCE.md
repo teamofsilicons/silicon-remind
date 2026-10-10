@@ -322,7 +322,7 @@ one-time occurrence at `2026-09-08T11:44:00Z` was processed successfully as
 execution `01a080d5-0982-7e73-8832-9a7afe2fc9a9`. Both backend containers and the
 frontend gateway health checks passed. The disposable public Remind and IAM
 sandboxes were retired afterward. Image and rollout evidence is recorded in
-[the backend deployment follow-up](../deploy/aws/backend-2026-09-08-8912907.md).
+[the backend deployment follow-up](deploy/backend-2026-09-08-8912907.md).
 
 ## 2026-09-08 — Unscoped IAM sign-in
 
@@ -342,5 +342,5 @@ The update was also deployed and verified in Chrome on the public Remind site.
 The existing browser session survived deployment, and a fresh unscoped IAM
 handoff returned successfully with the existing `tos` grant. Both backend
 containers were healthy and both public readiness routes returned 200. See the
-[deployment record](../deploy/aws/unscoped-login-2026-09-08.md) for pinned images
+[deployment record](deploy/unscoped-login-2026-09-08.md) for pinned images
 and successful rollout commands.

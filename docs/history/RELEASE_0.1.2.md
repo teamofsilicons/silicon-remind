@@ -59,7 +59,7 @@ updated. The `remind` and `remind-frontend` systemd units remained active; Caddy
 and the frontend were not restarted. No migration, DNS, credential, or production
 reminder data changes were made. CloudFormation was not changed; use the new
 digest when reprovisioning, and reinstall the existing frontend as documented in
-the [standalone guide](../deploy/aws/README-standalone.md).
+the [standalone guide](https://github.com/teamofsilicons/silicon-remind/blob/88d1986/deploy/aws/README-standalone.md).
 
 Public verification after rollout:
 
