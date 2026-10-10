@@ -592,3 +592,39 @@ proof scenario then passed15/15. Production cutover has not run. See
 ## Next.js / Arc frontend completion — 2026-10-10
 
 `frontend/` now implements the full Accounts-based Remind workspace and sealed environment selection. Typecheck, lint, production build and 49 units pass; 26 real functional browser checks plus five populated screenshot checks pass. Selected reviewed screens and detailed proof are in [frontend.md](frontend.md) and `screens/`. The backend UUID filter mismatch found by screenshots was repaired by the root backend owner. Hosting/CI now build `frontend/Dockerfile`; image build and production cutover remain unperformed. No human UNDERSTANDING file changed.
+
+## Coordinated local UUID cutover verified — 2026-10-10
+
+The shared local Accounts database and all eight app stores now use canonical
+128-bit UUIDs. Remind used the same immutable 211-row CSV as every participant:
+SHA-256 `750423f3117e11f5eb42025b457ff0f1bf42bd463c31b7e106d9cd10978ca4d9`.
+This was a local rehearsal on PostgreSQL port 5460; no production data changed.
+
+After stopping API, worker and delivery receiver, backed up `remind_e2e` and
+`remind_e2e_testing`, then ran dry-run, apply and replay against both stores.
+Replay changed no rows. Compared restored pre-cutover backups with the migrated
+stores: all 39 existing private storage mappings, 43 reminder definitions, seven
+encrypted delivery destinations/signing secrets and six retained test-environment
+keys were preserved. Only identity bindings changed. Historical source databases
+and the final map remain available with the private local cutover evidence.
+
+The old Accounts bearer and old Remind bearer returned 401; Remind reported
+`account_uuid_migrated`. Fresh hosted Carbon sign-in and Silicon STK/SLT sign-in
+returned the mapped UUIDs with unchanged public handles. Both the Silicon and its
+custodian read the same pre-cutover reminder. Its existing webhook subscription
+delivered a newly scheduled reminder with the new UUID, and the signature verified
+using the pre-cutover signing secret.
+
+The complete real-Accounts API/CLI suite then passed **131/131 checks across all
+eight scenarios** (`.mig/e2e/ufinal/results.json`, 138 seconds). This includes
+device flow, refresh rotation, sharing, custody transfer, deletion, real signed
+deliveries, proof scopes/revocation, CLI packaging and restart persistence.
+Fresh test accounts created by this run also received canonical UUIDs.
+
+The current optimized macOS ARM64 CLI archive passed extracted discovery and
+Silicon Apps 0.2 validation/packing:
+`dist/apps/remind-0.6.0-macos-aarch64.tar.gz`, SHA-256
+`5bd3ced2ef353e63bc97aca28f74f0e66f679a49826911c0d54a04b3ea1098b5`.
+Other platform runner builds, Docker image builds, Interface/fleet/Ting integration
+readiness and the coordinated production cutover remain release gates. Nothing
+was pushed, deployed or published.
