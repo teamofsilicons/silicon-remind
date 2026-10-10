@@ -237,3 +237,153 @@ The stack's `remind` sign-in setup and webhook were not changed (device flow and
 - stemcell's `silicon connect` must mint an Accounts SLT (`silicon-accounts login --app remind -q`) for
   `remind login <SLT>`; the CLI refuses `oac_…` tokens locally with a hint (`cutover.md` §5).
 - Production sign-in setup needs `device_flow` and `public_client` (`cutover.md` §5).
+
+## 2026-10-10 — Stage 3: packaging, CI, deployment configuration and documentation
+
+### What this stage did
+
+- **Packaging** (`decisions.md` §14): `packaging/apps.yaml.in` and `scripts/package-apps.sh <version> <target>
+  <binary>` (wrapper of `scripts/package_apps.py`) write `dist/apps/remind-<version>-<target>.tar.gz` and `.sha256`,
+  one target per archive. They refuse a binary for another OS/CPU, a Linux binary needing a glibc newer than 2.28,
+  wrong answers to the three discovery commands (or `--version` differing from `apps.yaml`, or files left in the empty
+  home), then run `silicon-apps validate`, `pack`, a byte check of the archive and `validate` on the archive.
+  `--check-only` makes the checks without the packer. `scripts/build-release.py` builds and packs the six targets on
+  one Mac. `honeycomb.yaml`, `scripts/package-release.py` and `scripts/build-honeycomb-release.py` are gone.
+- **CI** (§15): `release.yml` keeps the six native builds and tests, checks each binary on its own runner
+  (`--check-only`, discovery required), packs every target once on Linux with `silicon-apps-cli@0.2.0`, uploads
+  `remind-silicon-apps-release` with `SHA256SUMS`; tag = CLI version; nothing published. `ci.yml`: PostgreSQL 17
+  service for the database tests, client doctest, `sync-package-docs.py --check`, packaging and deploy script checks;
+  the SolidJS web keeps its own job until the web stage. `deployment-builds.yml` builds the web image from
+  `web/Dockerfile` and refuses the SolidJS one.
+- **Deployment configuration** (§16): `standalone.yaml` (live) and `production.yaml` (alternative) read
+  `REMIND_APP_SECRET`/`REMIND_ACCOUNTS_WEBHOOK_SECRET`, set `ACCOUNTS_URL`, `REMIND_APP_ID`, `REMIND_PROOF_ISSUERS`;
+  no IAM, internal-token or Honeycomb setting, no `/internal/honeycomb/*` route, ALB on `/api/*`. `bootstrap-task.py`
+  publishes the new keys. `deploy-web.py` + `install-web.sh` install the Next.js web as `remind-web.service`
+  (contract in §16.2). `README-standalone.md` rewritten; the receipt inspector shows `source`.
+- **Cutover**: `docs/migration/cutover.md` is now one ordered runbook (order relative to other apps, preparation,
+  the window step by step with commands marked "run at cutover", checks, rollback, Silicons on the Honeycomb CLI,
+  retirement), keeping every fact the service and CLI stages recorded. New helper
+  `scripts/suggest-identity-links.py` turns a `link-identities` dry run into a mapping for review. `remind-migrate` now
+  logs to standard error so its JSON report can be redirected (it was mixed with production's JSON log lines).
+- **Documentation** (§17): README, `API_DOCS.md`, `INTERNAL_API.md`, docs home, website guide, version policy,
+  diagnostics, deployment guide, release guide, `docs/internal-api.md` (service-only routes and operator commands),
+  `docs/install.sh` (Silicon Apps); docs-site reads the contract from `openapi.yaml`, has its own favicon (the old one
+  was the IAM mark), skips `docs/history/` and `docs/migration/`. 21 dated records moved to `docs/history/` with an
+  index; their outbound links point at `88d1986`. Removed `scripts/test-timezone-e2e.py` (IAM fixture) and
+  `scripts/backfill-iam-identities.py` (IAM import). `understanding-proposal.md` gained the testing, login and release
+  paragraphs; root `decisions.md` D-041.
+
+### Commits
+
+8e247f1 Package the CLI for Silicon Apps instead of Honeycomb ·
+e5ce3be Move the IAM and Honeycomb era records to docs/history ·
+f7c090d Configure the production deployment for Silicon Accounts ·
+ed81753 Build Silicon Apps archives in the release workflow ·
+8b96c3e Rewrite the manuals for Silicon Accounts and Silicon Apps ·
+a1277a1 Suggest the cutover identity mapping from a link-identities dry run ·
+6901ed6 Check every deploy and packaging script's syntax in CI ·
+d52b849 Explain the retired contract without naming account groupings ·
+and the commit that records this stage.
+
+### Tests and proofs
+
+All Rust commands with `CARGO_TARGET_DIR=$PWD/target/mig CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+CARGO_BUILD_JOBS=3`.
+
+- `cargo fmt --all -- --check`: clean. `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`:
+  clean (forced recheck of the changed files).
+- `REMIND_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5460/postgres cargo test --locked --workspace --all-targets`:
+  **217 passed, 0 failed** (service lib 150, openapi_contract 7, webhook_client_contract 5, CLI 16 + 9 + 10 + 11,
+  client 4 + 5). `cargo test -p silicon-remind-client --doc`: 1 passed. No leftover `remind_t_%` databases.
+- `python3 scripts/sync-package-docs.py --check`: clean. `npm run build --prefix docs-site`: 13 pages;
+  `npm run check --prefix docs-site`: "Verified 13 pages and 445 local links/assets". In `docs/history/`, 35
+  relative links checked, all resolve except one that was already broken before the move (kept as it was); 15 links
+  point at `88d1986`.
+- Packaging on this Mac: `cargo build --release -p silicon-remind-cli`, then
+  `scripts/package-apps.sh 0.6.0 macos-aarch64 target/mig/release/remind` → archive with exactly `apps.yaml` and
+  `bin/remind`; `silicon-apps validate` on the extracted directory and on the archive: `"valid": true, "errors": []`;
+  from the extracted archive with `env -i HOME=<empty> SILICON_HOME=<empty>`: `remind --help` exit 0 (5.6 KB),
+  `remind accounts --json` exit 0 (`"app_id":"remind"`), `remind login status --json` exit 0
+  (`{"authenticated":false}`), hidden `remind iam --json` the same object; the home stayed empty. Packing the same
+  binary twice gave the same sha256. The bundled manuals (`remind docs <topic>`, 7 topics) and `--help` contain no
+  retired names.
+- Refusals: wrong version, pre-release version, unknown target, Mach-O for linux-x86_64, arm64 Mach-O for
+  macos-x86_64, a native binary answering `{"app_id":"other"}`, a binary writing `~/.remind/state.json` during
+  discovery: each refused with its reason, nothing written. `PACKAGE_DISCOVERY=require` for linux-aarch64 on a Mac:
+  refused.
+- Linux: `cargo zigbuild --release --target {aarch64,x86_64}-unknown-linux-gnu.2.28` (zig 0.15.2, cargo-zigbuild
+  0.23.4) → newest `GLIBC_2.28` (the `.gnu.version_r` parser agrees with a byte scan) → packed and valid; an
+  `x86_64-unknown-linux-gnu.2.39` build needs `GLIBC_2.39` → refused with the zigbuild hint.
+- `python3 scripts/build-release.py --jobs 3` (all six targets: Xcode, zigbuild, cargo-xwin with the cached MSVC SDK)
+  → six valid archives and `SHA256SUMS`; the Linux archives reproduced the earlier hashes byte for byte; macos-x86_64
+  discovery was skipped (no Rosetta), macos-aarch64 discovery passed.
+- Workflows: PyYAML parses all three; actionlint 1.7.12 with shellcheck and pyflakes: clean. Templates: cfn-lint
+  1.57.2 on `standalone.yaml` and `production.yaml`: clean. shellcheck on `package-apps.sh`, `install-web.sh`,
+  `install.sh`: clean.
+- `standalone.yaml`'s embedded bootstrap run against sample secrets (paths redirected): writes the new keys and
+  defaults, drops IAM/Honeycomb/unknown keys, refuses an IAM-shaped secret. `bootstrap-task.py` `main()` with a stub
+  boto3: publishes exactly `REMIND_APP_SECRET`, `REMIND_ACCOUNTS_WEBHOOK_SECRET`, `REMIND_ENCRYPTION_KEYRING` and the
+  two URLs; refuses a missing key. `test_bootstrap_grants.py`: 2 passed. `install-web.sh`'s embedded steps: first run
+  writes `web.env` (0600, secret file removed), a rerun keeps `SESSION_SECRET` and operator values and refreshes
+  `APP_SECRET`, a missing secret is refused; the Caddyfile rewrite replaces the old vhost (other vhosts untouched) or
+  appends it. `docs/install.sh`: missing `silicon-apps` → instructions, exit 1; a stub in `~/.apps/bin` → called with
+  `install remind`. The receipt inspector's query runs on a migrated schema and shows `source`.
+- Cutover re-key path against the shared stack (`<scratchpad>/remind-ship-links-e2e.sh`, database
+  `remind_ship_links`, dropped after): IAM-era rows for `si:remind-cli-s1-1010c` (exists) and
+  `si:remind-ship-gone-1010` (nobody) → `link-identities --file /dev/null --dry-run` lists both as unmatched →
+  `suggest-identity-links.py` writes `si:remind-cli-s1-1010c,L9V` and a `# REVIEW` for the other → dry run with
+  online checks: linked 1, refused [] → apply: committed → rerun: unchanged 1, the unknown one still unmatched. The
+  helper also finds the report behind a production-style JSON log line, and refuses wrong or missing credentials.
+- CI's script step run locally as written: `py_compile`, `bash -n` per script, `package-apps.sh --help`: ok.
+
+### Sweep (`git grep -n -i -E 'iam|honeycomb|org_id|organi[sz]ation|\borg\b|tenant'`, outside `docs/history/`)
+
+Every remaining hit is intentional:
+
+- `UNDERSTANDING.md`: Carbon-only contract; proposed wording is in `understanding-proposal.md`.
+- Root `decisions.md`: append-only history; D-040 and D-041 point to `docs/migration/decisions.md`.
+- `docs/migration/*`: the migration record, allowed to name what changed.
+- `migrations/0001`–`0009`, `testing/migrations/0001`–`0006`: applied migrations; their checksums must not change.
+- `migrations/0010_accounts_identity.sql`, `testing/migrations/0007`, `src/infrastructure/identity_links.rs`,
+  repository/lifecycle/retention/delivery/crypto code and their tests: IAM-era rows, the mapping table
+  (`iam_principal_id`), nullable `org_id` and AAD version 1, which old rows still use.
+- `src/config.rs`: the list of retired variables that are ignored with a warning.
+- `src/api/tests/*`, `tests/openapi_contract.rs`, `crates/cli/src/args.rs`, `crates/cli/tests/discovery.rs`: tests
+  asserting the old names are refused or absent from help; `crates/cli/src/{args,commands,main,state}.rs`: the hidden
+  `iam --json` alias, retired-command answers and the 0.5 state reader (brief: transition aliases).
+- Code comments saying "tenant" (`src/metrics.rs`, `src/api/middleware.rs`, `src/api/handlers/health.rs`,
+  `src/infrastructure/postgres/error.rs`) and a test URL `?tenant=one` (`src/infrastructure/webhook.rs`): generic
+  wording, not an account grouping, never shown to anyone.
+- `scripts/sync-package-docs.py`: names the retired manual copies it deletes. `scripts/suggest-identity-links.py`,
+  `docs/internal-api.md`, `src/bin/remind_migrate.rs`: the mapping file's literal column `iam_principal_id`.
+- `deploy/aws/standalone.yaml`, `production.yaml`, `deploy-standalone.sh`: AWS IAM resources
+  (`AWS::IAM::Role`, `CAPABILITY_NAMED_IAM`), not Silicon IAM.
+- `space-windows/README.md`: Space Station's own organization `tos`, where the windows are published.
+- `frontend/**`: the SolidJS web and its IAM popup, replaced and deleted by the web stages (only its README link to a
+  moved record was updated).
+
+### Left for later stages
+
+- **Web stages**: build `web/Dockerfile` to the runtime contract in `decisions.md` §16.2 (Next.js standalone,
+  `WORKDIR /app`, `$PORT` 3000, non-root, the kit's variables; `APP_API_URL=http://remind-api:8080/api/v2`, so the
+  browser calls the OpenAPI paths) or change `deploy/aws/install-web.sh` with it; `deployment-builds.yml` already
+  builds `web/Dockerfile`. Replace the `web` job in `ci.yml`. Keep `docs/browser.md` in step with the screens
+  (it promises the telemetry preference, sharing and test environments); the web's mark may replace
+  `docs-site/favicon.svg`. Production redirect URI: `https://remind.teamofsilicons.com/auth/callback`.
+- **E2E stage**: `scripts/package-apps.sh` (or `build-release.py --package-only` over `target/apps-release/`, kept
+  from this run) makes the archive for "discovery commands from a packaged archive".
+
+### Gotchas
+
+- `bash -n a b c` checks only `a`; the CI step loops over the scripts.
+- `remind-migrate` logs to standard error now; its standard output is the report alone.
+- `silicon-apps validate`/`pack` are local in 0.2.0, but run them with `--home <empty dir>` and without `APPS_TOKEN`:
+  the CLI on this Mac is signed in to production.
+- This Mac has no Rosetta: macos-x86_64 binaries cannot run here (the packager says so and skips discovery).
+- `/dev/shm` does not exist on macOS; the runbook pipes secrets between processes instead of writing files.
+- The live Caddyfile is bind-mounted: rewrite it in place (keep the inode) or recreate the Caddy container.
+
+### Blocked on (outside this app)
+
+Nothing new. Still outside Remind: the Silicon Interface's switch to proofs and stemcell's `silicon connect` change
+(both in `cutover.md` §0 and §2.9), and the production Silicon Accounts and Silicon Apps steps a Carbon runs.

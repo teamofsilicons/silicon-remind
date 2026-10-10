@@ -370,3 +370,121 @@ retired copies.
 13.2 Rewritten: `docs/cli/README.md`, `docs/client/README.md`, `docs/api/README.md` (contract 2),
 `docs/testing-environments.md`, `docs/webhook-delivery.md` (`silicon_uuid`), `docs/releases.md` (Silicon Apps
 packaging per the brief's convention; the packaging stage owns the scripts it names), both crate READMEs.
+
+## Stage 3: packaging, CI, deployment and documentation (2026-10-10)
+
+### 14. Packaging for Silicon Apps
+
+14.1 **One archive per target**, as the brief's packaging convention says: `dist/apps/remind-<version>-<target>.tar.gz`
+holding `apps.yaml` (only that target) and `bin/remind[.exe]`, rendered from `packaging/apps.yaml.in` by
+`scripts/package-apps.sh <version> <target> <binary>`. The script is a shell wrapper around `scripts/package_apps.py`
+(the repository's scripts are Python; the shape matches Waveform's packager, so the family packs alike). The version
+must equal `crates/cli/Cargo.toml` and be strict `x.y.z`.
+
+14.2 **The glibc 2.28 Linux baseline stays.** Remind's Linux builds have used `cargo zigbuild --target
+<triple>.2.28` since 0.4, which links glibc dynamically but runs on every Linux the fleet uses. Switching to static
+musl (as Waveform did) would be a toolchain change outside this migration. The packager enforces the baseline: it
+reads the binary's `.gnu.version_r` and refuses anything that needs a newer `GLIBC_` version (proven: a 2.28 build is
+accepted, a 2.39 build refused). A static binary also passes.
+
+14.3 **What the packager refuses**, before packing: a binary for another OS or CPU, the glibc rule above, and, when
+the binary can run here, wrong answers to the three discovery commands, a `--version` that differs from `apps.yaml`,
+or any file left in the empty home (the release guide promises the three commands write nothing). Then
+`silicon-apps validate` on the staged directory, `pack`, a byte-for-byte check of the archive's two files and
+`validate` again on the archive.
+
+14.4 **The packer never sees a sign-in.** `silicon-apps validate`/`pack` run with an empty `--home` of their own,
+`SILICON_APPS_NO_DAEMON=1`, and without `APPS_TOKEN`, `APPS_URL`, `ACCOUNTS_URL` or `SILICON_HOME`. Both commands are
+local in silicon-apps 0.2.0 (checked in its source), and this Mac's `silicon-apps` is signed in to production.
+
+14.5 **Check on every runner, pack once on Linux.** The release workflow runs `package-apps.sh --check-only` on each
+target's own runner (format, glibc, discovery commands, natively) and installs `silicon-apps-cli@0.2.0` only on the
+Linux packing job. Building the packer on six runners would compile `aws-lc-sys` and `ring` on Windows and macOS for
+nothing; the discovery commands still run natively everywhere. (Waveform packs on each runner; the archives are the
+same either way, since packing is deterministic.)
+
+14.6 `scripts/build-release.py` replaces the Honeycomb cross-build for local releases: macOS with Xcode, Linux with
+cargo-zigbuild at 2.28, Windows with cargo-xwin, then the packager per target and a `SHA256SUMS`. All six targets
+were built and packed on this Mac.
+
+### 15. CI
+
+15.1 Database tests run against a PostgreSQL 17 service container (`REMIND_TEST_POSTGRES_URL`), the same major
+version as production, instead of a Testcontainers container per test. The client's doctest runs too.
+
+15.2 The SolidJS web keeps its own job until the web stage replaces it: its code is still in the tree and CI should
+test what is there. `deployment-builds.yml` already builds the web image from `web/Dockerfile` and refuses to build
+the SolidJS image, which signs in with the previous identity service and must not be deployed again.
+
+15.3 Workflows were checked with PyYAML and actionlint 1.7.12 (with shellcheck and pyflakes); the CloudFormation
+templates with cfn-lint 1.57.2.
+
+### 16. Deployment configuration
+
+16.1 **Same host, same names** (`apps/remind.md`). The Next.js web replaces the SolidJS web on the EC2 host as
+`remind-web.service` (a new unit and container name, so the switch is visible and the old unit can be re-enabled),
+with `/etc/remind/web.env`. The installer disables `remind-frontend.service` and leaves its env file and encrypted
+session files in place: no data is deleted, and no browser session carries over.
+
+16.2 **The web's runtime contract**, which the web stage builds `web/Dockerfile` to: a Next.js standalone server,
+`WORKDIR /app`, listening on `$PORT` (3000) as a non-root user, the kit's variables (`APP_ID`, `APP_SECRET`,
+`ACCOUNTS_URL`, `APP_API_URL`, `SESSION_SECRET`, `PUBLIC_URL`), a read-only root filesystem with tmpfs `/tmp` and
+`/app/.next/cache`. `APP_API_URL=http://remind-api:8080/api/v2` over the private Docker network, so the browser's
+`/api/<path>` is the OpenAPI document's path (`/schedules`, `/silicons`, `/auth/me`, …). `APP_SECRET` comes from the
+runtime secret's `REMIND_APP_SECRET` on every install (one value for API and web, in the store the app already uses);
+`SESSION_SECRET` is generated on the host once and kept.
+
+16.3 **Runtime secret.** Required: `REMIND_APP_SECRET`, `REMIND_ACCOUNTS_WEBHOOK_SECRET`, `REMIND_ENCRYPTION_KEYRING`
+and the two database URLs; a secret still in the IAM-era shape stops the bootstrap with the missing key's name. The
+templates default `ACCOUNTS_URL` to production, `REMIND_APP_ID` to `remind` and `REMIND_PROOF_ISSUERS` to
+`remind.schedules.read=interface` (the production value of decision 2.3), so a re-provisioned host keeps the Silicon
+Interface working.
+
+16.4 Caddy no longer exposes `/internal/honeycomb/*`; the alternative Fargate load balancer forwards `/api/*` (contract
+2 and the retired-v1 answers) instead of `/api/v1/*`.
+
+16.5 Postmark and Space Station settings, and the telemetry spool mount, were added to the live host by hand and are
+not in the template. They are not IAM or Honeycomb settings, so the template was not changed blind; the standalone
+guide says to carry them over before re-provisioning.
+
+16.6 **The Silicon Accounts webhook URL is set in the window, not before.** IAM delivers to the same URL today, and the
+old service would refuse every Silicon Accounts delivery. The secret is made first (`generate-secret`) and stored; the
+later `PUT` of the URL keeps it.
+
+16.7 **The identity mapping is prepared on a restored copy** of production (dump, restore beside the original,
+migrate, dry run), as the 0.4.0 cutover rehearsed its migration, because `link-identities` needs migration 0010.
+`scripts/suggest-identity-links.py` turns the dry run's `unmatched` list into `id,uuid` lines plus `# REVIEW` comments
+for a Carbon to decide; it only reads from Silicon Accounts.
+
+16.8 **`remind-migrate` logs to standard error** (found while writing the runbook): production logs are JSON lines on
+standard output, and `link-identities … > report.json` captured them with the report. The API and worker still log to
+standard output.
+
+### 17. Documentation
+
+17.1 **History.** Dated release, acceptance, migration and deployment records, and the retired IAM, internal-API and
+Honeycomb lifecycle contracts, moved to `docs/history/` (deployment records under `docs/history/deploy/`). Their links
+out of that folder point at the repository as of `88d1986`, so they keep describing what was true then; one link that
+was already broken before the move was left as it was. The documentation site leaves out `docs/history/` and
+`docs/migration/`; the bundled manuals never listed them.
+
+17.2 `docs/internal-api.md` keeps its name (the root `INTERNAL_API.md` points to it) and now describes what is left
+outside the public API: the Silicon Accounts app webhook, health and metrics, and `remind-migrate`.
+
+17.3 Removed scripts: `test-timezone-e2e.py` ran against a loopback IAM fixture and its in-process replacement
+already exists (API tests against a stub Silicon Accounts with real Ed25519 tokens; CLI tests against stubs; timezone
+behaviour, from IANA validation to DST gaps and folds and the required timezone, in the domain, API and CLI tests);
+`backfill-iam-identities.py` imported IAM bindings and refuses schemas past migration 8. Both are in git history and linked from the history records.
+
+17.4 The documentation site's favicon was the previous identity service's mark (its SVG even said so); it is now
+Lucide's alarm-clock glyph in the Silicon accent colours, with attribution. The web stage may give the web and the docs
+one mark.
+
+17.5 `docs/install.sh` hands over to `silicon-apps install remind` (also finding `$SILICON_HOME/.apps/bin`); it does
+not install Silicon Apps itself, as the old script did not install its manager either.
+
+17.6 `docs/browser.md` describes the Next.js web at product level (Carbon-only, sealed-cookie sessions, read views,
+sharing, test environments, telemetry preference kept for parity); the web stages keep it in step with the screens.
+
+17.7 The root `decisions.md` gets D-041 (distribution through Silicon Apps) pointing here; earlier entries are left
+as written.

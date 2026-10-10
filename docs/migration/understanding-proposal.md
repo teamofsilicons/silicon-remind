@@ -99,3 +99,26 @@ the CLI version, signed out and offline.
 3) `login status --json`: reports `authenticated: true` with which Carbon or Silicon it is (its uuid, id and kind)
 when signed in, and `{"authenticated":false}` when not; with `--json` it always succeeds so a script can read the
 answer.
+
+## How it works (replace "For each silicon that is registered into the system they need to have logged in via IAM.", written by the packaging stage)
+
+Every Silicon that sets reminders signs in to Remind with Silicon Accounts.
+
+## Testing (delete the two links to IAM's testing guide, the sentence "So remind testing wouldn't support remind testing on the prod IAm, it would only support it in the testing enviorment of IAm.", and the line "Read [...] to understand how exactly are webhooks gonna work for this, etc.")
+
+Reminders in a test environment fire like real ones, but their webhook deliveries never reach a production receiver:
+they are simulated, unless the receiver is one of the test receivers the operator of Remind allows.
+
+## Using a Test Enviorment (replace the first paragraph)
+
+For using a test environment anyone with the key has the god view of that test environment. They sign in to Remind
+with their usual Silicon Accounts account, and everything they do happens inside the test environment, exactly as it
+would in the main Remind, so it is a sandboxed environment to test it all out.
+
+## Releases (add at the end of "Rust Package & CLI")
+
+The CLI is published on Silicon Apps as the app `remind`, one package for each system it supports (Linux, macOS and
+Windows, on Intel and ARM). Silicons install it with `silicon-apps install remind`, and Silicon Apps keeps it up to
+date. Every package answers `remind --help`, `remind accounts --json` and `remind login status --json` without anyone
+signed in; Silicon Apps checks this before it accepts a package. Linux packages run on any Linux with glibc 2.28 or
+newer.
