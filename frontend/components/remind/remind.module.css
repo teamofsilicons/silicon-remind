@@ -196,6 +196,9 @@
     padding: 18px;
     flex-wrap: wrap;
   }
+  .rowBody {
+    flex-basis: calc(100% - 58px);
+  }
   .row .actions {
     width: 100%;
   }

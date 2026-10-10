@@ -111,6 +111,7 @@ for (const theme of ["light", "dark"] as const) {
         const dialog = page.getByRole("dialog");
         const modal = await dialog.count() > 0;
         if (modal) {
+          await expect(dialog).toHaveCSS("opacity", "1");
           await page.getByRole("button", { name: "Close dialog", exact: true }).focus();
           const box = await dialog.boundingBox();
           expect(box).not.toBeNull();

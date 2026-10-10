@@ -1,11 +1,11 @@
 "use client";
 import { useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { Button } from "@/components/arc/button/button";
-import { Input } from "@/components/arc/input/input";
-import { Checkbox } from "@/components/arc/checkbox/checkbox";
-import { Dialog, DialogContent } from "@/components/arc/dialog/dialog";
-import { HoldToConfirm } from "@/components/arc/hold-to-confirm/hold-to-confirm";
+import { Button } from "@/components/silicon-ui/button/button";
+import { Input } from "@/components/silicon-ui/input/input";
+import { Checkbox } from "@/components/silicon-ui/checkbox/checkbox";
+import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
+import { HoldToConfirm } from "@/components/silicon-ui/hold-to-confirm/hold-to-confirm";
 import { Page, PageHeader } from "@/components/foundation/layout/layout";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";

@@ -2,10 +2,10 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { Button } from "@/components/arc/button/button";
-import { Input } from "@/components/arc/input/input";
-import { Select } from "@/components/arc/select/select";
-import { HoldToConfirm } from "@/components/arc/hold-to-confirm/hold-to-confirm";
+import { Button } from "@/components/silicon-ui/button/button";
+import { Input } from "@/components/silicon-ui/input/input";
+import { Select } from "@/components/silicon-ui/select/select";
+import { HoldToConfirm } from "@/components/silicon-ui/hold-to-confirm/hold-to-confirm";
 import { Page, PageHeader } from "@/components/foundation/layout/layout";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";

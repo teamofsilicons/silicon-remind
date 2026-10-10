@@ -681,3 +681,31 @@ structured stdout/stderr evidence and exact archive hashes. The verifier is
 `.mig/production-release/remind-native-proof/` and `remind-native-release/`.
 Central Apps publication and authenticated production product checks remain
 separate release steps.
+
+
+## Silicon UI and genuine production acceptance — 2026-10-10
+
+Replaced the copied Arc tree with actual component source from the official
+`https://ui.teamofsilicons.com/r/{name}.json` registry. The local vendor lock
+records upstream response and source hashes, and preserves the MIT notices.
+App branding, numeric spacing/surface tokens, nested Escape, opener focus and
+server-only authentication remain integrated. The account menu's visible initials
+and idle confirmation overlay now satisfy accessible label checks.
+
+Type checking, lint, unit tests (49), production build, the real local
+Accounts/API browser suite (26 checks), and four-theme/viewport screenshots
+(five tests including setup) pass. The screens cover desktop and phone in light
+and dark; Remind phone cards keep the description above their status/actions.
+Private logs live in the Briefcase worktree's `.mig/production-release/` and
+screens in `frontend/test-results/screens/`.
+The CI workflow can build a website-only ARM64 candidate, keeping unchanged CLI
+archives and native verification provenance intact. Deployment is recorded after
+the candidate is verified.
+
+The genuine c:saket production Carbon app session now passes the released CLI
+identity, Silicon listing and reminder listing checks against the fresh Accounts
+store. No existing IAM Silicon was adopted. Accounts delivered the configured
+signed webhook ping. `silicon-remind-client` and `silicon-remind-cli` 0.6.0 passed
+normal Cargo publication verification and are independently visible on crates.io.
+Six exact release archives and verification reports are consolidated for the
+central catalog publisher.

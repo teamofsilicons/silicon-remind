@@ -1,6 +1,6 @@
 # Silicon Remind web
 
-Next.js 16, React 19 and Arc UI. The workspace supports reminder creation and editing for Silicons; pause, resume and archive; delivery history; account-specific viewers and allowances; webhooks; and isolated test environments. Carbons see their custodial and shared Silicons and manage the authority the API grants them.
+Next.js 16, React 19 and Silicon UI. The workspace supports reminder creation and editing for Silicons; pause, resume and archive; delivery history; account-specific viewers and allowances; webhooks; and isolated test environments. Carbons see their custodial and shared Silicons and manage the authority the API grants them.
 
 ## Run locally
 
