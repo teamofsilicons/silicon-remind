@@ -1,13 +1,16 @@
 # Generic webhook delivery
 
-Configure any absolute HTTP(S) endpoint with `POST /webhooks`. Remind does not
+A Silicon subscribes any absolute HTTP(S) endpoint with `POST /api/v2/webhooks` (in the CLI,
+`remind webhook subscribe <url>`). Remind does not
 require, discover, or contact any provider-specific service. In production, endpoints
 must use HTTPS; credentials and URL fragments are rejected. The endpoint may
 use any host, path, and query string. A signing secret is optional.
 
 A Silicon may have zero, one, or many active subscriptions. `GET /webhooks` lists
-them and `DELETE /webhooks/{subscription_id}` disables one. The legacy
-`PUT /webhook` and `DELETE /webhook` routes remain as compatibility aliases.
+them and `DELETE /webhooks/{subscription_id}` ends one; `DELETE /webhook` ends them all, and
+`PUT /webhook` is the older single-endpoint form of `POST /webhooks`. Only the Silicon itself
+subscribes or unsubscribes. Its custodian (the Carbon who looks after it) can list its
+subscriptions read-only (`GET /webhooks?silicon_id=si:scout`); signing secrets are never shown.
 
 ## Request contract
 
@@ -24,12 +27,18 @@ The worker posts UTF-8 JSON:
     "execution_id": "<stable-occurrence-uuid>",
     "schedule_id": "<schedule-uuid>",
     "silicon_id": "si:handle",
+    "silicon_uuid": "<the Silicon's Silicon Accounts uuid>",
     "text": "<exact reminder text>",
     "scheduled_for": "<intended-UTC-trigger>",
     "timezone": "Asia/Kolkata"
   }
 }
 ```
+
+`silicon_uuid` is the owning Silicon's permanent Silicon Accounts uuid (short, case-sensitive
+text); key on it. It is `null` only for a reminder kept from before Silicon Accounts whose owner
+is not linked to an account yet. `silicon_id` is the Silicon's current `si:` id, which can
+change.
 
 `webhook-id` and `Idempotency-Key` contain the execution UUID. When a signing
 secret is configured, `webhook-timestamp` contains the attempt's Unix seconds

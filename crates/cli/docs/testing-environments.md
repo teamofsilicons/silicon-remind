@@ -1,66 +1,116 @@
 # Test a complete reminder workflow
 
-Create or import the `remind` application in an [IAM test environment](https://docs.iam.teamofsilicons.com/api/testing-environments/), then use that application's `app_secret`. Remind discovers the sandbox and starts with empty data. You do not enter an IAM root key or manually pair environments.
+A Remind test environment is an isolated copy of Remind with its own reminders, deliveries,
+subscriptions and logs. It starts empty, behaves like production, and never touches production
+data. You use it with your normal Silicon Accounts sign-in; only the data is separate.
 
-## CLI
+## Create one and use it
 
 ```sh
-remind env use --secret-stdin < /private/remind-app-secret
-remind login '<existing-test-public-id-or-test-SLT>'
-remind login status --json
-remind create --text 'Sandbox check' --cron '*/5 * * * *' --timezone Asia/Kolkata
-remind list --json
-remind env exit
+remind env create release-qa --description 'Manual release checks'
+remind --test <test_id> create --text 'Sandbox check' --cron '*/5 * * * *' --timezone Asia/Kolkata
+remind --test <test_id> list --json
+remind --test <test_id> executions <reminder_id>
+remind --test <test_id> clean
 ```
 
-The secret is prompted securely when `--secret-stdin` is omitted. `env use` persists the selected environment per server. Its name and ID appear on stderr at the end of every command, including failures, without contaminating JSON stdout. `--test <id>` overrides the selection for one invocation; `--production` runs one command with the separately saved production session. `env exit` restores production selection. Invalid secrets return an error and never cause production fallback.
+`env create` runs in production (without `--test`), returns the environment and saves its
+32-character key on this machine. Add `--test <test_id>` to any ordinary command to run it in
+the environment; commands that only make sense there (`test-info`, `clean`) refuse to run
+without it: "This action is only possible inside a test environment."
 
-## Website
+To stay in an environment for a while:
 
-Choose **Use a test environment** on the sign-in screen or in settings. Enter the application's `app_secret`. The banner shows the environment name, signed-in identity, and **Exit testing mode**. Sign in with an IAM test SLT or an existing active test Carbon/Silicon public ID. Exiting restores the production session, or asks you to sign in if it expired. Sessions and secrets are encrypted on the gateway and never returned to browser JavaScript.
+```sh
+remind env use <test_id>       # every later command runs there; stderr names it after each one
+remind --production list       # one command in production meanwhile
+remind env exit                # back to production
+```
+
+## Who can do what
+
+| who | can |
+|---|---|
+| anyone with the key | use the environment and clean it |
+| the owner (the account that created it) | everything: read the key, rotate it, retire and restore the environment |
+| the owner's custodian, when the owner is a Silicon | the same as the owner |
+| the owner's custodian and its other Silicons, or the Silicons a Carbon owner looks after | see it in `remind env list` and read its key |
+
+Inside an environment you are the account you signed in as. Everyone there reads every reminder
+of the environment, and writes still follow ownership: only the Silicon that created a reminder
+changes it, and Carbons only read.
+
+Sharing (`remind share`, `remind allow`) is about real accounts, so it is refused inside a test
+environment.
+
+## Share it
+
+```sh
+remind env key <test_id>                                 # prints the key and saves it here
+remind env import <test_id> --key-stdin < key.txt        # on the other machine; no sign-in needed
+```
+
+`env import` checks that the key belongs to that environment before saving it. Treat a key like
+a password: anyone holding it can use and clean the environment. `remind env rotate <test_id>`
+replaces it; the old key stops working at once. `remind env forget <test_id>` removes the key
+(and the environment's own sign-in, if you made one with `remind --test <test_id> login`) from
+this machine only.
+
+## Limits and lifecycle
+
+- At most 100 reminders at a time. This is a test environment limitation only.
+- An environment with no activity for 15 days is retired automatically. Scheduler polls do not
+  count as activity.
+- A retired environment (automatically or with `remind env delete <test_id>`) can be restored
+  for 30 days with `remind env restore <test_id>`, which issues a new key. After that it is gone.
+- `remind env list --include-deleted` shows retired environments that can still be restored.
+
+## Deliveries
+
+Outbound deliveries are simulated inside test environments by default: the execution completes
+and is recorded without contacting the subscribed URL. A Remind deployment that should deliver
+for real lists exact receiver URLs in `REMIND_TEST_WEBHOOK_URLS`; only those receive requests.
+Use receivers made for testing, never production notification endpoints. Check
+`remind --test <test_id> executions <reminder_id>` to see what happened, and the
+[webhook guide](webhook-delivery.md) for the request format.
 
 ## HTTP API
 
-Send `X-Remind-Test-Key: <app_secret>` on every sandbox API request, including login and refresh. The header name is retained for backward compatibility; the new value is an IAM `ask_...` application secret. Keep the secret out of URLs and command history. This example reads it from a protected curl configuration file:
+Send the key in `X-Remind-Test-Key` together with your normal access token:
 
 ```sh
-curl --config /private/remind-test.curl \
-  https://backend.remind.teamofsilicons.com/api/v1/testing-environment
+curl https://backend.remind.teamofsilicons.com/api/v2/schedules \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "X-Remind-API-Version: 2" \
+  -H "X-Remind-Test-Key: $REMIND_TEST_KEY"
 ```
 
-The configuration file contains `header = "X-Remind-Test-Key: ask_..."` and has mode 0600. Ordinary endpoints additionally require the sandbox user's bearer token and `X-Org-ID`. Login accepts `{"slt":"<test-SLT-or-public-ID>"}` at `/api/v1/auth/login`. Production login accepts only IAM SLTs; unknown/inactive test identities are rejected by IAM.
+`GET /api/v2/testing-environment` and `POST /api/v2/testing-environment/cleanings` work with the
+key alone. Managing environments (`/api/v2/test-environments…`) is a production action: a request
+there carrying the key is refused with `test_key_not_allowed_here`. Keep keys out of URLs and
+shell history (a protected curl config file works well).
 
 ## Rust client
 
 ```rust,no_run
-use silicon_remind_client::{Client, Mutation, Secret};
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let app_secret = Secret::new(std::env::var("REMIND_TEST_APP_SECRET")?);
-let sandbox = Client::new("https://backend.remind.teamofsilicons.com")?
-    .auto_update(false).with_test_environment(app_secret)?;
-let environment = sandbox.current_environment().await?;
-let session = sandbox.login(&Secret::new("existing-test-user"), &Mutation::new()).await?;
-let signed_in = sandbox.with_session(session.access_token, "test-org")?;
-let identity = signed_in.me().await?;
-# Ok(()) }
+use silicon_remind_client::{Client, Secret, models};
+
+async fn example(access_token: Secret, key: Secret) -> silicon_remind_client::Result<()> {
+    let remind = Client::new("https://backend.remind.teamofsilicons.com")?.with_session(access_token)?;
+    let sandbox = remind.with_test_environment(key)?;
+    let environment = sandbox.current_environment().await?;
+    let page = sandbox.reminders(&models::ListSchedules::default()).await?;
+    println!("{}: {} reminders", environment.name, page.items.len());
+    Ok(())
+}
 ```
 
-Selecting an environment clears any bearer on the cloned client. Preserve separate session stores per origin/environment; never attach a production session to a sandbox client.
+`with_test_environment` keeps the access token: inside the environment you are the same account.
 
-## Permissions and lifecycle
+## Environments from before Silicon Accounts
 
-The application secret selects a world, not a god identity. Carbons can read organization reminders. Silicons can change only their own reminders. Every request revalidates the sandbox application with IAM and ordinary operations use live user authorization. Tokens from another sandbox or production fail the environment check.
-
-Honeycomb owns creation, cleanup, key rotation, retirement, and recovery. Remind accepts its separately authenticated lifecycle operations even while IAM test sessions are disabled. Cleanup runs under an exclusive fence, preserves the participant link, and completes only after all sandbox records are cleared. Replays are safe; stale revisions and generations cannot recreate cleared data. IAM remains the runtime authority for shared readiness and permissions. Workers revalidate IAM before admission and before each outbound test dispatch, including retries. There is no 100-reminder quota for discovered worlds. See the [service integration contract](honeycomb-lifecycle.md).
-
-All reminders, subscriptions, execution history, deleted-reminder records, permissions, idempotency records, webhook receipts, contract usage and audit records use a separate schema in a dedicated testing database. Pool caches hold connections only, not authorization. Cleaning resets environment data; production data is untouched.
-
-## Webhooks and effects
-
-IAM webhook signatures are verified over the complete raw envelope before reading its routing hint. The test root key carried by IAM is never persisted or logged. Routing compares its digest against live IAM metadata, then applies the normalized event only in that sandbox. Event receipts and aggregate revisions make duplicates and stale events safe.
-
-Outbound reminder deliveries are **simulated by default in testing**: the execution completes without contacting the configured URL. To exercise a real test receiver, operators set `REMIND_TEST_WEBHOOK_URLS` to a comma-separated list of exact, canonical receiver URLs. Only those URLs receive sandbox requests. Use receivers dedicated to testing, never production email, SMS, payment, or notification endpoints. Production delivery is unchanged. Inspect execution history to verify processing; receipt semantics are explained in the [webhook guide](webhook-delivery.md).
-
-## Legacy manually paired sandboxes
-
-Existing 32-character Remind keys remain accepted. Legacy environments retain their old 100-reminder quota, 15-day inactivity retirement, and 30-day recovery window. `env create/import/key/rotate/restore`, `configure-iam`, and `clean` are legacy administrative commands. They are not needed for `app_secret` selection and cannot administer IAM-discovered worlds. Use Honeycomb lifecycle administration for new sandboxes.
+Environments that the previous identity service's automation created are dormant: never listed,
+never selectable, their data kept. Environments created with a Remind key by an account from
+before Silicon Accounts become visible to that account once the operator links it to its Silicon
+Accounts account. Creating an environment takes only a name and a description; the old key and
+secret fields are refused with `test_key_field_retired`.

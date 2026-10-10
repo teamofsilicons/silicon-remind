@@ -1,249 +1,271 @@
-> For new test environments, start with `remind env use` and the IAM application `app_secret`. The manual pairing commands are maintained only for existing installations. See [the testing guide](../testing-environments.md).
-
 # remind CLI
 
-`remind` is built entirely on `silicon-remind-client`. It stores preferences,
-application sessions, refresh tokens, and test keys under `{home}/.remind/` (default `{home}` is `SILICON_HOME` when set, otherwise `~`). On Unix,
-the directory is mode 0700 and state files are mode 0600. A process lock serializes
-state mutations and refreshes; saves use an atomic rename. State is separated by
-server origin and test-environment UUID so switching servers or sandboxes never
-reuses another context's session.
+`remind` is the command line for Silicon Remind, built only on the public
+[`silicon-remind-client`](../client/README.md) crate. It signs you in with Silicon Accounts, keeps
+that sign-in fresh, and gives every Remind action a command. Every command has `--help` with its
+flags and examples, and `remind --help` shows the whole tree.
 
-## Install and start
+## Install
+
+Silicon Apps installs Remind and keeps it up to date; `remind` never updates itself.
 
 ```sh
-honeycomb install 'remind'
+silicon-apps install remind          # production
+silicon-apps install 'remind>dev'    # development releases
 remind --help
-remind login '<SLT-from-IAM>'
 ```
 
-For local development, use `cargo build -p silicon-remind-cli` and `cargo run -p silicon-remind-cli -- --help`. Release packaging is described in the [release guide](../releases.md).
+From source (Rust 1.98 or newer): `cargo install silicon-remind-cli`, or
+`cargo run -p silicon-remind-cli -- --help` in a checkout.
 
-The default origin is `https://backend.remind.teamofsilicons.com`. For local work:
-
-```sh
-remind config set-url http://127.0.0.1:8086
-remind --no-update health --ready
-remind login <slt> --org tos
-```
-
-`remind login <slt>` accepts the short-lived token supplied by IAM directly.
-`remind auth login` securely prompts for it. Login does not
-start an OTP ceremony or redirect a browser. For an agent/noninteractive shell:
+## Sign in
 
 ```sh
-remind auth login --org tos --slt-stdin < /secure/path/slt.txt
-remind auth whoami
-remind config home /secure/remind-state
-```
-
-The SLT must be for `remind` and bound to the desired organization. A successful
-login verifies the organization before saving the new session. Near expiry, a
-normal authenticated command rotates the saved refresh token before proceeding.
-`auth refresh` requests an explicit rotation; `auth logout` revokes the IAM family
-and then removes local credentials.
-
-## IAM discovery and login status
-
-```sh
-remind --help
-remind iam --json
+remind login                                                       # Carbon: approve a code
+silicon-accounts login --app remind -q | remind login --slt-stdin  # Silicon: a short-lived token
 remind login status --json
-remind --test <test_id> login status --json
+remind logout
 ```
 
-`iam` requires no saved session. It reads the selected backend's public IAM
-configuration and returns `app_id`, `iam_url`, and `iam_environment_id` (null in
-production). Use this app ID when obtaining an SLT from IAM. App secrets and test
-keys are never printed. With `--test`, a saved environment key is required and
-metadata describes the linked IAM sandbox; its IAM app secret must be configured.
+A Carbon's `remind login` prints a code and a link; approve the code on the account site from any
+device and `remind` finishes on its own (the code expires after 10 minutes). A Silicon never sees
+a page: it mints a short-lived token for Remind (single use, two minutes) and hands it over.
+`remind login <slt>`, with the token as the only argument, does the same as `--slt-stdin`. Every
+refusal says why and what to do. [Signing in and who sees what](../accounts.md) covers sign-in in
+depth: refusal codes, refresh, `login status` fields.
 
-`login status` checks the session for the selected server and environment against
-the live `/auth/me` endpoint, refreshing near-expiry tokens first. A successful
-check returns `authenticated: true` alongside `actor_type` (`carbon` or `silicon`),
-`principal_id`, `public_id`, `org_id`, `membership_id`, `org_role`,
-`authorization_epoch`, and `can_manage_reminders`. It never prints access or refresh
-tokens. For example:
+```sh
+remind accounts --json      # no sign-in, no network
+```
 
 ```json
-{"authenticated":true,"principal_id":"01992000-0000-7000-8000-000000000001","actor_type":"silicon","public_id":"si:assistant","org_id":"tos","membership_id":"01992000-0000-7000-8000-000000000002","org_role":"member","authorization_epoch":1,"can_manage_reminders":true}
+{"app_id":"remind","client_id":"remind","accounts_url":"https://accounts.teamofsilicons.com",
+ "api_url":"https://backend.remind.teamofsilicons.com","version":"0.6.0","api_version":2,
+ "sign_in":{"carbon":"remind login","silicon":"silicon-accounts login --app remind -q | remind login --slt-stdin",
+ "status":"remind login status --json"},"docs_url":"https://docs.remind.teamofsilicons.com"}
 ```
 
-No saved session or an HTTP 401 from verification/refresh returns
-`{"authenticated":false}` with exit status 0. A permission denial, unavailable
-server, or malformed response remains an error with a nonzero exit status; it is
-not reported as a successful authentication check. `--account` and `--org` select an already saved account/organization context
-to verify. They cannot retarget an existing credential. `auth whoami` remains available with its existing identity/error output.
+`remind login status --json` always exits 0 and prints `{"authenticated":false}` when nobody is
+signed in; signed in, it prints `uuid`, `id`, `kind`, `display_name`, `expires_at`,
+`refresh_expires_at` and `verified` (Remind accepted the token just now), among others.
 
-## Home directory selection
+## Where state lives
 
-`SILICON_HOME` replaces `HOME` as the default state parent when present. Remind
-reads the optional `.remind/home` pointer from that default parent; an explicit
-`config home` setting stored there takes precedence. Without a pointer, state is
-stored directly in `<SILICON_HOME>/.remind/` or `~/.remind/`. An empty
-`SILICON_HOME` is an error. A missing default directory is created as needed.
+`remind` keeps its settings, sign-ins and test environment keys in `{home}/.remind/`:
+`{home}` is `$SILICON_HOME` when set (an empty value is an error), otherwise `~`.
 
 ```sh
-SILICON_HOME=/private/silicon remind --no-update config show --json
-SILICON_HOME=/private/silicon remind config home /existing/remind-state
+SILICON_HOME=/srv/silicons/scout remind login status --json
+remind config home /srv/remind-state     # an existing directory; later commands use it
+remind config show
 ```
 
-`config home` requires an existing directory and saves its absolute path in the
-selected default parent's `.remind/home`. The next invocation uses the new
-location. It does not move existing sessions or keys. Unsetting `SILICON_HOME`
-selects the normal home and its own pointer again. The Rust client remains
-stateless and does not read or create these CLI state files.
+`config home` writes a pointer in the default home's `.remind/home`; it does not move existing
+sign-ins or keys. On Unix the directory is mode 0700 and its files 0600. `state.json` is
+replaced atomically, and an exclusive lock on `state.lock` is held only while state changes or
+a sign-in is refreshed, never while waiting for a Carbon to approve a code. Reading never
+creates anything: `--help`, `accounts` and `login status` leave a clean home untouched.
 
-## Ordinary reminder workflow
+One sign-in is kept per Remind origin, and one per test environment when you sign in with
+`--test`. The access token is refreshed when less than a minute is left, single-flight across
+processes, and a request Remind refuses with 401 is retried once after a refresh. A state file
+from Remind 0.5 or earlier is read without its sign-ins (sign in again) and archived as
+`state.iam-<time>.json` on the next change; an unreadable `state.json` is moved aside as
+`state.corrupt-<time>.json`.
+
+## Reminders
+
+A Silicon creates and changes its own reminders:
 
 ```sh
-remind webhook subscribe 'https://example.com/reminders'
+remind webhook subscribe https://hook.example/remind --secret-stdin < secret.txt
 remind create --text 'Review the build' --cron '*/15 * * * *' --timezone Asia/Kolkata
+remind create --text 'Release call' --cron '30 16 10 10 *' --kind one-time --timezone UTC
 remind list
-remind get <reminder-id>
-remind edit <reminder-id> --text 'Review the release build'
-remind pause <reminder-id>
-remind resume <reminder-id>
-remind executions <reminder-id>
-remind archive <reminder-id>
+remind get <reminder_id>
+remind edit <reminder_id> --text 'Review the release build'
+remind pause <reminder_id> <reminder_id>
+remind resume <reminder_id> <reminder_id>
+remind executions <reminder_id>
+remind archive <reminder_id>
 remind list --archived
 ```
 
-Use any absolute HTTP(S) URL. `webhook subscribe` prompts securely for an optional
-signing secret; use `--secret-stdin` to supply a protected file through stdin, or
-`--unsigned` when the receiver does not require signatures. `webhook get` never
-reveals the secret.
+- Cron has five fields: minute, hour, day of month, month, day of week.
+- `--timezone` is mandatory on `create` and takes an IANA identifier (`Asia/Kolkata`, `UTC`);
+  a missing, blank or unknown timezone is refused with what to type instead. `edit` keeps the
+  stored timezone unless you pass one.
+- A one-time reminder fires at the first future match, then moves to the archive.
+- `pause` and `resume` take 1 to 100 ids and apply all or nothing.
+- Archived and fired one-time reminders stay readable for 45 days (`list --archived`), then go
+  to the deleted-reminders log.
+- Reminders work without any webhook subscription; they just are not delivered anywhere. See
+  [webhook delivery](../webhook-delivery.md).
 
-Subscriptions are optional and can be managed independently with `webhook
-subscribe`, `webhook list`, and `webhook unsubscribe`. A reminder may be created
-before any receiver is configured.
-
-For a one-time reminder, add `--kind one-time`. It fires at the first future cron
-match and enters the archive automatically. Every creation requires an IANA
-timezone: provide `--timezone Asia/Kolkata` or another IANA identifier. To schedule
-in UTC, provide `--timezone UTC` explicitly. Omitting the flag or passing a blank
-timezone returns an error explaining how to supply it. Invalid IANA identifiers
-are also rejected. Editing an existing reminder may omit `--timezone` to retain
-its stored timezone.
-
-`pause` and `resume` accept up to 100 UUIDs and are atomic. A Carbon cannot create
-or mutate reminders; it can use `silicons`, `list`, `get`, and `executions` for any
-Silicon in its organization. Archiving retains a reminder for 45 days.
-
-## Command reference
-
-| Command | Purpose / useful options |
-| --- | --- |
-| `auth contexts` | List saved account and organization contexts without credentials |
-| `auth login` | Secure SLT prompt; `--org`, `--slt-stdin` |
-| `login <slt>` | Direct IAM SLT login; `--org` must match the SLT; testing actor IDs may select an org |
-| `iam` | Public `app_id`, IAM URL and linked IAM environment; no login needed |
-| `login status` | Live authentication result and Carbon/Silicon identity; supports `--json` |
-| `auth whoami` | Live IAM identity and permissions |
-| `auth refresh` | Rotate current refresh token |
-| `auth logout` | Revoke and forget this session |
-| `create` | Required `--text`, `--cron`, `--timezone`; optional `--kind` |
-| `list` | `--silicon`, `--archived`, `--status`, `--cursor`, `--limit` |
-| `get <id>` | Full reminder details |
-| `edit <id>` | At least one of `--text`, `--cron`, `--timezone`, `--kind` |
-| `pause <id>…` | Atomic pause of 1–100 owned reminders |
-| `resume <id>…` | Atomic resume of 1–100 owned reminders |
-| `archive <id>` | Move an owned reminder to the archive |
-| `executions <id>` | `--cursor`, `--limit`; inspect deliveries/failures |
-| `silicons` | `--after <uuid>`, `--limit`; registered org Silicons |
-| `webhook subscribe <url>` | Secure secret prompt, `--secret-stdin`, or `--unsigned` |
-| `webhook get` | Read endpoint metadata |
-| `webhook disable` | Disable the current Silicon's endpoint |
-| `webhook subscribe <url>` | Add another webhook subscription |
-| `webhook list` | List all active subscriptions |
-| `webhook unsubscribe <id>` | Disable one subscription |
-| `config home <directory>` | Set the local state parent directory; it must already exist |
-| `env create <name>` | `--description`, `--iam-key-file`, `--iam-app-secret-file` |
-| `env list` | `--include-deleted`, `--after <uuid>`, `--limit` |
-| `env get <id>` | Environment metadata and deadlines |
-| `env key <id>` | Retrieve, print and locally save the active key |
-| `env rotate <id>` | Replace the root key and save its successor |
-| `env delete <id>` | Retire; recoverable for 30 days |
-| `env restore <id>` | Restore with a new root key |
-| `env import <id>` | Save a shared key; prompt or `--key-stdin` |
-| `env forget <id>` | Remove this computer's key/session only |
-| `test-info` | Selected sandbox metadata; requires `--test` |
-| `clean` | Clear selected sandbox data; requires `--test` |
-| `config show` | Preferences and counts; no saved secrets |
-| `config set-url <origin>` | Change the saved service origin |
-| `config auto-update off` | Disable the retired updater preference |
-| `update --check` | Show Honeycomb update instructions |
-| `update` | Show Honeycomb update instructions |
-| `health` | Liveness; `--ready` checks database readiness |
-
-Every command accepts `-h`/`--help`. Missing required flags produce the relevant
-usage. Global flags are `--url`, `--account`, `--org`, `--test <id>`, `--json`, `--no-update`, and
-`--idempotency-key`. `REMIND_URL` and `REMIND_ORG` supply URL/org defaults for an
-invocation. They do not move existing sessions between contexts.
-
-`--json` emits machine-readable JSON and suppresses success suggestions. Errors
-go to stderr. Exit status is 0 for success, 2 for CLI/local input failures, 3 for
-API authentication failure, 4 for API forbidden, and 1 for other failures. Use the
-API's machine error code in the error text to distinguish state conflicts.
-
-## Sandboxes
-
-Manage environments with the production session, without `--test`:
+Carbons read. A custodian sees the reminders of every Silicon it looks after:
 
 ```sh
-remind env create release-qa --description 'Manual release verification' \
-  --iam-key-file /secure/path/iam-test-key \
-  --iam-app-secret-file /secure/path/iam-test-app-secret
+remind silicons                       # the Silicons you can read, with relation and count
+remind list --silicon si:scout
+remind executions <reminder_id>
+remind webhook list --silicon si:scout   # read-only
 ```
 
-The returned UUID is your selector; the root key is saved locally. Use ordinary
-commands with the prefix:
+`list --silicon` takes a `si:` id or uuid. Pass `next_cursor` from one page to `--cursor` (or
+`--after` for `silicons` and `env list`) for the next.
+
+## Sharing
 
 ```sh
-remind --test <id> test-info
-remind --test <id> auth login --org test-org
-remind --test <id> webhook set <test-hook-endpoint>
-remind --test <id> create --text 'Sandbox reminder' --cron '* * * * *'
-remind --test <id> list
-remind --test <id> clean
+remind share add c:ada                          # as the Silicon
+remind share add si:ledger --silicon si:scout   # as si:scout's custodian
+remind share list
+remind share remove c:ada
+remind allow add si:scout                       # as si:ledger: let si:scout share with me
+remind allow list
+remind allow remove si:scout
 ```
 
-A teammate can share the root key: `remind env import <id> --key-stdin < key.txt`.
-Import verifies that the key belongs to the requested UUID before saving it.
-The environment key provides sandbox administration; ordinary reminder commands
-still need an IAM test identity. Cleaning clears all Remind data and logs but
-keeps the environment, root key and IAM binding. It does not clean IAM itself.
+A Silicon's reminders are visible to it, its custodian and its custodian's other Silicons.
+Anyone else needs a share. Any Carbon can be granted; a Silicon outside your custodian's
+Silicons must first allow you with `remind allow add`. Removing an allow-list entry also ends
+the shares it made possible. See [who sees what](../accounts.md#who-sees-what).
 
-Legacy manually paired sandboxes support at most 100 retained reminders. It is retired after 15 days
-without successful user activity; scheduler polls do not keep it alive. Deleted
-environments can be recovered for 30 days. See the [full guide](../testing-environments.md).
+## Webhooks
 
-## Updating
+```sh
+remind webhook subscribe https://hook.example/remind     # asks for an optional signing secret
+remind webhook subscribe https://hook.example/remind --secret-stdin < secret.txt
+remind webhook subscribe https://hook.example/remind --unsigned
+remind webhook list
+remind webhook get
+remind webhook unsubscribe <subscription_id>
+remind webhook disable                                   # ends every subscription
+```
 
-Install with `honeycomb install 'remind'` and update with `honeycomb update 'remind'`. Remind never replaces its executable. `remind update` and `remind update --check` return the Honeycomb command without changing files or querying crates.io.
+A Silicon may have no subscription, one, or several; each due reminder is posted to every one.
+The signing secret is never shown again. Without a terminal, `subscribe` needs `--secret-stdin`
+or `--unsigned`.
 
-Remove an older standalone updater with `remind daemon uninstall`; `daemon status` remains available for diagnosis. `daemon install`, `daemon run`, and `config auto-update on` now explain the migration to Honeycomb. `--no-update` and `config auto-update off` remain accepted for older scripts.
+## Test environments
 
-## Sandbox selection, manuals, and reports
+A test environment is an isolated copy of Remind: create one, then add `--test <id>` to any
+command. Inside it you are still the account you signed in as; only the data is separate.
 
-Use `remind env use --secret-stdin < /private/app-secret` to select the IAM application's sandbox without a root key or environment UUID. Sign in with a test SLT or an existing active test public identity. `remind env exit` restores the production session; `--production` overrides selection for one command. Selected test name/ID always appears on stderr, including failures and help. Legacy administrative commands below apply only to manually paired environments; IAM-discovered worlds follow IAM's lifecycle and have no 100-reminder quota.
+```sh
+remind env create release-qa --description 'Manual release checks'   # its key is saved here
+remind --test <test_id> create --text 'Try it' --cron '* * * * *' --timezone UTC
+remind --test <test_id> list
+remind --test <test_id> test-info
+remind --test <test_id> clean            # erase its data; the environment and key stay
+remind env use <test_id>                 # every later command runs there…
+remind --production list                 # …except with --production
+remind env exit                          # back to production
+```
 
-Read bundled manuals with `remind docs cli|api|client|testing|webhooks`. `remind report 'reproduction details' --pr https://github.com/teamofsilicons/silicon-remind/pull/123` queues a bug report email through the public Rust client and backend using your Remind session. `--pr` is optional; output contains the report ID and delivery status. Run `remind report-status <id>` to inspect delivery. Reports in a sandbox are simulated. Production delivery uses Postmark. Include expected and actual behavior, versions, and a request ID when available; exclude secrets.
+Manage environments from production (no `--test`): `env list`, `env get`, `env key` (prints the
+key and saves it here), `env rotate`, `env delete` (recoverable for 30 days), `env restore`.
+Someone who received a key saves it with `remind env import <test_id> --key-stdin < key.txt`
+(checked before saving, no sign-in needed); `env forget` removes a key and that environment's
+own sign-in from this machine only. A test environment holds at most 100 reminders and retires
+after 15 days without activity. While one is selected, every command ends with a line on stderr
+naming it. The [testing guide](../testing-environments.md) has the details.
 
-`env create` needs only a name and IAM root key; `--iam-app-secret-file` is
-optional. To install the test app secret later, use
-`remind --test <id> configure-iam --iam-app-secret-file /private/test-app-secret`.
-Ordinary actions fail with an explicit configuration error until this is done.
+## Settings
 
-Refresh retries persist their operation key before contacting IAM. After an
-uncertain response, run the command again using this same local store; it safely
-replays the pending refresh. Do not copy a rotating session family between machines.
+| setting | flag | environment | saved with |
+|---|---|---|---|
+| Remind API origin | `--url` | `REMIND_URL` | `remind config set-url <url>` |
+| Silicon Accounts origin | `--accounts-url` | `ACCOUNTS_URL` | `remind config set-accounts-url <url>` |
+| home | | `SILICON_HOME` | `remind config home <directory>` |
+| telemetry | | `REMIND_TELEMETRY_ENABLED=false` | `remind config telemetry on\|off` |
+| app id (development only) | | `REMIND_APP_ID` | |
 
-Runtime `--json` failures return `error.code` and `error.message`. Backend errors
-also retain HTTP `status`, `request_id` and optional `retry_after`; local argument
-validation uses `invalid_input`. Clap usage/help errors retain its standard CLI
-help format. Credentials and response bodies are not included in errors.
+The defaults are `https://backend.remind.teamofsilicons.com` and
+`https://accounts.teamofsilicons.com`. Origins must be https; plain http is accepted only for
+this machine (`localhost`, `127.0.0.1`, `::1`), for local development:
+
+```sh
+remind config set-url http://127.0.0.1:4181
+remind config set-accounts-url http://localhost:9590
+remind health --ready
+```
+
+A sign-in keeps the Silicon Accounts origin that issued it: refresh and sign-out go there even
+if you change `ACCOUNTS_URL` later.
+
+## Output, errors and exit status
+
+With `--json`, every result is one JSON object on stdout; progress and warnings go to stderr as
+JSON lines, and suggestions are left out. Without it, results are pretty-printed and suggested
+next steps follow on stderr.
+
+Failures go to stderr. With `--json` they look like this; `hint`, `status`, `request_id` and
+`retry_after` appear when known:
+
+```json
+{"error":{"code":"not_reminder_owner","message":"Only si:scout changes this reminder.","hint":"…","status":403,"request_id":"…"}}
+```
+
+| exit | meaning |
+|---|---|
+| 0 | success (and `login status --json`, signed in or not) |
+| 1 | any other failure: network, conflicts, not found, server errors |
+| 2 | invalid arguments or input, refused before anything was sent |
+| 3 | not signed in, sign-in refused or ended, or HTTP 401 |
+| 4 | signed in but not allowed (HTTP 403) |
+| 130 | stopped with Ctrl-C while waiting for a code to be approved |
+
+Reuse `--idempotency-key <key>` when retrying the exact same `create`, `edit`, `pause`,
+`resume` or `report` after an uncertain failure, so it is applied once.
+
+## Manuals and reports
+
+```sh
+remind docs                 # this guide; also: accounts, api, client, testing, webhooks, releases
+remind report 'Steps, expected result, actual result' --pr https://github.com/teamofsilicons/silicon-remind/pull/123
+remind report-status <report_id>
+```
+
+`report` emails the Remind team using your sign-in (`--pr` is optional); inside a test
+environment it is simulated. Never include secrets.
 
 ## Telemetry
 
-Operational telemetry is on by default. `remind config telemetry off` disables both CLI/daemon events and API request observations for this installation; `on` enables them. `REMIND_TELEMETRY_ENABLED=false` also disables them. No command arguments, credentials, reminder text or webhook URLs are included. Test events remain in the selected sandbox. See [diagnostics](../diagnostics.md).
+Operational telemetry is on by default: after a command that used your sign-in, `remind` sends
+one `command_completed` event (success, duration) through Remind to Space Station. It never
+includes arguments, credentials, reminder text or webhook URLs. `remind config telemetry off`
+or `REMIND_TELEMETRY_ENABLED=false` turns it off, for API request observations too. Events
+inside a test environment stay in that environment. See [diagnostics](../diagnostics.md).
+
+## Command reference
+
+| command | what it does |
+|---|---|
+| `accounts` | Remind's app id and Silicon Accounts origin; offline, no sign-in |
+| `login` | Carbon device sign-in; `--open`, `--label`, `--force` |
+| `login --slt-stdin`, `login --slt <t>`, `login <t>` | Silicon sign-in with a short-lived token |
+| `login status` | who is signed in; `--offline`; with `--json` always exits 0 |
+| `logout` | end this machine's sign-in |
+| `whoami` | the account as Remind sees it |
+| `create` | `--text`, `--cron`, `--timezone` (all required), `--kind recurring\|one-time` |
+| `list` | `--silicon`, `--archived`, `--status active\|paused\|completed`, `--cursor`, `--limit` |
+| `get <id>` | one reminder |
+| `edit <id>` | at least one of `--text`, `--cron`, `--timezone`, `--kind` |
+| `pause <id>…`, `resume <id>…` | 1 to 100 reminders, all or nothing |
+| `archive <id>` | archive one of your reminders |
+| `executions <id>` | delivery history; `--cursor`, `--limit` |
+| `silicons` | the Silicons you can read; `--after`, `--limit` |
+| `share add\|list\|remove` | share a Silicon's reminders; `--silicon` for custodians |
+| `allow add\|list\|remove` | who may share with a Silicon; `--silicon` for custodians |
+| `webhook subscribe\|list\|get\|unsubscribe\|disable` | delivery subscriptions |
+| `env create\|list\|get\|key\|rotate\|delete\|restore` | manage test environments (from production) |
+| `env import\|forget\|use\|exit` | keys and selection on this machine |
+| `test-info`, `clean` | inside a test environment only |
+| `docs [topic]` | offline manuals |
+| `report <message>`, `report-status <id>` | bug reports |
+| `config show\|set-url\|set-accounts-url\|home\|telemetry` | local settings |
+| `health` | API liveness; `--ready` checks its database |
+
+Global flags: `--url`, `--accounts-url`, `--test <id>`, `--production`, `--json`,
+`--idempotency-key`, `-h`/`--help`, `-V`/`--version`.

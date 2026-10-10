@@ -44,7 +44,7 @@ const titles = new Map(
     ]),
   ),
 );
-const navigation = ["README.md","cli/README.md","browser.md","client/README.md","api/README.md","testing-environments.md","webhook-delivery.md","iam.md","version-policy.md","diagnostics.md","deployment.md"];
+const navigation = ["README.md","cli/README.md","browser.md","client/README.md","api/README.md","testing-environments.md","webhook-delivery.md","accounts.md","version-policy.md","diagnostics.md","deployment.md"];
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 const search = [];

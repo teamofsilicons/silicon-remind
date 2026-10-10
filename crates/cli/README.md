@@ -1,36 +1,33 @@
 # silicon-remind-cli
 
-The `remind` command manages durable one-time and recurring reminders through
-Silicon Remind. Requires Rust 1.98 or newer.
+`remind` is the command line for Silicon Remind: durable one-time and recurring reminders for
+Silicons, on five-field cron, in any IANA timezone, delivered to the Silicon's webhook
+subscriptions. It signs in with Silicon Accounts. Requires Rust 1.98 or newer to build.
 
 ```sh
-honeycomb install 'remind'
-remind -h
-remind login <slt> --org tos
+silicon-apps install remind                                        # Silicon Apps keeps it up to date
+remind login                                                       # Carbons: approve a code
+silicon-accounts login --app remind -q | remind login --slt-stdin  # Silicons: a short-lived token
+remind webhook subscribe https://hook.example/remind --unsigned    # optional delivery target
 remind create --text 'Daily check-in' --cron '0 9 * * *' --timezone Asia/Kolkata
+remind list
 ```
 
-Login requests only an IAM short-lived token. Webhook subscriptions are optional;
-add one with `remind webhook subscribe <url>` when outbound delivery is wanted.
-Carbons and other Silicons can view reminders throughout their organization;
-only the owning Silicon can mutate them.
+A Silicon creates and changes its own reminders. Its custodian (the Carbon who looks after it)
+and the custodian's other Silicons can read them, and so can any account it shares them with
+(`remind share add c:ada`). Carbons read; they never write reminders. Every `remind create`
+needs `--timezone` with an IANA identifier; there is no default.
 
-Every `remind create` requires `--timezone` with an IANA identifier, such as
-`--timezone Asia/Kolkata` or `--timezone UTC`. There is no default timezone.
+The discovery commands work signed out, offline and in an empty home:
+`remind --help`, `remind accounts --json` and `remind login status --json`
+(`{"authenticated":false}` when nobody is signed in; it always exits 0 with `--json`).
 
-The default origin is `https://backend.remind.teamofsilicons.com`. Preferences,
-rotating sessions and sandbox keys are stored under `{home}/.remind/` with restrictive
-permissions. Use `--test <id>` before ordinary commands for an isolated sandbox.
+Sign-ins, settings and test environment keys live in `{home}/.remind/` (`{home}` is
+`$SILICON_HOME` when set, otherwise `~`), readable only by you. Add `--test <id>` to any command
+to run it inside a Remind test environment.
 
-Complete API, CLI, client, IAM, webhook and testing guides are included in `docs/`.
-Read the [CLI guide](https://docs.remind.teamofsilicons.com/cli/)
-and run `remind <command> -h` for arguments and examples.
+The complete CLI, sign-in, API, client, webhook and testing guides are bundled: run
+`remind docs <topic>`, or read them at https://docs.remind.teamofsilicons.com. Every command has
+`--help` with examples.
 
-Honeycomb manages updates: `honeycomb update 'remind'`. Remind never replaces its own executable. Remove a legacy standalone updater with `remind daemon uninstall`.
-
-Licensed under Apache-2.0. Backend service source is separately licensed.
-
-Use `remind env use --secret-stdin`, `remind report`, `remind report-status`,
-`remind docs`, and `remind config telemetry on|off` for sandbox discovery,
-bug reporting, offline manuals, and diagnostic preferences. This source bundle
-is version 0.5.0; use a registry version only after it has been published.
+Licensed under Apache-2.0. The Remind service source is licensed separately.

@@ -1,186 +1,234 @@
 # silicon-remind-client
 
-A stateless Rust client for the public Silicon Remind API. It has no dependency
-on the backend crate or database. The CLI is a separate consumer of this package;
-there is no CLI-only server capability.
-
-## Use from a Rust application
-
-While developing in this repository:
+A stateless Rust client for Silicon Remind: sign a Carbon or Silicon in with Silicon Accounts,
+then create and read reminders, share them, manage webhook subscriptions and test environments.
+It has no dependency on the Remind service or its database. The [`remind` CLI](../cli/README.md)
+is built only on this crate, so everything the CLI does, your program can do.
 
 ```toml
 [dependencies]
-silicon-remind-client = { path = "../silicon-remind/crates/client" }
+silicon-remind-client = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Use a registry version only after that version has actually been published.
-Rust 1.98 or newer is required. Constructing the client performs no network call.
-The service URL is a pathless HTTPS origin; literal loopback HTTP is accepted for
-local development. Redirects are not followed, so a redirect cannot move the
-request's credentials to another service. Requests time out after 30 seconds,
-connection establishment after five seconds, and response bodies are bounded to
+Rust 1.98 or newer. Version 0.6 speaks Remind's API contract 2 (`/api/v2`) and signs in with
+Silicon Accounts; 0.5 and earlier spoke the retired contract 1.
+
+## Two parts
+
+- `accounts::SignIn` signs an account in to Remind at Silicon Accounts, as Remind's own public
+  client: no secret, only the app id `remind`. It returns `accounts::Tokens`: an access token
+  (30 minutes), a rotating refresh token and the account. Where you keep them is up to you.
+- `Client` calls the Remind API with an access token (`with_session`), or, for another app
+  reading on an account's behalf, a User verification proof (`with_proof`).
+  `with_test_environment` selects a test environment's data without changing any method.
+
+Both are immutable configuration: every `with_*` method returns a new value, nothing is cached,
+nothing refreshes by itself, and constructing one makes no network call. Origins must be https;
+plain http is accepted only for `localhost`, `127.0.0.1` and `::1`. Redirects are not followed,
+requests time out after 30 seconds (connections after 5), and response bodies are capped at
 16 MiB.
 
+## Sign in a Silicon
+
+A Silicon mints a short-lived token for Remind (`silicon-accounts login --app remind -q`) and
+hands it to your program:
+
 ```rust,no_run
-use silicon_remind_client::{Client, Mutation, Secret, models};
+use silicon_remind_client::{Client, Mutation, Secret, accounts::{SignIn, DEFAULT_ACCOUNTS_URL}, models};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let anonymous = Client::new("https://backend.remind.teamofsilicons.com")?
-        .auto_update(false);
-    // Your caller supplies this single-use SLT from IAM, not a password or OTP.
-    let slt = Secret::new(std::env::var("REMIND_SLT")?);
-    let session = anonymous.login(&slt, &Mutation::new()).await?;
-    let client = anonymous.with_session(session.access_token, "tos")?;
-    let identity = client.me().await?;
-    println!("Signed in as {:?}", identity.public_id);
+    let sign_in = SignIn::new(DEFAULT_ACCOUNTS_URL, "remind")?;
+    let slt = Secret::new(std::env::var("REMIND_SLT")?); // slt_…: single use, 2 minutes
+    let tokens = sign_in.exchange_slt(&slt).await?;
+    println!("signed in as {} ({})", tokens.account.id, tokens.account.uuid);
 
-    let reminder = client.create_reminder(&models::CreateScheduleRequest {
-        text: "Review the build results".to_owned(),
-        kind: models::ScheduleKind::Recurring,
-        cron: "*/15 * * * *".to_owned(),
-        timezone: "UTC".to_owned(),
-    }, &Mutation::new()).await?;
-    println!("Created {}", reminder.id);
+    let remind = Client::new(silicon_remind_client::DEFAULT_URL)?
+        .with_session(tokens.access_token.clone())?;
+    let reminder = remind
+        .create_reminder(
+            &models::CreateScheduleRequest {
+                text: "Review the build results".into(),
+                kind: models::ScheduleKind::Recurring,
+                cron: "*/15 * * * *".into(),
+                timezone: "UTC".into(),
+            },
+            &Mutation::new(),
+        )
+        .await?;
+    println!("created {}", reminder.id);
     Ok(())
 }
 ```
 
-Webhook subscriptions are optional; use `configure_webhook` or
-`subscribe_webhook` when a receiver should receive deliveries. A Carbon may log
-in and read reminders but cannot create one.
+A refused token is an `Error::SignInRefused` whose `refusal` says why:
+`SltAlreadyUsed`, `SltExpired`, `SltWrongApp { app }`, `SltUnknown`, `NotAShortLivedToken`
+(nothing was sent) or `Other`; its `hint` says to mint a fresh one with
+`silicon-accounts login --app remind -q`. Every refused token is used up.
 
-`CreateScheduleRequest.timezone` is mandatory. Set it to an IANA identifier such
-as `"Asia/Kolkata".to_owned()` or `"UTC".to_owned()` explicitly; there is no default.
-Blank or invalid identifiers return an input error. `PatchScheduleRequest` may
-omit the timezone to retain the reminder's existing value.
+## Sign in a Carbon (device flow)
 
-Use `anonymous.iam().await?` before login to discover the server's `app_id` for
-obtaining an IAM SLT. `client.login_status().await?` verifies the attached session
-and returns `LoginStatus { authenticated: true, identity: Some(identity) }` on
-success. HTTP 401 returns an unauthenticated status with no identity; all other
-failures remain errors. The client does not refresh automatically. These methods
-respect `with_test_environment` like other public operations. The CLI's
-`SILICON_HOME` setting does not affect this stateless package.
+```rust,no_run
+use silicon_remind_client::accounts::{DeviceProgress, SignIn};
+
+async fn carbon(sign_in: &SignIn) -> silicon_remind_client::Result<()> {
+    let device = sign_in.start_device(Some("my tool on build-box")).await?;
+    println!("Open {} and enter {}", device.verification_uri, device.user_code);
+    let tokens = sign_in
+        .wait_for_device(&device, |progress| {
+            if let DeviceProgress::SlowDown { interval } = progress {
+                eprintln!("checking every {interval}s");
+            }
+        })
+        .await?;
+    println!("signed in as {}", tokens.account.id);
+    Ok(())
+}
+```
+
+`wait_for_device` polls as Silicon Accounts allows (`interval`, plus 5 seconds after each
+`slow_down`), retries passing network failures, and ends with `Refusal::DeviceDenied` or
+`Refusal::DeviceExpired` (codes last 10 minutes). Use `poll_device` to drive polling yourself.
+Remind's sign-in setup must have device sign-in on (`Refusal::NotAllowed` otherwise).
+
+## Keep the sign-in fresh, end it
+
+```rust,no_run
+use silicon_remind_client::{Secret, accounts::SignIn};
+
+async fn renew(sign_in: &SignIn, refresh_token: &Secret) -> silicon_remind_client::Result<()> {
+    let tokens = sign_in.refresh(refresh_token).await?; // store tokens.refresh_token BEFORE using it
+    let ended = sign_in.revoke(&tokens.refresh_token).await?; // sign-out; false: it was already over
+    println!("revoked: {ended}");
+    Ok(())
+}
+```
+
+Refresh tokens rotate on every use, and presenting a used one ends the whole sign-in
+(`Refusal::SignInEnded`). Refresh one at a time (the CLI holds a file lock), store the new pair
+before using it, and never retry a refresh that may have reached Silicon Accounts with the same
+token. `Tokens::expires_at` is in Unix seconds by this machine's clock; refresh a little before.
+
+## Read on someone's behalf (other apps)
+
+```rust,no_run
+use silicon_remind_client::{Client, Secret, models};
+
+async fn read_for(proof: Secret) -> silicon_remind_client::Result<()> {
+    let remind = Client::new(silicon_remind_client::DEFAULT_URL)?.with_proof(proof)?; // sap_…
+    let page = remind.reminders(&models::ListSchedules::default()).await?;
+    println!("{} reminders", page.items.len());
+    Ok(())
+}
+```
+
+Remind accepts a User verification proof (`Authorization: Proof sap_…`) issued for receiving app
+`remind` with the scope `remind.schedules.read`, from an app its deployment trusts, on the read
+methods only: `reminders`, `reminder`, `executions`, `silicons` and `me`. See
+[signing in and who sees what](../accounts.md#for-other-apps-reading-for-an-account).
 
 ## State and secrets
 
-`Client` is immutable configuration: `with_session` and `with_test_environment`
-return new clients. It does not save credentials, refresh tokens automatically,
-cache IAM authority, or select a user's organization for them. Store session
-state in the embedding application. Clone the returned `Session` if both your
-state store and a constructed client need its access token.
+`Secret` hides its value from `Debug` output and gives it out only through `expose()`. Its
+`Serialize` deliberately writes the value (request bodies, your own secure storage); never
+serialize tokens into ordinary logs. Inside a test environment you stay the account you signed
+in as: `with_test_environment` keeps the credential and only adds the key.
 
-`Secret` redacts `Debug` output and exposes its value only through `expose()`.
-Its `Serialize` implementation deliberately emits the value for requests and
-caller-owned secure persistence. Do not serialize sessions into ordinary logs.
-`Session` contains rotating access/refresh tokens, expiry seconds, actor and org.
-After `refresh`, replace both saved tokens atomically. A fresh `Mutation` means a
-new logical exchange; reuse its key when retrying the same exchange.
-
-`Mutation::new()` creates a unique request key. `Mutation::with_key` adopts a
-16–255-character visible ASCII key for retries. Reuse only for identical inputs
-on the same operation, actor and environment. The client sends each API call
-once; retry decisions belong to the caller.
+`Mutation::new()` makes a unique idempotency key; `Mutation::with_key` adopts your own (16 to 255
+visible ASCII characters). Reuse the same `Mutation` when retrying the exact same create, edit,
+status change or report after an uncertain failure. The client sends each call once; retrying is
+your decision.
 
 ## Method reference
 
-| Method | Input / result |
+| method | what it does |
 | --- | --- |
-| `health(ready)` | Liveness or readiness `Health` |
-| `iam()` | Public `IamInfo`: app ID, IAM URL and optional IAM sandbox UUID; no session needed |
-| `login_status()` | `LoginStatus` with verified identity, or `authenticated: false` for HTTP 401 |
-| `login(slt, mutation)` | `Session` from IAM SLT |
-| `refresh(refresh_token, mutation)` | Successor `Session` |
-| `logout(token, mutation)` | Revocation; refresh token revokes its family |
-| `me()` | Current `Identity` |
-| `create_reminder(input, mutation)` | `CreateScheduleRequest` → `ScheduleResponse` |
+| `SignIn::new(accounts_url, app_id)` | sign in to `app_id` (normally `"remind"`) at that Silicon Accounts |
+| `start_device(label)`, `poll_device(&device)`, `wait_for_device(&device, progress)` | Carbon device sign-in |
+| `exchange_slt(&slt)` | Silicon sign-in with a short-lived token |
+| `refresh(&refresh_token)` | rotate the pair |
+| `revoke(&refresh_token)` | sign out; `true` when something was revoked |
+| `Client::new(url)` | client for the Remind API at a pathless origin |
+| `with_session(access_token)`, `with_proof(proof)` | attach a credential |
+| `with_test_environment(key)`, `with_telemetry(on)` | select a test environment; telemetry |
+| `health(ready)`, `versions()` | liveness/readiness; served contracts (no credential needed) |
+| `me()` | the calling account as Remind sees it (`Identity`) |
+| `login_status()` | `LoginStatus`: `authenticated: false` only for HTTP 401 |
+| `create_reminder(input, mutation)` | create a reminder for the signed-in Silicon |
 | `reminders(filters)` | `ListSchedules` → `Page<ScheduleResponse>` |
-| `reminder(id)` | Visible `ScheduleResponse` |
-| `update_reminder(id, patch, mutation)` | Partial replacement → updated reminder |
-| `set_status(ids, status, mutation)` | Atomic pause/resume → `StatusBatch` |
-| `archive_reminder(id)` | Archive owned reminder |
-| `executions(id, paging)` | `Page<ExecutionResponse>` |
-| `configure_webhook(destination)` | Owner endpoint and signing secret → receipt |
-| `webhook()` | Configured URL and version, without secret |
-| `disable_webhook()` | Disable owner destination |
-| `subscribe_webhook(destination)` | Add an independent subscription |
-| `webhooks()` | List active subscriptions |
-| `unsubscribe_webhook(id)` | Disable one subscription |
-| `silicons(after, limit)` | `Page<Silicon>` for the selected org |
-| `create_environment(input)` | `EnvironmentCreated` with root key |
-| `environments(include_deleted, after, limit)` | `Page<TestEnvironment>` |
-| `environment(id)` | Environment metadata |
-| `environment_key(id)` | Active root key |
-| `rotate_environment_key(id)` | New root key |
-| `delete_environment(id)` | Begin 30-day recovery window |
-| `restore_environment(id)` | Restore and return fresh key |
-| `current_environment()` | Root-key-only sandbox metadata |
-| `configure_environment_iam(&secret)` | Install/rotate a sandbox's IAM test app secret |
-| `clean_environment()` | Root-key-only clear of the selected sandbox |
+| `reminder(id)` | one reminder you can read |
+| `update_reminder(id, patch, mutation)` | change text, cron, timezone, kind or status |
+| `set_status(ids, status, mutation)` | pause or resume 1 to 100 reminders, all or nothing |
+| `archive_reminder(id)` | archive one of your reminders (45 days) |
+| `executions(id, paging)` | delivery history |
+| `silicons(after, limit)` | `Page<VisibleSilicon>`: the Silicons you can read, with `relation` |
+| `viewers()`, `grant_viewer(target)`, `revoke_viewer(account, silicon)` | sharing (viewer grants) |
+| `allowed_accounts(silicon)`, `allow_account(target)`, `disallow_account(account, silicon)` | a Silicon's allow-list |
+| `subscribe_webhook(destination)`, `webhooks(silicon)`, `unsubscribe_webhook(id)` | delivery subscriptions |
+| `configure_webhook(destination)`, `webhook()`, `disable_webhook()` | older single-endpoint forms |
+| `create_environment(input)`, `environments(..)`, `environment(id)` | test environments (from production) |
+| `environment_key(id)`, `rotate_environment_key(id)`, `delete_environment(id)`, `restore_environment(id)` | keys and lifecycle |
+| `current_environment()`, `clean_environment()` | inside a test environment, by key alone |
+| `report(input, mutation)`, `report_status(id)` | bug reports |
+| `track(event)` | one best-effort telemetry event (never fails the caller) |
 
-`ListSchedules::default()` selects current reminders. Set `section` to Archived
-for retained history. A page's `next_cursor` is opaque; pass it unchanged with
-the same filters into the next call. The execution API uses the same cursor/limit
-pattern. Environment and Silicon directory pages use UUID `after` cursors.
+Accounts are `AccountRef { uuid, id, kind }`: key on `uuid` (short, case-sensitive text such as
+`zQo`, never an RFC 4122 UUID) and show `id` (`c:ada`, `si:scout`), which can change. A reminder
+has `owner`; `silicon_id` is the owner's current id. `AccountTarget { id, silicon_id }` names
+another account by `c:`/`si:` id or uuid, and, for a custodian, which of its Silicons the request
+is about.
 
-`PatchScheduleRequest` uses `Option` fields. `None` omits a property and retains
-the current value; `Some` replaces it. Clearing required fields is not supported.
-The server enforces cron, timezone, text and lifecycle rules. A single reminder
-can be paused through `update_reminder`; the batch method handles 1–100 UUIDs
-atomically. Archived reminders cannot be edited.
+`ListSchedules::default()` selects current reminders; set `section` to `Archived` for the
+archive. Pass a page's `next_cursor` unchanged, with the same filters, to get the next page.
+`PatchScheduleRequest` fields are `Option`s: `None` keeps the current value.
+`CreateScheduleRequest.timezone` is mandatory (an IANA identifier such as `Asia/Kolkata` or
+`UTC`); a blank one is refused before anything is sent.
 
 ## Test environments
 
 ```rust,no_run
-use silicon_remind_client::{Client, Secret, Mutation, models};
+use silicon_remind_client::{Client, Secret, models};
 
-async fn example() -> silicon_remind_client::Result<()> {
-    let base = Client::new("http://127.0.0.1:8086")?.auto_update(false);
-    let key = Secret::new(std::env::var("REMIND_TEST_APP_SECRET")?);
-    let sandbox = base.with_test_environment(key)?;
-    let environment = sandbox.current_environment().await?;
-    let session = sandbox.login(&Secret::new("slt_from_test_IAM"), &Mutation::new()).await?;
-    let signed_in = sandbox.with_session(session.access_token, "test-org")?;
-    let reminders = signed_in.reminders(&models::ListSchedules::default()).await?;
-    println!("{}: {} reminders", environment.name, reminders.items.len());
+async fn try_it(access_token: Secret, key: Secret) -> silicon_remind_client::Result<()> {
+    let remind = Client::new("http://127.0.0.1:4181")?.with_session(access_token)?;
+    let created = remind
+        .create_environment(&models::CreateEnvironment { name: "release-qa".into(), description: None })
+        .await?;
+    let sandbox = remind.with_test_environment(created.key)?; // same account, isolated data
+    let page = sandbox.reminders(&models::ListSchedules::default()).await?;
+    println!("{}: {} reminders", created.environment.name, page.items.len());
+    let shared = Client::new("http://127.0.0.1:4181")?.with_test_environment(key)?;
+    println!("{}", shared.current_environment().await?.name); // by key alone
     Ok(())
 }
 ```
 
-`with_test_environment` clears any previously attached bearer and organization,
-preventing accidental production credentials from being carried into a sandbox.
-Attach the test session afterward. Environment IDs are selectors for your state
-store; the IAM application app_secret selects its sandbox without a root key.
-Legacy 32-character Remind keys remain accepted.
-Legacy management methods require a production org session and reject a test-scoped
-client locally. `current_environment` and `clean_environment` reject a client
-without a test key locally. All ordinary reminder methods use the same paths.
+Managing environments needs a client without a key (`Error::Invalid` otherwise);
+`current_environment` and `clean_environment` need one. See [testing](../testing-environments.md).
 
 ## Errors
 
-Match `Error::Api { status, code, request_id, retry_after, .. }` for server failures.
-`401` is missing/expired/mismatched authority; `403` is a permission denial; `404`
-also hides other organizations' resources; `409` describes a state or idempotency
-conflict. `test_reminder_limit` applies only to legacy manually paired sandboxes. `Invalid` is local input
-validation, `Transport` means no usable HTTP exchange, `Decode` means an
-incompatible response, and `ResponseTooLarge` bounds memory consumption.
+Every error has `code()`, `message()`, `hint()`, `status()` and `request_id()`, and
+`is_transient()` says whether a later retry may work.
 
-For an ambiguous create/update response, repeat the exact request with the same
-`Mutation`. Do not retry validation errors unchanged. For backpressure, honor
-`retry_after` when supplied and choose a bounded retry policy.
+- `Error::Api` is Remind's own error body `{"error":{"code","message","hint"?,"request_id"}}`
+  with the HTTP status and `retry_after`. 401: no or ended sign-in (`token_revoked`,
+  `token_expired`, `account_deleted`, `token_wrong_audience`…); 403: not allowed
+  (`not_reminder_owner`, `silicon_only`, `not_custodian`…); 404 also hides what you cannot see;
+  409: a state or idempotency conflict; 410 `api_version_retired`: a contract 1 client.
+- `Error::SignInRefused { refusal, message, hint }`: Silicon Accounts refused a sign-in.
+- `Error::Accounts`: any other Silicon Accounts failure, or it could not be reached
+  (`connection_failed`, `request_timeout`).
+- `Error::Invalid` (refused locally), `Error::Transport` (no answer from Remind),
+  `Error::Decode` (an answer this client does not understand), `Error::ResponseTooLarge`.
 
-## Dependency updates
+## Versions, reports and telemetry
 
-The Rust client is a normal, stateless project dependency. Update it explicitly through your project's Cargo manifest and lockfile, then rebuild. API calls never run Cargo, query the package registry, or modify the consuming project. `.auto_update(...)` remains a compatibility no-op. Honeycomb manages the CLI independently.
+`versions()` reads `/api/versions`; every request names contract 2 (`X-Remind-API-Version: 2`).
+See the [version policy](../version-policy.md). `report` and `report_status` send and track a
+bug report. Telemetry is on by default: `with_telemetry(false)` turns off client events and
+Remind's request observations for that client. Events go through the Remind API; no Space
+Station key ships with the client. See [diagnostics](../diagnostics.md).
 
-## Contract discovery and application-selected sandboxes
-
-`client.versions().await?` reads `/api/versions`. Every API request offers wire version 1. `with_test_environment(Secret::new(app_secret))` accepts the IAM sandbox application secret and clears existing bearer authority; call `current_environment()` to discover its ID/name, then login with a test SLT or public identity ID. Ordinary operations enforce that identity’s permissions. See [testing](../testing-environments.md) and [version policy](../version-policy.md).
-
-## Bug reports and telemetry
-
-`client.report(&BugReportRequest { message, pr }, &Mutation::new()).await?` returns a durable receipt. `client.report_status(id).await?` reads your own receipt's current state. Both Carbons and Silicons may report; report limits and normal IAM organization isolation apply.
-
-Telemetry is on by default. Use `client.with_telemetry(false)` to disable SDK and associated server request telemetry. The client stays stateless: events pass through the authenticated Remind API, and the backend uses the official Space Station Rust package. No Space Station key is distributed to consumers. `client.track(&TelemetryEvent { ... }).await` is available to CLI/daemon integrations; it is a bounded best-effort call and never makes the application operation fail. See [diagnostics](../diagnostics.md).
+The crate never updates itself: update it in your `Cargo.toml` and rebuild.
