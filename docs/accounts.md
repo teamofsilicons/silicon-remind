@@ -21,7 +21,7 @@ To sign in to Remind, open https://accounts.teamofsilicons.com/device and enter 
 
     WDJB-MJHT
 
-(Direct link: https://accounts.teamofsilicons.com/device?user_code=WDJB-MJHT)
+(Direct link: https://accounts.teamofsilicons.com/device?code=WDJB-MJHT)
 Waiting for approval; the code expires in 10 minutes (Ctrl-C to cancel).
 ```
 

@@ -80,6 +80,8 @@ Manuals: remind docs <topic>, or https://docs.remind.teamofsilicons.com
 Source: https://github.com/teamofsilicons/silicon-remind
 Rust client: https://crates.io/crates/silicon-remind-client";
 
+const GLOBAL: &str = "Global options";
+
 /// The whole command line.
 #[derive(Parser)]
 #[command(
@@ -93,22 +95,22 @@ Rust client: https://crates.io/crates/silicon-remind-client";
 )]
 pub struct Cli {
     /// Remind API origin for this command (default: the one saved with `remind config set-url`, else https://backend.remind.teamofsilicons.com). Sign-ins are kept per origin.
-    #[arg(long, global = true, env = "REMIND_URL", value_name = "URL")]
+    #[arg(long, global = true, env = "REMIND_URL", value_name = "URL", help_heading = GLOBAL)]
     pub url: Option<String>,
     /// Silicon Accounts origin to sign in with (default: the one saved with `remind config set-accounts-url`, else https://accounts.teamofsilicons.com).
-    #[arg(long, global = true, env = "ACCOUNTS_URL", value_name = "URL")]
+    #[arg(long, global = true, env = "ACCOUNTS_URL", value_name = "URL", help_heading = GLOBAL)]
     pub accounts_url: Option<String>,
     /// Run this command inside a test environment whose key is saved here (remind env key|import <id>).
-    #[arg(long, global = true, value_name = "TEST_ID")]
+    #[arg(long, global = true, value_name = "TEST_ID", help_heading = GLOBAL)]
     pub test: Option<Uuid>,
     /// Run this command in production even when a test environment is selected (remind env use).
-    #[arg(long, global = true, conflicts_with = "test")]
+    #[arg(long, global = true, conflicts_with = "test", help_heading = GLOBAL)]
     pub production: bool,
     /// Print one JSON object on stdout; progress and warnings go to stderr as JSON lines.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = GLOBAL)]
     pub json: bool,
     /// Reuse this key when retrying the exact same create, edit, pause, resume or report.
-    #[arg(long, global = true, value_name = "KEY")]
+    #[arg(long, global = true, value_name = "KEY", help_heading = GLOBAL)]
     pub idempotency_key: Option<String>,
     /// Accepted and ignored: Silicon Apps keeps Remind up to date.
     #[arg(long, global = true, hide = true)]

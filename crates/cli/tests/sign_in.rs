@@ -30,7 +30,7 @@ async fn remind_accepts(remind: &MockServer, access: &str, kind: &str) {
 fn device_start(accounts: &MockServer, expires_in: u64) -> Value {
     json!({"device_code": "sad_secret_device_code", "user_code": "WDJB-MJHT",
         "verification_uri": format!("{}/device", accounts.uri()),
-        "verification_uri_complete": format!("{}/device?user_code=WDJB-MJHT", accounts.uri()),
+        "verification_uri_complete": format!("{}/device?code=WDJB-MJHT", accounts.uri()),
         "expires_in": expires_in, "interval": 1})
 }
 
