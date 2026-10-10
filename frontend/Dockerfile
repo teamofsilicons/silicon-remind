@@ -1,19 +1,18 @@
 # syntax=docker/dockerfile:1.7
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY tsconfig.json vite.config.ts index.html ./
-COPY src ./src
-COPY server ./server
-COPY scripts ./scripts
-COPY public ./public
-RUN npm test && npm run build
+RUN npm install --global pnpm@10.33.0
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY . ./
+RUN pnpm build
 
-FROM node:24-bookworm-slim
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=4330
+FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
-COPY --from=build --chown=10001:10001 /app/dist ./dist
-USER 10001:10001
-EXPOSE 4330
-CMD ["node", "dist/server/node.js"]
+ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0
+COPY --from=build --chown=node:node /app/.next/standalone ./
+COPY --from=build --chown=node:node /app/.next/static ./.next/static
+COPY --from=build --chown=node:node /app/public ./public
+USER node
+EXPOSE 3000
+CMD ["node", "server.js"]

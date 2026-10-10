@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run through SSM as root on the standalone Remind instance (deploy/aws/deploy-web.py sends it).
 #
-# Installs the Next.js web for https://remind.teamofsilicons.com from a digest-pinned image built from web/
+# Installs the Next.js web for https://remind.teamofsilicons.com from a digest-pinned image built from frontend/
 # (Next.js standalone server: WORKDIR /app, listens on $PORT, runs as a non-root user). The web signs Carbons in with
 # Silicon Accounts and keeps each session in a sealed httpOnly cookie, so it needs no session storage; it calls the
 # Remind API over the private `remind` Docker network.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a digest-pinned web image (Next.js, built from web/) on the standalone host through SSM.
+"""Install a digest-pinned web image (Next.js, built from frontend/) on the standalone host through SSM.
 
 Sends install-web.sh to the instance. It reads Remind's Silicon Accounts app secret from the runtime secret, keeps
 the web's session secret, swaps remind-frontend.service for remind-web.service and points the

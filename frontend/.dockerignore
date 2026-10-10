@@ -1,5 +1,11 @@
 node_modules
-.sessions
+.next*
 .env*
-dist
-docs
+!.env.example
+.git
+test-results
+playwright-report
+e2e
+tests
+*.tsbuildinfo
+*.log
