@@ -432,7 +432,9 @@ session files in place: no data is deleted, and no browser session carries over.
 `/app/.next/cache`. `APP_API_URL=http://remind-api:8080/api/v2` over the private Docker network, so the browser's
 `/api/<path>` is the OpenAPI document's path (`/schedules`, `/silicons`, `/auth/me`, …). `APP_SECRET` comes from the
 runtime secret's `REMIND_APP_SECRET` on every install (one value for API and web, in the store the app already uses);
-`SESSION_SECRET` is generated on the host once and kept.
+`SESSION_SECRET` is generated on the host once and kept. The web sets its own Content-Security-Policy per request
+(nonce scripts, `connect-src 'self'`, images from `ACCOUNTS_URL` and Iris), since the browser only ever talks to the
+web's origin; Caddy adds no CSP, and the API host serves JSON only.
 
 16.3 **Runtime secret.** Required: `REMIND_APP_SECRET`, `REMIND_ACCOUNTS_WEBHOOK_SECRET`, `REMIND_ENCRYPTION_KEYRING`
 and the two database URLs; a secret still in the IAM-era shape stops the bootstrap with the missing key's name. The
