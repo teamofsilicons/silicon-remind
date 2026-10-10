@@ -69,7 +69,8 @@ async fn device(ctx: &Ctx, sign_in: &SignIn, args: &LoginArgs) -> anyhow::Result
         && !args.force
         && !stored.ended(now())
     {
-        let mut body = status_json(ctx, stored, false, false, None);
+        let fallback = ctx.test.is_some() && ctx.explicit_test.is_none();
+        let mut body = status_json(ctx, stored, false, fallback, None);
         body["already_signed_in"] = json!(true);
         ctx.out.either(
             &body,
@@ -208,7 +209,7 @@ async fn finish(ctx: &Ctx, sign_in: &SignIn, tokens: Tokens, method: &str) -> an
     }
     ctx.out.either(
         &body,
-        &signed_in_text(ctx, &stored, identity.is_some(), false),
+        &signed_in_text(ctx, &stored, identity.is_some(), fallback),
     )?;
     ctx.out.suggest(&next_steps(&stored));
     Ok(EXIT_OK)
