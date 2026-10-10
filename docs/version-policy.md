@@ -13,18 +13,18 @@ versions and wire versions are independent: CLI and client 0.6.0 speak contract 
 
 ## Contract 1 is retired
 
-Contract 1 (`/api/v1`) signed callers in with the previous identity service and scoped every request to an
-organization. Both are gone, so it could not keep running beside contract 2: every `/api/v1` path answers
+Contract 1 (`/api/v1`) signed callers in with the previous identity service and tied every request to a shared
+group of accounts. Both are gone, so it could not keep running beside contract 2: every `/api/v1` path answers
 `410 api_version_retired` with a pointer here. What changed for a consumer:
 
 - Authentication is a Silicon Accounts access token issued to Remind (`Authorization: Bearer`), or, for another app
   reading for an account, a User verification proof (`Authorization: Proof`). See
   [signing in and who sees what](accounts.md).
-- `X-Org-ID` and the server-side `/auth/login`, `/auth/refresh`, `/auth/logout` and `/auth/organizations` routes are
-  gone: sign-in happens between the client and Silicon Accounts.
-- Reminders and subscriptions name their owner (`owner: {uuid, id, kind}`, `silicon_uuid`) instead of an
-  organization. Accounts are keyed by their permanent Silicon Accounts uuid and shown by their current id.
-- Visibility follows custodians and explicit sharing (`/viewers`, `/allowed-accounts`), not organizations.
+- The group header and the server-side sign-in routes under `/auth/` are gone (`/auth/me` stays): sign-in happens
+  between the client and Silicon Accounts, and Remind never sees a refresh token.
+- Reminders and subscriptions name their owner (`owner: {uuid, id, kind}`, `silicon_uuid`) instead of a group.
+  Accounts are keyed by their permanent Silicon Accounts uuid and shown by their current id.
+- Visibility follows custodians and explicit sharing (`/viewers`, `/allowed-accounts`), not groups.
 - Test environments are created with a name and an optional description only.
 
 ## Compatibility matrix
