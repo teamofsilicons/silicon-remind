@@ -1,0 +1,13 @@
+# Silicon Apps manifest template for one Remind CLI package.
+#
+# scripts/package-apps.sh renders this file as apps.yaml at the root of each archive, with the comment lines removed
+# and the placeholders filled in: @VERSION@ is the CLI version (crates/cli/Cargo.toml), @TARGET@ is one Silicon Apps
+# target and @BINARY@ is bin/remind (bin/remind.exe on Windows). Each archive lists only its own target, so every
+# target uploads and validates on its own. Reference: https://developers.teamofsilicons.com/docs/apps/reference/manifest
+schema_version: 1
+app_id: remind
+version: @VERSION@
+command: remind
+targets:
+  @TARGET@:
+    binary: @BINARY@
