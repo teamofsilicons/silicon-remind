@@ -1,5 +1,8 @@
 name: Build documentation candidate
 on:
+  push:
+    branches: [release/accounts-apps-20261010]
+    paths: [docs-site/**, .github/workflows/docs-build.yml]
   workflow_dispatch:
 permissions:
   contents: read
