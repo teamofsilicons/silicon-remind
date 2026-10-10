@@ -709,3 +709,29 @@ signed webhook ping. `silicon-remind-client` and `silicon-remind-cli` 0.6.0 pass
 normal Cargo publication verification and are independently visible on crates.io.
 Six exact release archives and verification reports are consolidated for the
 central catalog publisher.
+
+
+## Production release completion — 2026-10-10
+
+The Silicon UI website is deployed from `a03b45a447ccac86fbcbbca55f93ebd1ab097b42`, verified ARM64 candidate run
+`38061203799`, immutable image `sha256:39712aae322449c40fa9f9ddd7042e5554ef0d0310111d0da446b5642d5f2d88`. Public website, signed-in workspace,
+account menu, light/dark themes and phone/desktop layouts were checked against the
+actual production service. The CLI-issued genuine Carbon session is wrapped in
+the production BFF cookie format for isolated browser checks; these checks do not
+claim another hosted sign-in. Existing IAM backends and data remain live.
+
+The migration PR merged after all its CI jobs passed as `ab58cfc2c1bb4aa8fde2628063ba812975ffc394`. GitHub release
+[v0.6.0](https://github.com/teamofsilicons/silicon-remind/releases/tag/v0.6.0)
+is public with the exact six native archives, SHA256SUMS, provenance and native
+command reports. GitHub asset digests match the verified bytes. The version tag
+points at the original binary source recorded above, independently of the website
+revision. The public crates listed above are confirmed available.
+
+All owned local app/API/worker/receiver processes, Moto4102, backup PostgreSQL4104,
+and the shared Accounts9589/9590 + PostgreSQL5460 fixture are stopped after final
+regressions. The latest private Moto snapshot retains63objects/2,412,160bytes,
+SHA-256 `e77f63b01ea5ce608534cd487bc289d1380abd8dbfd26d0df62efc02c8c997ad`;
+matching database dumps and exact restart instructions are retained privately.
+Central Apps catalog publication and managed installation are coordinated by the
+root release owner. Final structured evidence is in the workspace-level
+`.migration/live/parallel/remind/release-record.json`.
