@@ -490,3 +490,93 @@ sharing, test environments, telemetry preference kept for parity); the web stage
 
 17.7 The root `decisions.md` gets D-041 (distribution through Silicon Apps) pointing here; earlier entries are left
 as written.
+
+## Stage 4: end to end against Silicon Accounts (2026-10-10)
+
+### 18. The local stack and the end-to-end suite
+
+18.1 **Two scripts, Python behind thin shell wrappers.** `scripts/dev-accounts.sh` and `scripts/dev-accounts-stop.sh`
+(`scripts/dev_accounts.py up|down|restart|status`) run Remind against a local Silicon Accounts stack;
+`scripts/e2e-accounts.sh` (`scripts/e2e_accounts.py`) runs the end-to-end checks. The repository's other scripts are
+Python and MCPort's development script has the same shape, so the family runs alike. Standard library only (Python 3.9
+or newer); CI byte-compiles them, syntax-checks the wrappers and runs both `--help`s.
+
+18.2 **Ports and data.** Remind's block: API 4181, the worker's operational listener 4182 and a delivery receiver 4183
+that answers 200 and records every reminder posted to `http://127.0.0.1:4183/hook` (4180 stays the web's).
+Databases `remind_e2e` and `remind_e2e_testing` on 5460 are kept between runs (`--drop` removes them), so a
+developer's local data survives a restart; every end-to-end run makes new accounts, so leftovers never collide.
+
+18.3 **The service gets an environment of its own**: `PATH`, `HOME`, `TMPDIR`, `LANG` and Remind's settings, telemetry
+off, the Postmark token empty, `NO_COLOR`. Nothing from the developer's shell or a stray `.env` reaches it, so no
+production credential can either. Only loopback Silicon Accounts URLs are accepted.
+
+18.4 **The webhook is borrowed and given back.** `up` saves the URL Remind's app webhook had (on the shared stack, the
+fake apps' receiver), points it at the local API with every update (`events: null`; Remind needs `custodian_change`,
+which is not a default pick), and `down` puts the saved URL back unless someone changed it in between. Saving a URL
+keeps the stored secret, so the service uses the stack file's seeded secret; a secret Silicon Accounts generates is
+kept in `.mig/dev-accounts/webhook-secret` (mode 0600, ignored by git). After every (re)start a test ping proves the
+secret; on a mismatch `up` generates a new one (`POST …/webhook/generate-secret`) and restarts the API.
+
+18.5 **Scenario 1's resource is a test environment.** The contract lets only a Silicon create or change reminders
+(Carbons view), so a Carbon's own writable resource is a test environment: create, list, read, rotate the key
+(update), clean, retire, restore, retire. Its reading of reminders is checked in scenarios 3, 4 and 6, and its
+refusal to create one (`403 silicon_only`) in scenario 1.
+
+18.6 **The stack's email code budget.** Silicon Accounts allows 10 codes per address in 10 minutes, and the mint
+helper's hosted sign-in of a new Carbon spends 3 (sign-up, its own sign-in, the app's). The first Carbon would have
+needed 11, so the sibling Silicon, the suspended one and the deleted one are made with the custodian's own Silicon
+Accounts session (`POST /v1/me/silicons`, what the account site and the mint helper itself call), and the proof from
+an issuer Remind does not allow comes from the second Carbon's `webkit` sign-in. The main Silicon and the outside one
+still come from `mint.mts silicon`, as the stage asks. A per-network refusal (which the stack's janitor clears) is
+retried once after 35 seconds; a per-address one is not.
+
+18.7 **Every scenario also runs alone** (`--only 4`): helpers sign the main Silicon in to Remind first (Silicon
+Accounts sends an app events only about accounts that signed in to it) and make the shared reminder when scenario 2
+did not run. Proven: scenarios 3, 4, 5 and 6 each passed on their own.
+
+18.8 **Beyond the eight scenarios**, because D6 says Remind handles all six Silicon Accounts events, the suite also
+checks live: `account.updated` (a new display name), `membership.signed_out` for a reason other than `app_revoked`
+(the custodian rotates the STK: earlier tokens refused, the CLI's sign-in ends, the new STK signs in), and
+`app_revoked` ignored (one machine's logout leaves the Silicon's other sign-in working);
+`silicon.custodian_changed` (a transfer: the new custodian sees the Silicon, the old custodian and the former sibling
+no longer do); `account.deleted` (`401 account_deleted`, the reminder archived for 45 days, the subscription
+disabled); suspension (nothing fires while access is removed, the overdue occurrence arrives right after the next
+sign-in); four CLI processes meeting one expiring token (all succeed and the sign-in survives, so no refresh token was
+used twice); the Carbon's device
+sign-in refreshing.
+
+18.9 **Remind issues no proofs** (decision 2.4), so scenario 6's issuer half does not apply; the receiver half covers
+writes, a missing scope, another receiving app, revocation (before and after use) and an issuer not allowed.
+
+18.10 **Scenario 7 packs the archive this machine can run** (macos-aarch64) with the packaging stage's script and runs
+the three discovery commands from the extracted archive in an empty home. Linux archives cannot run on this Mac; the
+packaging stage checked their glibc baseline, and Silicon Apps' validation workers run their discovery commands at
+upload.
+
+### 19. Found by the end-to-end run
+
+19.1 **Fixed: accounts first met through a lookup stayed nameless after signing in** (amends 1.7). An account Remind
+first stored from a lookup (shared with by id, named in a `--silicon` filter) got the lookup's time as its read time,
+and a lookup never carries a display name or photo. When that account later signed in, its copy counted as fresh for
+the whole lookup TTL (15 minutes), so it showed without name or photo, for example a Silicon to its custodian in
+`/silicons`. Now the first access token Remind sees for an account it already knew re-reads it at once (lookup and
+user base), whatever the TTL says. An API test covers it, and the suite checks it live (the outside Silicon, met
+through a refused share, shows its name and photo to its custodian once it signed in).
+
+19.2 **Observed and kept, for the Carbon to know:**
+- A proof Remind already verified stays accepted for at most 30 seconds after its revocation (the verification cache
+  of 2.1); measured: refused after 30 s. A proof revoked before Remind ever saw it is refused at once.
+- After a sign-out signal or removed access, a new sign-in must be at least one second newer than the event (1.6: JWT
+  `iat` has no fractions). The suite waits 1.2 s. By 1.6 and 12.6, a Silicon that signs in again within the same
+  second would get `token_refused_by_remind` from `remind login` and succeed on its next attempt (not reproduced
+  live: that timing cannot be hit on purpose against the stack).
+- The CLI keeps the account's id from its sign-in and updates it on every refresh and every `remind login status`;
+  right after an id change, one `sign_in_ended` message can still name the old id. `login status --json` names the
+  new one (checked).
+- Webhook effects (id, custodian, profile, sign-out cutoff) showed in Remind about a second after the change at
+  Silicon Accounts. A token minted before an id change keeps working, and Remind shows the new id.
+- A recurring reminder suspended across one or more occurrences delivers one overdue occurrence (its
+  `scheduled_for` in the past) when the account signs in again, then its next future one, as after worker downtime;
+  it does not deliver every missed slot.
+- Every Silicon Accounts delivery to Remind during the runs was answered 200 (none failed or stayed pending), and the
+  API and worker logged no warning or error.

@@ -468,7 +468,7 @@ def concurrent_refresh(run, home, label):
     after = refresh_prefixes(home)
     run.log(f"$ 4 x remind list --json at once ({label}, token expiring): exits {[r[0] for r in results]}, "
             f"refresh token {mask(before[0]) if before else None} -> {mask(after[0]) if after else None}")
-    run.check(f"four {label} commands at once with an expiring token all succeed, after one refresh",
+    run.check(f"four {label} commands at once with an expiring token all succeed, and the token rotated",
               all(code_ == 0 for code_, _ in results) and before != after, results)
     time.sleep(3)
     exit_code, status, _, _ = run.remind_cli(home, "login", "status", "--json")

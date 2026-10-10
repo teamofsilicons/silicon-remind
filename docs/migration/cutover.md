@@ -132,6 +132,10 @@ The web reads `REMIND_APP_SECRET` from the same secret ([install-web.sh](../../d
 - **Crates**: `silicon-remind-client` 0.6.0, then `silicon-remind-cli` 0.6.0 (the CLI depends on the client, and
   its `cargo package` verification passes only once the client is on crates.io). Publish them in the window (2.8):
   0.6.0 cannot talk to the old service.
+- **End to end, on the release commit**: against a local Silicon Accounts stack,
+  `REMIND_TEST_STACK=<stack file> scripts/e2e-accounts.sh` passes every check (it starts and stops the local service
+  itself; see the README, "Run against a local Silicon Accounts stack"). Keep its `.mig/e2e/<run>/results.json` with
+  the release notes. It never touches production.
 
 ### 1.5 The identity mapping, on a restored copy (run at cutover, the day before)
 

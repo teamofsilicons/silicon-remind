@@ -389,3 +389,137 @@ Every remaining hit is intentional:
 
 Nothing new. Still outside Remind: the Silicon Interface's switch to proofs and stemcell's `silicon connect` change
 (both in `cutover.md` §0 and §2.9), and the production Silicon Accounts and Silicon Apps steps a Carbon runs.
+
+## 2026-10-10 — Stage 4: end to end against Silicon Accounts
+
+### What this stage did
+
+- **`scripts/dev-accounts.sh` / `scripts/dev-accounts-stop.sh`** (`scripts/dev_accounts.py up|down|restart|status`):
+  idempotent local stack against the shared Silicon Accounts stack: databases `remind_e2e` and `remind_e2e_testing`
+  on 5460 (created, migrated), a delivery receiver on 4183, `remind-api` on 4181, `remind-worker` on 4182, Remind's
+  app webhook pointed at `http://127.0.0.1:4181/webhook/` (every update; the previous URL saved and given back by
+  `down`), proven by a test ping after every (re)start. Pids in `.mig/pids`, everything else in `.mig/dev-accounts`
+  (now in `.gitignore`). Decisions §18.1–18.4.
+- **`scripts/e2e-accounts.sh`** (`scripts/e2e_accounts.py`): the eight scenarios of the stage plus every Silicon
+  Accounts event, suspension, concurrent refresh and the Carbon's refresh (decisions §18.5–18.10). 131 checks; each
+  scenario also runs alone (`--only N`); transcripts mask tokens, STKs and test keys.
+- **Bug found and fixed** (decisions §19.1): an account first stored from a lookup (shared with by id, named in a
+  `--silicon` filter) stayed without name and photo for up to 15 minutes after signing in. Its first token now forces
+  a re-read. Regression test `an_account_first_looked_up_gets_its_profile_when_it_signs_in`.
+- README ("Run against a local Silicon Accounts stack"), CI script checks, the cutover runbook's pre-flight
+  (`cutover.md` §1.4: run the suite on the release commit), decisions §18–19.
+
+### Commits
+
+797c378 Read an account's profile at its first sign-in after a lookup ·
+35c8c71 Run Remind and its end-to-end checks against a local Silicon Accounts ·
+9383ab7 Check refreshes and suspension end to end ·
+5f8be15 Keep error codes readable in end-to-end transcripts ·
+and the commit that records this stage.
+
+### Tests
+
+All Rust commands with `CARGO_TARGET_DIR=$PWD/target/mig CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+CARGO_BUILD_JOBS=3`.
+
+- `cargo test -p silicon-remind --lib an_account_first_looked_up` before the fix: **FAILED**
+  (`left: (200, Some(""), Some(""))`, `right: (200, Some("Zed Shaw"), Some("https://example.test/pfp.png"))`); after
+  it: 1 passed.
+- `cargo fmt --all -- --check`: clean. `cargo clippy --locked --workspace --all-targets --all-features -- -D
+  warnings`: clean.
+- `REMIND_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5460/postgres cargo test --locked --workspace
+  --all-targets`: **218 passed, 0 failed** (service lib 151 with the new test, openapi_contract 7,
+  webhook_client_contract 5, CLI 16 + 9 + 10 + 11, client 4 + 5).
+- Scripts: `python3 -m py_compile scripts/*.py deploy/aws/*.py`, `bash -n` on every script CI lists, both `--help`s:
+  ok; parse on Python 3.9.6 too. shellcheck 0.11.0 on the three wrappers, pyflakes on both scripts, actionlint 1.7.7
+  (with shellcheck and pyflakes) on `ci.yml`: clean.
+- `scripts/dev-accounts.sh` twice: the second run started nothing and sent no ping (`"webhook": "already pointed
+  here"`). A restart with `REMIND_DEV_PROOF_ISSUERS='not a pair'` failed in 3.6 s with the service's own error in the
+  message (`invalid environment variable REMIND_PROOF_ISSUERS: …`); `up` recovered and its ping was delivered.
+- `scripts/e2e-accounts.sh --only 3`, `--only 4`, `--only 5`, `--only 6` (each alone, its own accounts): 7, 22, 35
+  and 15 passed, 0 failed.
+- **Final run, from nothing** (`scripts/dev-accounts-stop.sh --drop`, then `REMIND_TEST_STACK=<scratch>/test-stack.json
+  scripts/e2e-accounts.sh`, run `101010125c2`): **131 passed, 0 failed in 147 s**: 1 Carbon on the API 15, 2 Silicon
+  on the CLI 20, 3 device flow 6, 4 circle and sharing 19, 5 webhooks 45, 6 proofs 13, 7 discovery 7, 8 restart 6.
+  Afterwards no process left, no pid file, the webhook back at `http://127.0.0.1:9593/remind/webhooks`, no token
+  pattern in the transcript (`grep -cE 'slt_…{20,}|sar_…|eyJ…|stk-[0-9a-f]{8,}|whsec_…'` = 0).
+- Silicon Accounts' own record of the final run (`GET /v1/apps/remind/webhook/deliveries`): 9 deliveries, every one
+  `delivered` with 200: `account.deleted`, `account.id_changed`, `account.updated`, `silicon.custodian_changed`,
+  `membership.access_removed` ×2, `membership.signed_out` ×2 (`app_revoked`, `stk_rotated`), `ping`; none failed or
+  pending, in that run or any earlier one. The API and worker logs had no warning or error.
+
+### What the final run showed (trimmed from `.mig/e2e/101010125c2/transcript.txt`)
+
+1. Carbon on the API (`mint.mts app-signin --app remind --redirect http://localhost:4180/auth/callback --exchange`):
+   ```
+   GET /api/v2/auth/me → 200 {"kind":"carbon","can_manage_reminders":false,"credential":"access_token",…}
+   POST /api/v2/schedules → 403 silicon_only
+   POST /api/v2/test-environments → 201 {"environment":{"owner":{"id":"c:remind-e2e-c1-…","kind":"carbon"},…},"key":"<test key>"}
+   GET list → listed · GET /{id} → read · key-rotations → new key; old key refused · cleanings (key only) → 204
+   GET /{id} as another Carbon → 404 · DELETE → 204; not listed · restorations → new key · DELETE → 204
+   ```
+2. Silicon on the CLI (fresh `SILICON_HOME`, `env` = PATH, HOME, SILICON_HOME, REMIND_URL, ACCOUNTS_URL only):
+   ```
+   remind login --slt-stdin --json → {"authenticated":true,"kind":"silicon","method":"slt","verified":true,…} exit 0
+   (same token) → {"error":{"code":"slt_already_used",…}} exit 3
+   webhook subscribe http://127.0.0.1:4183/hook --secret-stdin; create ×3 (recurring, one-time due 04:39 UTC, the
+   shared one); list; get; edit; pause; resume; archive → list --archived        all exit 0
+   remind logout --json → {"revoked":true,"signed_out":true,…}; login status --json → {"authenticated":false} exit 0
+   the Silicon's other sign-in still works after that logout (app_revoked ignored) · remind login slt_… → signed in
+   4 × remind list at once with a token expiring in 5 s → all exit 0, token rotated; login status → verified
+   ```
+3. Device flow: `remind login --json` printed `{"event":"device_code","user_code":"…","verification_uri":
+   "http://localhost:9590/device",…}`; `mint.mts approve` → `{"authenticated":true,"kind":"carbon","method":"device",
+   "verified":true,…}`; `remind silicons` → relation `custodian`; `list --silicon`; `pause` → exit 4 `silicon_only`;
+   the device sign-in refreshed when its token ran out.
+4. Circle and sharing: custodian and sibling read (`/silicons` relations `custodian`, `sibling`, `self`); the sibling
+   cannot edit; the unrelated Carbon gets 404 and an empty list until `remind share add c:…` (then relation
+   `shared`), 404 again after `share remove`; the custodian's `POST /viewers` / `DELETE /viewers/{id}?silicon_id=`
+   work the same; `remind share add si:<another custodian's Silicon>` → exit 4 `silicon_not_open`; after that Silicon's
+   `POST /allowed-accounts` the share works; its custodian's `DELETE /allowed-accounts/…` ends the grant (404); the
+   outside Silicon shows its name and photo to its custodian (the fixed bug).
+5. Webhooks: the one-time reminder arrived at 04:39 signed (`webhook-signature: v1,…` verified) with `silicon_uuid`;
+   the suspended Silicon got nothing during a minute, then its overdue occurrence right after signing in again;
+   custodian's `POST /v1/me/silicons/{uuid}/id` → reminders, `/auth/me` (old token) and `remind login status` show
+   the new id; a real replay through Silicon Accounts → delivered 200, one receipt, `duplicate` logged; transfer →
+   new custodian sees it, old one and the former sibling do not; forged / unsigned / 10-minute-old / tampered →
+   `401 webhook_signature_invalid` (nothing recorded); unsigned-event body → `400 webhook_body_invalid`; genuine
+   delivery `ignored`, same `event_id` again `duplicate`; `silicon-accounts login --silicon … && apps remove remind`
+   → old token `401 token_revoked` within 1.0 s, CLI exit 3 `sign_in_ended`, hidden from its custodian, back after
+   signing in; display name change → shown; STK rotation → `token_revoked`, CLI ended, the new STK signs in;
+   `DELETE /v1/me/silicons/{uuid}` → `401 account_deleted`, reminder archived (`purge_after` 45 days), subscription
+   disabled.
+6. Proofs (issuer `interface`, receiver Remind, scope `remind.schedules.read`): `/auth/me` → `"credential":"proof",
+   "issuing_app":"interface"`; schedules, executions, silicons read; POST and `/viewers` → `401 proof_not_accepted`;
+   `Bearer sap_…` → `401 proof_as_bearer`; scope `remind.other` → `403 proof_scope_missing`; `receiving_app:
+   briefcase` → `401 proof_invalid`; revoked before use → `401 proof_invalid` at once; revoked after use → refused
+   after 30 s; issuer `webkit` → `403 proof_issuer_not_allowed`.
+7. Discovery: `cargo build --release -p silicon-remind-cli`; `scripts/package-apps.sh 0.6.0 macos-aarch64 …` →
+   archive with exactly `apps.yaml`, `bin/remind`; from it, empty HOME and SILICON_HOME: `--help` exit 0,
+   `accounts --json` exit 0 with `"app_id":"remind"`, `login status --json` → `{"authenticated":false}` exit 0,
+   nothing written.
+8. Restart (`dev_accounts.py restart`, new pids): the Silicon's CLI, the Carbon's token and the Carbon's CLI sign-in
+   keep working; a delivery made before the restart → `duplicate`; a Silicon Accounts replay after it → delivered
+   200, still one receipt.
+
+### Left for later stages
+
+- **Web stage**: the stack script reserves 4180 for the Next.js web; its BFF can run against `remind-api` on 4181
+  (sign-in redirect `http://localhost:4180/auth/callback` is registered on the stack). Add the web to
+  `dev_accounts.py` and a browser scenario to the suite when it exists.
+- Nothing else in this stage's scope.
+
+### Gotchas
+
+- The stack allows 10 email codes per address in 10 minutes; the mint helper's hosted sign-in of a new Carbon spends
+  3, `silicon`/`approve`/`carbon` one each. Make extra Silicons with the custodian's own session (decisions §18.6).
+- Silicon Accounts sends an app events only about accounts that signed in to it: sign an account in to Remind before
+  changing it if the check depends on the webhook.
+- A new sign-in right after a sign-out signal must be a second newer (1.6); the suite waits 1.2 s.
+- `dev_accounts.py up` does not restart a running service on a rebuilt binary: run `restart` (or `down`, `up`).
+- The service's development log format is coloured unless `NO_COLOR` is set; the script sets it.
+
+### Blocked on (outside this app)
+
+Nothing new. Still outside Remind (`cutover.md` §0 and §2.9): the Silicon Interface's switch to proofs, stemcell's
+`silicon connect` change, and the production Silicon Accounts and Silicon Apps steps a Carbon runs.
