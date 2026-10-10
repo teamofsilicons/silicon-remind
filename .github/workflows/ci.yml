@@ -124,7 +124,7 @@ jobs:
       - name: Check the packaging scripts
         run: |
           python3 -m py_compile scripts/*.py deploy/aws/*.py
-          bash -n scripts/package-apps.sh deploy/aws/deploy-standalone.sh deploy/aws/install-frontend.sh
+          for script in scripts/package-apps.sh deploy/aws/deploy-standalone.sh deploy/aws/install-web.sh docs/install.sh; do bash -n "$script"; done
           scripts/package-apps.sh --help > /dev/null
       - run: npm ci --prefix docs-site
       - run: npm run build --prefix docs-site
