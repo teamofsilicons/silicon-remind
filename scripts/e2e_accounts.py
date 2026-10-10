@@ -439,6 +439,39 @@ def one_time_cron(minutes_ahead=2):
     return when, f"{when.minute} {when.hour} {when.day} {when.month} *"
 
 
+def expire_soon(home):
+    """Makes every saved sign-in's access token expire in 5 s (the CLI refreshes when under 60 s are left);
+    returns the refresh tokens' first characters, to see them rotate."""
+    path = Path(home) / ".remind" / "state.json"
+    saved = json.loads(path.read_text())
+    for sign_in in saved.get("sign_ins", {}).values():
+        sign_in["expires_at"] = int(time.time()) + 5
+    path.write_text(json.dumps(saved))
+    return refresh_prefixes(home)
+
+
+def refresh_prefixes(home):
+    saved = json.loads((Path(home) / ".remind" / "state.json").read_text())
+    return sorted(sign_in["refresh_token"][:12] for sign_in in saved.get("sign_ins", {}).values())
+
+
+def concurrent_refresh(run, home, label):
+    """Four commands at once with an expiring token: one refresh, all succeed, the sign-in survives."""
+    before = expire_soon(home)
+    processes = [subprocess.Popen([run.remind, "list", "--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, env=run.cli_env(home)) for _ in range(4)]
+    results = [(process.wait(timeout=90), process.stderr.read()[-300:]) for process in processes]
+    after = refresh_prefixes(home)
+    run.log(f"$ 4 x remind list --json at once ({label}, token expiring): exits {[r[0] for r in results]}, "
+            f"refresh token {mask(before[0]) if before else None} -> {mask(after[0]) if after else None}")
+    run.check(f"four {label} commands at once with an expiring token all succeed, after one refresh",
+              all(code_ == 0 for code_, _ in results) and before != after, results)
+    time.sleep(3)
+    exit_code, status, _, _ = run.remind_cli(home, "login", "status", "--json")
+    run.check("and the sign-in survives (no refresh token was used twice, which would end it)",
+              exit_code == 0 and (status or {}).get("verified") is True, (exit_code, status))
+
+
 def scenario_2(run, people, state):
     """Silicon on the CLI: a short-lived token sign-in in an empty home, the reminder journey, logout."""
     run.section("2. Silicon on the CLI (short-lived token, fresh SILICON_HOME)")
@@ -520,6 +553,7 @@ def scenario_2(run, people, state):
     exit_code, signed, _, _ = run.remind_cli(home, "login", people.slt("s1"), "--json", label="login slt_… --json")
     run.check("signs in again with the positional form `remind login <slt>` (as the Silicon runtime does)",
               exit_code == 0 and (signed or {}).get("authenticated") is True, (exit_code, signed))
+    concurrent_refresh(run, home, "Silicon")
 
 
 def ensure_s1(run, people, state, cli=False):
@@ -612,6 +646,10 @@ def scenario_3(run, people, state):
     exit_code, again, _, _ = run.remind_cli(home, "login", "--json")
     run.check("remind login while signed in says so and changes nothing",
               exit_code == 0 and (again or {}).get("already_signed_in") is True, (exit_code, again))
+    before = expire_soon(home)
+    exit_code, listed, _, _ = run.remind_cli(home, "silicons", "--json")
+    run.check("the Carbon's device sign-in refreshes when its access token runs out",
+              exit_code == 0 and refresh_prefixes(home) != before, (exit_code, listed))
 
 
 def readable(run, auth, reminder):
@@ -1227,6 +1265,7 @@ def main(argv=None):
             except Exception as error:  # noqa: BLE001  (report it, keep going, still clean up)
                 run.check(f"scenario {number} ran to the end", False, f"{type(error).__name__}: {error}")
         check_one_time_delivery(run, people, state)
+        suspension_check(run, people, state)
     finally:
         summary = {"run": suffix, "scenarios": selected, "passed": len(run.passed), "failed": run.failed,
                    "seconds": round(time.time() - started),
