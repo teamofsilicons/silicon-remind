@@ -3410,7 +3410,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-remind-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3421,24 +3421,26 @@ dependencies = [
  "silicon-remind-client",
  "tempfile",
  "tokio",
+ "url",
  "uuid",
  "wiremock",
 ]
 
 [[package]]
 name = "silicon-remind-client"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "reqwest",
  "secrecy",
- "semver",
  "serde",
  "serde_json",
+ "silicon-accounts-client",
  "thiserror",
  "tokio",
  "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
