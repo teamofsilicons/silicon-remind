@@ -69,12 +69,29 @@ pub async fn apply(
             "The event names an account uuid Remind cannot read.",
         ));
     }
-    // A signed in-flight pre-cutover delivery cannot recreate the retired subject.
-    // Accounts emits fresh reconciliation events under the new UUID at cutover.
-    if let Some(uuid) = subject
-        && identity.is_retired_uuid(uuid).await?
-    {
-        return Ok(EventOutcome::Ignored);
+    // A signed in-flight pre-cutover delivery cannot restore a retired subject
+    // or custodian. Accounts emits fresh state under the new UUID at cutover.
+    let mut identities: Vec<&str> = subject.into_iter().collect();
+    match &event.payload {
+        WebhookPayload::AccountUpdated(data) => {
+            if let Some(account) = &data.account {
+                identities.push(&account.uuid);
+                if let Some(custodian) = &account.custodian {
+                    identities.push(&custodian.uuid);
+                }
+            }
+        }
+        WebhookPayload::CustodianChanged(data) => {
+            if let Some(custodian) = &data.to {
+                identities.push(&custodian.uuid);
+            }
+        }
+        _ => {}
+    }
+    for uuid in identities {
+        if identity.is_retired_uuid(uuid).await? {
+            return Ok(EventOutcome::Ignored);
+        }
     }
     let _: Value = serde_json::from_slice(raw_body)
         .map_err(|_| body_invalid("The signed body is not a JSON object."))?;

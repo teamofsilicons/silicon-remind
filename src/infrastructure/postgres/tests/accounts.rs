@@ -219,6 +219,44 @@ async fn retired_subjects_and_inflight_events_cannot_recreate_the_old_account() 
         .fetch_one(&database.pool)
         .await?;
     assert_eq!(old_rows, 0);
+    let retired_custodian = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO accounts_uuid128_map(old_uuid,new_uuid,kind,mapping_sha256) VALUES('Ada',$1,'carbon',$2)")
+        .bind(&retired_custodian).bind("f".repeat(64)).execute(&database.pool).await?;
+    for (event_id, event_type, data) in [
+        (
+            "old-nested-custodian",
+            "silicon.custodian_changed",
+            serde_json::json!({
+                "uuid":new_uuid,"membership_id":format!("remind:{new_uuid}"),
+                "to":{"uuid":"Ada","id":"c:ada"}
+            }),
+        ),
+        (
+            "old-profile-custodian",
+            "account.updated",
+            serde_json::json!({
+                "uuid":new_uuid,"membership_id":format!("remind:{new_uuid}"),"changed":["custodian"],
+                "account":{"uuid":new_uuid,"membership_id":format!("remind:{new_uuid}"),"kind":"silicon",
+                    "id":"si:scout","display_name":"Scout","pfp_url":"","version":999,
+                    "updated_at":fixture_now().to_rfc3339(),"custodian":{"uuid":"Ada","id":"c:ada"}}
+            }),
+        ),
+    ] {
+        let (event, body) = super::event(event_id, event_type, fixture_now(), &data)?;
+        assert_eq!(
+            apply(&database.identity, None, &event, &body).await?,
+            EventOutcome::Ignored
+        );
+    }
+    let custodian: Option<String> =
+        sqlx::query_scalar("SELECT custodian_uuid FROM accounts WHERE uuid=$1")
+            .bind(&new_uuid)
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(
+        custodian, None,
+        "delayed signed data cannot restore an old custodian"
+    );
     assert!(database.identity.resolve_bearer(&fresh).await.is_ok());
     Ok(())
 }
