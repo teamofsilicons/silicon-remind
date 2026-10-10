@@ -220,6 +220,12 @@ impl IdentityStore {
             return Err(account_deleted());
         }
         let row = self.refresh_if_stale(row, false).await?;
+        if row.status != "active" {
+            return Err(AppError::unauthenticated(
+                "access_removed",
+                "Remind's access ended. Sign in to Remind again before another app can act for you.",
+            ));
+        }
         self.actor_for(
             &row,
             Credential::Proof {
@@ -378,7 +384,80 @@ impl IdentityStore {
     }
 
     /// Builds the actor and its read scope from the cached circle and grants.
+    async fn refresh_related_accounts(&self, row: &AccountRow) -> Result<(), AppError> {
+        let cutoff = Utc::now()
+            - chrono::Duration::from_std(self.lookup_ttl)
+                .map_err(|error| AppError::internal("lookup_ttl", error))?;
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT uuid FROM accounts WHERE kind = 'silicon' AND status <> 'deleted'
+             AND (custodian_uuid = $1 OR ($2::text IS NOT NULL AND (uuid = $1 OR custodian_uuid = $2)))
+             AND (looked_up_at IS NULL OR looked_up_at <= $3)",
+        )
+        .bind(&row.uuid)
+        .bind(&row.custodian_uuid)
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+        for uuid in stale {
+            // Stale custodian permissions fail closed if Accounts cannot answer.
+            self.refresh_authoritative(&uuid).await?;
+        }
+        Ok(())
+    }
+
+    async fn refresh_authoritative(&self, uuid: &str) -> Result<(), AppError> {
+        match self.gateway.lookup(uuid).await.map_err(lookup_error)? {
+            Some(summary) => self.apply_summary(&summary).await?,
+            None => {
+                if let Some(row) = self.find(uuid).await? {
+                    let kind = if row.kind() == Some(ActorKind::Silicon) {
+                        "silicon"
+                    } else {
+                        "carbon"
+                    };
+                    let summary: AccountSummary = serde_json::from_value(serde_json::json!({
+                        "uuid": row.uuid, "kind": kind, "id": "", "status": "deleted"
+                    }))
+                    .map_err(|error| AppError::internal("account_summary", error))?;
+                    self.apply_summary(&summary).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refreshes a bounded batch of stale identities, including accounts that
+    /// have only been linked or used through proofs and receive no app webhook.
+    ///
+    /// # Errors
+    /// Returns database errors; individual lookup failures are retried later.
+    pub async fn refresh_due_accounts(&self, limit: i64) -> Result<(), AppError> {
+        let cutoff = Utc::now()
+            - chrono::Duration::from_std(self.lookup_ttl)
+                .map_err(|error| AppError::internal("lookup_ttl", error))?;
+        let uuids: Vec<String> = sqlx::query_scalar(
+            "SELECT uuid FROM accounts WHERE status <> 'deleted'
+             AND (looked_up_at IS NULL OR looked_up_at <= $1)
+             ORDER BY looked_up_at NULLS FIRST, uuid LIMIT $2",
+        )
+        .bind(cutoff)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        for uuid in uuids {
+            if let Err(error) = self.refresh_authoritative(&uuid).await {
+                tracing::warn!(%uuid, %error, "account refresh will be retried");
+            }
+        }
+        Ok(())
+    }
+
     async fn actor_for(&self, row: &AccountRow, credential: Credential) -> Result<Actor, AppError> {
+        self.refresh_related_accounts(row).await?;
+        let row = self.require_row(&row.uuid).await?;
+        if row.status == "deleted" {
+            return Err(account_deleted());
+        }
         let kind = row.kind().ok_or_else(|| {
             AppError::internal("account_kind", anyhow::anyhow!("account kind is unknown"))
         })?;
@@ -667,6 +746,7 @@ pub(crate) async fn apply_summary(pool: &PgPool, summary: &AccountSummary) -> Re
     let deleted = summary.status == "deleted";
     // A lookup never carries the display name or photo: those come from the
     // user base (`apply_member`) and from `account.updated`.
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO accounts (uuid, kind, public_id, custodian_uuid, custodian_id, status, \
              looked_up_at, id_observed_at, custodian_observed_at) \
@@ -677,7 +757,8 @@ pub(crate) async fn apply_summary(pool: &PgPool, summary: &AccountSummary) -> Re
              custodian_uuid = EXCLUDED.custodian_uuid, custodian_id = EXCLUDED.custodian_id, \
              status = CASE WHEN $6 THEN 'deleted' ELSE accounts.status END, \
              looked_up_at = clock_timestamp(), id_observed_at = clock_timestamp(), \
-             custodian_observed_at = clock_timestamp(), updated_at = clock_timestamp()",
+             custodian_observed_at = clock_timestamp(), updated_at = clock_timestamp() \
+         WHERE accounts.status <> 'deleted'",
     )
     .bind(&summary.uuid)
     .bind(kind)
@@ -685,8 +766,18 @@ pub(crate) async fn apply_summary(pool: &PgPool, summary: &AccountSummary) -> Re
     .bind(custodian.map(|custodian| custodian.uuid.as_str()))
     .bind(custodian.map(|custodian| public_id_or_empty(&custodian.id)))
     .bind(deleted)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    if deleted {
+        let audit = super::postgres::AuditContext {
+            actor_type: super::postgres::ActorType::Application,
+            actor_id: "silicon-accounts".to_owned(),
+            request_id: crate::request_context::current_request_id(),
+        };
+        super::account_events::delete_account(&mut transaction, &summary.uuid, Utc::now(), &audit)
+            .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
 

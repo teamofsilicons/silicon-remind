@@ -84,6 +84,8 @@ struct Inner {
     introspections: Mutex<HashMap<[u8; 32], (bool, Instant)>>,
     proofs: Mutex<ProofCache>,
     lookups: Mutex<LookupState>,
+    proof_budget: Mutex<VecDeque<Instant>>,
+    caller_budgets: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
 
 /// Proof verifications by token digest, with the instant they stop being reused.
@@ -98,6 +100,7 @@ struct CachedJwks {
 struct LookupState {
     window: VecDeque<Instant>,
     failures: HashMap<String, Instant>,
+    missing: HashMap<String, Instant>,
 }
 
 impl AccountsGateway {
@@ -129,6 +132,8 @@ impl AccountsGateway {
                 introspections: Mutex::new(HashMap::new()),
                 proofs: Mutex::new(HashMap::new()),
                 lookups: Mutex::new(LookupState::default()),
+                proof_budget: Mutex::new(VecDeque::new()),
+                caller_budgets: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -213,6 +218,7 @@ impl AccountsGateway {
         {
             return Ok(proof.clone());
         }
+        admit_window(&mut *self.inner.proof_budget.lock().await, 200)?;
         let app = self
             .inner
             .client
@@ -266,6 +272,17 @@ impl AccountsGateway {
         } else {
             format!("uuid:{key}")
         };
+        if self
+            .inner
+            .lookups
+            .lock()
+            .await
+            .missing
+            .get(&budget_key)
+            .is_some_and(|at| at.elapsed() < LOOKUP_FAILURE_BACKOFF)
+        {
+            return Ok(None);
+        }
         self.admit(&budget_key).await?;
         let app = self
             .inner
@@ -278,7 +295,14 @@ impl AccountsGateway {
         };
         match result {
             Ok(summary) => Ok(Some(summary)),
-            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) if error.is_not_found() => {
+                let mut state = self.inner.lookups.lock().await;
+                bound(&mut state.missing, |at| {
+                    at.elapsed() < LOOKUP_FAILURE_BACKOFF
+                });
+                state.missing.insert(budget_key, Instant::now());
+                Ok(None)
+            }
             Err(error) => Err(self.failed(budget_key, &error).await),
         }
     }
@@ -303,6 +327,23 @@ impl AccountsGateway {
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(self.failed(budget_key, &error).await),
         }
+    }
+
+    /// Limits user-selected directory resolutions independently of background refreshes.
+    ///
+    /// # Errors
+    /// Returns rate-limited after 30 resolutions per caller per minute.
+    pub async fn admit_caller_lookup(&self, uuid: &str) -> Result<(), AccountsError> {
+        let mut budgets = self.inner.caller_budgets.lock().await;
+        budgets.retain(|_, window| {
+            window
+                .back()
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        });
+        if budgets.len() >= MAX_CACHE_ENTRIES && !budgets.contains_key(uuid) {
+            return Err(AccountsError::RateLimited);
+        }
+        admit_window(budgets.entry(uuid.to_owned()).or_default(), 30)
     }
 
     /// Admits one read under Remind's per-minute budget, unless the same read
@@ -420,6 +461,21 @@ fn unavailable(error: &ClientError) -> AccountsError {
     AccountsError::Unavailable(format!("{} ({})", error.message(), error.code()))
 }
 
+fn admit_window(window: &mut VecDeque<Instant>, limit: usize) -> Result<(), AccountsError> {
+    let now = Instant::now();
+    while window
+        .front()
+        .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+    {
+        window.pop_front();
+    }
+    if window.len() >= limit {
+        return Err(AccountsError::RateLimited);
+    }
+    window.push_back(now);
+    Ok(())
+}
+
 fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.trim().as_bytes()).into()
 }
@@ -435,5 +491,62 @@ fn bound<K, V>(cache: &mut HashMap<K, V>, keep: impl Fn(&V) -> bool) {
         if cache.len() >= MAX_CACHE_ENTRIES {
             cache.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[tokio::test]
+    async fn lookup_limits_are_isolated_per_caller_and_missing_accounts_are_cached()
+    -> anyhow::Result<()> {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let settings =
+            crate::config::Settings::for_tests(&server.uri(), "postgres://localhost/test")?;
+        let gateway = AccountsGateway::new(&settings.accounts)?;
+        for _ in 0..30 {
+            gateway.admit_caller_lookup("Ada").await?;
+        }
+        assert!(matches!(
+            gateway.admit_caller_lookup("Ada").await,
+            Err(AccountsError::RateLimited)
+        ));
+        gateway.admit_caller_lookup("Ian").await?;
+        Mock::given(method("GET"))
+            .and(path("/v1/accounts/by-id/si:missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(
+                serde_json::json!({"error":{"code":"not_found","message":"Missing"}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(gateway.lookup_by_id("si:missing").await?.is_none());
+        assert!(gateway.lookup_by_id("si:missing").await?.is_none());
+        server.verify().await;
+        Ok(())
+    }
+    #[test]
+    fn windows_reject_at_the_limit_and_recover_after_expiry() -> anyhow::Result<()> {
+        let mut window = VecDeque::new();
+        for _ in 0..200 {
+            admit_window(&mut window, 200)?;
+        }
+        assert!(matches!(
+            admit_window(&mut window, 200),
+            Err(AccountsError::RateLimited)
+        ));
+        window.clear();
+        window.push_back(
+            Instant::now()
+                .checked_sub(Duration::from_secs(61))
+                .ok_or_else(|| anyhow::anyhow!("clock too young"))?,
+        );
+        assert!(admit_window(&mut window, 200).is_ok());
+        assert_eq!(window.len(), 1);
+        Ok(())
     }
 }

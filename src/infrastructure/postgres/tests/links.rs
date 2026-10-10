@@ -290,3 +290,40 @@ async fn online_linking_checks_each_account_with_silicon_accounts() -> anyhow::R
     let _ = legacy;
     Ok(())
 }
+
+#[tokio::test]
+async fn ambiguous_identity_mappings_are_refused_before_any_write() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    let legacy = seed_legacy(&database.pool).await?;
+    for file in [
+        format!("si:scout,Right\n{},Wrong\n", legacy.scout),
+        format!("si:scout,Right\n{},-\n", legacy.scout),
+        "si:scout,Merged\nsi:orphan,Merged\n".to_owned(),
+    ] {
+        let entries = parse_mapping(&file).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        for dry_run in [true, false] {
+            let report =
+                link_identities(&database.pool, None, None, &entries, "regression", dry_run)
+                    .await?;
+            assert!(!report.committed);
+            assert!(!report.refused.is_empty(), "{report:?}");
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity_links")
+                .fetch_one(&database.pool)
+                .await?;
+            assert_eq!(count, 0, "an ambiguous file must change nothing");
+        }
+    }
+    let first = parse_mapping("si:scout,Existing\n").map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert!(
+        link_identities(&database.pool, None, None, &first, "first", false)
+            .await?
+            .committed
+    );
+    let second = parse_mapping("si:orphan,Existing\n").map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert!(
+        !link_identities(&database.pool, None, None, &second, "second", false)
+            .await?
+            .committed
+    );
+    Ok(())
+}

@@ -65,11 +65,11 @@ impl SharingService {
     ) -> Result<(ViewerGrant, bool), AppError> {
         require_access_token(actor)?;
         let owner = self.managed_owner(actor, silicon_id).await?;
-        let viewer = self.existing_account(viewer).await?;
-        if viewer.uuid == owner {
+        let viewer = self.existing_account(actor, viewer).await?;
+        if viewer.uuid == owner || viewer.uuid == actor.uuid {
             return Err(AppError::invalid(
                 "grant_to_self",
-                "A Silicon always reads its own reminders; grant view to another account.",
+                "You already have access to these reminders; grant view to another account.",
             ));
         }
         if viewer.kind() == Some(ActorKind::Silicon) {
@@ -108,7 +108,7 @@ impl SharingService {
     ) -> Result<(), AppError> {
         require_access_token(actor)?;
         let owner = self.managed_owner(actor, silicon_id).await?;
-        let viewer_uuid = self.account_uuid(viewer).await?;
+        let viewer_uuid = self.account_uuid(actor, viewer).await?;
         if sharing::revoke_grant(self.identity.pool(), &owner, &viewer_uuid, &actor.uuid).await? {
             Ok(())
         } else {
@@ -150,8 +150,8 @@ impl SharingService {
     ) -> Result<(Allowance, bool), AppError> {
         require_access_token(actor)?;
         let silicon = self.managed_owner(actor, silicon_id).await?;
-        let allowed = self.existing_account(account).await?;
-        if allowed.uuid == silicon {
+        let allowed = self.existing_account(actor, account).await?;
+        if allowed.uuid == silicon || allowed.uuid == actor.uuid {
             return Err(AppError::invalid(
                 "allow_self",
                 "A Silicon does not need to allow itself.",
@@ -173,7 +173,7 @@ impl SharingService {
     ) -> Result<(), AppError> {
         require_access_token(actor)?;
         let silicon = self.managed_owner(actor, silicon_id).await?;
-        let allowed = self.account_uuid(account).await?;
+        let allowed = self.account_uuid(actor, account).await?;
         let circle = self.identity.circle_of(&silicon).await?;
         if sharing::disallow(
             self.identity.pool(),
@@ -224,6 +224,11 @@ impl SharingService {
             return Ok(owner.account.uuid.clone());
         }
         // The cached id may be stale; ask Silicon Accounts who has it now.
+        self.identity
+            .gateway()
+            .admit_caller_lookup(&actor.uuid)
+            .await
+            .map_err(crate::infrastructure::identity::lookup_error)?;
         if let Some(account) = self.identity.resolve_account(id).await?
             && actor.looks_after(&account.uuid)
         {
@@ -235,7 +240,11 @@ impl SharingService {
         ))
     }
 
-    async fn existing_account(&self, id_or_uuid: &str) -> Result<AccountRow, AppError> {
+    async fn existing_account(
+        &self,
+        actor: &Actor,
+        id_or_uuid: &str,
+    ) -> Result<AccountRow, AppError> {
         if !(crate::domain::is_valid_public_id(id_or_uuid)
             || crate::domain::is_valid_account_uuid(id_or_uuid))
         {
@@ -244,6 +253,11 @@ impl SharingService {
                 "Name the account by its id (c:handle or si:handle) or its Silicon Accounts uuid.",
             ));
         }
+        self.identity
+            .gateway()
+            .admit_caller_lookup(&actor.uuid)
+            .await
+            .map_err(crate::infrastructure::identity::lookup_error)?;
         let account = self
             .identity
             .resolve_account(id_or_uuid)
@@ -265,11 +279,11 @@ impl SharingService {
         Ok(account)
     }
 
-    async fn account_uuid(&self, id_or_uuid: &str) -> Result<String, AppError> {
+    async fn account_uuid(&self, actor: &Actor, id_or_uuid: &str) -> Result<String, AppError> {
         if crate::domain::is_valid_account_uuid(id_or_uuid) {
             return Ok(id_or_uuid.to_owned());
         }
-        Ok(self.existing_account(id_or_uuid).await?.uuid)
+        Ok(self.existing_account(actor, id_or_uuid).await?.uuid)
     }
 }
 

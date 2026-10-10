@@ -437,6 +437,12 @@ impl ScheduleService {
                     .visible_by_id(silicon_id)
                     .map(|owner| owner.account.uuid.clone());
                 if uuid.is_none()
+                    && self
+                        .identity
+                        .gateway()
+                        .admit_caller_lookup(&actor.uuid)
+                        .await
+                        .is_ok()
                     && let Ok(Some(account)) = self.identity.resolve_account(silicon_id).await
                     && actor.visible_by_uuid(&account.uuid).is_some()
                 {
@@ -454,6 +460,11 @@ impl ScheduleService {
                 Ok((Some(keys), None))
             }
             ReadScope::Everything => {
+                self.identity
+                    .gateway()
+                    .admit_caller_lookup(&actor.uuid)
+                    .await
+                    .map_err(crate::infrastructure::identity::lookup_error)?;
                 let keys = match self.identity.resolve_account(silicon_id).await {
                     Ok(Some(account)) => self.identity.keys_of(&account.uuid).await?,
                     _ => Vec::new(),

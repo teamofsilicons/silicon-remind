@@ -27,6 +27,7 @@ use crate::{
 mod authentication;
 mod contract;
 mod proofs;
+mod recovery;
 mod routes;
 mod webhook;
 

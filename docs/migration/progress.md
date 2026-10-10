@@ -528,3 +528,25 @@ CARGO_BUILD_JOBS=3`.
 
 Nothing new. Still outside Remind (`cutover.md` §0 and §2.9): the Silicon Interface's switch to proofs, stemcell's
 `silicon connect` change, and the production Silicon Accounts and Silicon Apps steps a Carbon runs.
+
+## Interrupted review recovery — 2026-10-10
+
+Resolved ambiguous mapping aliases and link/unlink conflicts before any writes, refused many-to-one principal merges
+(including already-linked destinations), and required online target validation for production applies. Suggestions
+are now comments until a Carbon confirms every identity using ownership evidence; a matching handle is insufficient.
+
+Stale custodian permissions are rechecked before building a caller's circle, and a bounded worker sweep refreshes
+accounts that never sign in themselves. Custody changes revoke grants/allowances created by or naming the former
+custodian. Deletion learned by lookup now archives reminders, disables destinations and revokes grants through the
+same cleanup as the webhook; workers retire owned test environments and retry cleanup failures. Late active lookups
+cannot repopulate a deleted profile, and late profile events cannot restore an older custodian. Raw Accounts profile
+payloads are no longer retained in receipts (the digest and deduplication metadata remain; the migration scrubs old
+payloads). Proofs are refused after access removal, malformed proofs are rejected locally, verification has a
+200/minute server budget, and user-selected lookups have 30/minute caller budgets plus negative caching.
+
+Validation: 160 library tests passed on the isolated PostgreSQL 5460 stack, including five new deletion/privacy/proof/
+budget regressions and three sensitive-route/custody API checks. Strict workspace/all-target clippy passed.
+
+Still pending before signoff: shared-open-signup capacity caps, production outbound destination address validation,
+and suspended/deleted owner enforcement inside other owners' test environments. Full Next.js frontend, browser
+journeys, release package verification and cutover evidence also remain. Nothing deployed by this recovery pass.

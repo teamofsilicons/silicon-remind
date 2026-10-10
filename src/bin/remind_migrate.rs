@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use silicon_remind::{
-    config::{MigrationSettings, lookup_settings_from_env},
+    config::{MigrationSettings, RuntimeEnvironment, lookup_settings_from_env},
     infrastructure::{accounts::AccountsGateway, identity_links, postgres},
     telemetry,
 };
@@ -94,6 +94,10 @@ async fn link(
         .map(|accounts| AccountsGateway::new(&accounts))
         .transpose()?;
     if gateway.is_none() {
+        anyhow::ensure!(
+            dry_run || settings.environment != RuntimeEnvironment::Production,
+            "REMIND_APP_SECRET is required to apply identity links in production; verify the destination accounts before changing ownership"
+        );
         tracing::warn!(
             "REMIND_APP_SECRET is not set: linking offline, without checking accounts with Silicon Accounts"
         );

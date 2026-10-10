@@ -164,6 +164,14 @@ pub async fn link_identities(
         ..LinkReport::default()
     };
     let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('remind.identity_links'))")
+        .execute(&mut *transaction)
+        .await?;
+    report.refused = validate_mappings(&mut transaction, entries).await?;
+    if !report.refused.is_empty() {
+        transaction.rollback().await?;
+        return Ok(report);
+    }
     let mut applied: BTreeMap<Uuid, String> = BTreeMap::new();
     for entry in entries {
         match apply_entry(&mut transaction, gateway, entry, source).await? {
@@ -195,6 +203,44 @@ pub async fn link_identities(
         report.test_environments_linked = link_test_environments(testing, &applied, !apply).await?;
     }
     Ok(report)
+}
+
+/// Resolve aliases before writing: two spellings of one principal must never
+/// let a later line silently replace the destination from an earlier line.
+async fn validate_mappings(
+    transaction: &mut Transaction<'_, Postgres>,
+    entries: &[LinkEntry],
+) -> anyhow::Result<Vec<String>> {
+    let mut errors = Vec::new();
+    let mut keys = BTreeMap::new();
+    let mut destinations = BTreeMap::new();
+    for entry in entries {
+        let Some((key, _, _)) = resolve_principal(transaction, &entry.principal).await? else {
+            errors.push(format!(
+                "line {}: {} is not a principal Remind knows",
+                entry.line, entry.principal
+            ));
+            continue;
+        };
+        if let Some(first) = keys.insert(key, entry.line) {
+            errors.push(format!(
+                "line {}: principal {key} already appears on line {first}; remove the duplicate",
+                entry.line
+            ));
+        }
+        if let Some(uuid) = &entry.accounts_uuid {
+            if let Some((first, other)) = destinations.insert(uuid.clone(), (entry.line, key)) {
+                errors.push(format!("line {}: {uuid} is also assigned to {other} on line {first}; different principals cannot be merged", entry.line));
+            }
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "SELECT iam_principal_id FROM identity_links WHERE accounts_uuid = $1 AND iam_principal_id <> $2 LIMIT 1",
+            ).bind(uuid).bind(key).fetch_optional(&mut **transaction).await?;
+            if let Some(other) = existing {
+                errors.push(format!("line {}: {uuid} is already linked to {other}; different principals cannot be merged", entry.line));
+            }
+        }
+    }
+    Ok(errors)
 }
 
 enum Outcome {

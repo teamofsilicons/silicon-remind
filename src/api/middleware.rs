@@ -167,6 +167,13 @@ pub async fn authenticate(
                         "Remind accepts proofs only for reading: GET /api/v2/schedules, /schedules/{id}, /schedules/{id}/executions, /silicons and /auth/me. Everything else needs the account's own access token.",
                     ));
                 }
+                if state.proof_issuers.is_empty() {
+                    return Err(AppError::forbidden("proof_issuer_not_allowed", "This server has not enabled proof access from any application."));
+                }
+                let raw = token.expose_secret();
+                if !raw.starts_with("sap_") || raw.len() > 4096 {
+                    return Err(AppError::unauthenticated("proof_invalid", "The proof has an invalid format."));
+                }
                 let proof = state
                     .identity
                     .gateway()

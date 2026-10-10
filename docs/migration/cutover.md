@@ -169,10 +169,10 @@ so prepare the mapping on a copy of production first, as the 0.4.0 cutover did:
    python3 scripts/suggest-identity-links.py report.json --output mapping.csv
    ```
 
-   It looks each id up at Silicon Accounts with Remind's credentials and writes `si:…,<uuid>` for active accounts of
-   the same kind, and a `# REVIEW` comment for every id nobody holds now, deleted account or principal without an id.
-   A Carbon decides each comment: find the account (an id may have changed) and add its line, or leave the principal
-   unlinked. Unlinked reminders keep firing, but nobody can see or change them until they are linked.
+   It looks each id up at Silicon Accounts with Remind's credentials and writes commented suggestions with the
+   current kind and custodian. A Carbon must confirm **every** principal-to-account relationship before uncommenting
+   its line. Matching handles alone are not proof of identity: handles can be released and claimed by someone else.
+   Find the account using independent ownership records, or leave the principal unlinked. Unlinked reminders keep firing, but nobody can see or change them until they are linked.
 4. Copy `mapping.csv` to `/etc/remind/cutover/` and dry-run it against the copy with the app secret in the env file
    (`REMIND_APP_SECRET`, `ACCOUNTS_URL`), so every uuid is checked with Silicon Accounts:
 

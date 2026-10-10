@@ -179,3 +179,58 @@ async fn proofs_read_for_allowed_issuers_and_never_write() -> anyhow::Result<()>
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn removed_access_and_malformed_proofs_are_refused() -> anyhow::Result<()> {
+    let h = Harness::new().await?;
+    h.seed("Ada", ActorKind::Carbon, "c:ada", None).await?;
+    sqlx::query("UPDATE accounts SET status = 'access_removed' WHERE uuid = 'Ada'")
+        .execute(&h.pool)
+        .await?;
+    proof(
+        &h,
+        "sap_suspended",
+        verification("interface", &["remind.schedules.read"], "remind"),
+    )
+    .await;
+    let (status, response) = h
+        .send(
+            "GET",
+            "/api/v2/schedules",
+            Some("Proof sap_suspended"),
+            None,
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        (status, code(&response)),
+        (StatusCode::UNAUTHORIZED, "access_removed")
+    );
+    let before = h
+        .accounts
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .len();
+    for token in [
+        "Proof malformed".to_owned(),
+        format!("Proof sap_{}", "x".repeat(4096)),
+    ] {
+        let (status, response) = h
+            .send("GET", "/api/v2/schedules", Some(&token), None, &[])
+            .await?;
+        assert_eq!(
+            (status, code(&response)),
+            (StatusCode::UNAUTHORIZED, "proof_invalid")
+        );
+    }
+    assert_eq!(
+        before,
+        h.accounts
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .len()
+    );
+    Ok(())
+}

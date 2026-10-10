@@ -25,6 +25,7 @@ pub mod retention;
 pub mod scheduler;
 
 struct WorkerRuntime {
+    identity: IdentityStore,
     telemetry: crate::telemetry::Recorder,
     tests: Option<crate::infrastructure::testing::TestEnvironments>,
     repository: PostgresRepository,
@@ -70,7 +71,7 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     );
     let delivery = delivery::DeliveryProcessor::new(
         repository.clone(),
-        identity,
+        identity.clone(),
         webhook_client,
         encryption.clone(),
         delivery::DeliveryProcessorConfig {
@@ -94,6 +95,7 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         None => None,
     };
     let runtime = WorkerRuntime {
+        identity,
         telemetry: crate::telemetry::Recorder::new(&settings),
         tests,
         repository,
@@ -196,6 +198,20 @@ async fn serve_worker(
             }
             _ = heartbeat.tick() => {
                 record_heartbeat(runtime).await;
+                if let Err(error) = runtime.identity.refresh_due_accounts(100).await {
+                    tracing::warn!(%error, "account refresh sweep failed");
+                }
+                if let Some(tests) = &runtime.tests {
+                    match sqlx::query_scalar::<_, String>("SELECT uuid FROM accounts WHERE status = 'deleted'")
+                        .fetch_all(runtime.repository.pool()).await {
+                        Ok(deleted) => for uuid in deleted {
+                            if let Err(error) = tests.retire_owned_by(&uuid).await {
+                                tracing::warn!(%error, "deleted account environment cleanup will be retried");
+                            }
+                        },
+                        Err(error) => tracing::warn!(%error, "deleted account sweep will be retried"),
+                    }
+                }
             }
             _ = work_interval.tick() => {
                 run_work_cycle(

@@ -505,3 +505,91 @@ async fn profile_updates_apply_by_version_when_the_user_base_is_unreachable() ->
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn lookup_deletion_cleans_data_and_late_active_summary_cannot_restore_profile()
+-> anyhow::Result<()> {
+    let database = test_database().await?;
+    let now = fixture_now();
+    let (key, schedule) =
+        seed_due_schedule(&database.pool, "Doom", "si:doomed", now, "recurring").await?;
+    database
+        .repository
+        .upsert_hook_destination(&destination(key), &super::service_audit())
+        .await?;
+    let summary = serde_json::from_value(
+        json!({"uuid":"Doom","id":"si:doomed","kind":"silicon","status":"deleted"}),
+    )?;
+    database.identity.apply_summary(&summary).await?;
+    assert!(
+        database
+            .repository
+            .get_hook_destinations(&[key])
+            .await?
+            .is_empty()
+    );
+    let deleted: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM schedules WHERE id = $1")
+            .bind(schedule)
+            .fetch_one(&database.pool)
+            .await?;
+    assert!(deleted);
+    let late = serde_json::from_value(
+        json!({"uuid":"Doom","id":"si:doomed","kind":"silicon","status":"active","custodian":{"uuid":"Ada","id":"c:ada"}}),
+    )?;
+    database.identity.apply_summary(&late).await?;
+    let row = database
+        .identity
+        .find("Doom")
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("account missing"))?;
+    assert_eq!(row.status, "deleted");
+    assert!(row.public_id.is_empty());
+    assert!(row.custodian_uuid.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_profile_does_not_reverse_custody_or_persist_raw_profile() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    seed_account(
+        &database.pool,
+        "One",
+        ActorKind::Silicon,
+        "si:one",
+        Some(("Ian", "c:ian")),
+    )
+    .await?;
+    let now = fixture_now();
+    sqlx::query("UPDATE accounts SET custodian_observed_at = $1 WHERE uuid = 'One'")
+        .bind(now)
+        .execute(&database.pool)
+        .await?;
+    let (profile, raw) = event(
+        "evt-late-profile",
+        "account.updated",
+        now - Duration::minutes(2),
+        &json!({
+            "uuid":"One", "membership_id":"remind:One", "changed":["display_name"],
+            "account":{"uuid":"One", "kind":"silicon", "id":"si:one", "membership_id":"remind:One", "display_name":"Old name", "version":12, "custodian":{"uuid":"Ada","id":"c:ada"}}
+        }),
+    )?;
+    apply(&database.identity, None, &profile, &raw).await?;
+    assert_eq!(
+        database
+            .identity
+            .find("One")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("account missing"))?
+            .custodian_uuid
+            .as_deref(),
+        Some("Ian")
+    );
+    let payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM internal_event_receipts WHERE event_id = 'evt-late-profile'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(payload, json!({}));
+    Ok(())
+}

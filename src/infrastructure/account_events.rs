@@ -69,7 +69,7 @@ pub async fn apply(
             "The event names an account uuid Remind cannot read.",
         ));
     }
-    let payload: Value = serde_json::from_slice(raw_body)
+    let _: Value = serde_json::from_slice(raw_body)
         .map_err(|_| body_invalid("The signed body is not a JSON object."))?;
     let receipt = NewInternalEvent {
         id: Uuid::now_v7(),
@@ -78,7 +78,7 @@ pub async fn apply(
         event_type: event.event_type.clone(),
         org_id: None,
         subject_id: subject.map(str::to_owned),
-        payload,
+        payload: json!({}),
         payload_hash: Sha256::digest(raw_body).into(),
         received_at: Utc::now(),
     };
@@ -186,7 +186,7 @@ async fn apply_payload(
         }
         WebhookPayload::AccountUpdated(data) => {
             if let Some(account) = &data.account {
-                update_profile(transaction, uuid, account).await?;
+                update_profile(transaction, uuid, account, occurred_at).await?;
             }
         }
         WebhookPayload::CustodianChanged(data) => {
@@ -238,6 +238,7 @@ async fn update_profile(
     transaction: &mut Tx<'_>,
     uuid: &str,
     account: &silicon_accounts_client::AccountForApp,
+    occurred_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
     ensure_row(transaction, uuid, Some(kind_name(account.kind))).await?;
     let custodian = account
@@ -246,10 +247,11 @@ async fn update_profile(
         .filter(|custodian| is_valid_account_uuid(&custodian.uuid));
     sqlx::query(
         "UPDATE accounts SET display_name = $2, pfp_url = $3, \
-             custodian_uuid = CASE WHEN kind = 'silicon' THEN COALESCE($4, custodian_uuid) \
+             custodian_uuid = CASE WHEN kind = 'silicon' AND (custodian_observed_at IS NULL OR custodian_observed_at < $7) THEN COALESCE($4, custodian_uuid) \
                                    ELSE custodian_uuid END, \
-             custodian_id = CASE WHEN kind = 'silicon' THEN COALESCE($5, custodian_id) \
+             custodian_id = CASE WHEN kind = 'silicon' AND (custodian_observed_at IS NULL OR custodian_observed_at < $7) THEN COALESCE($5, custodian_id) \
                                  ELSE custodian_id END, \
+             custodian_observed_at = GREATEST(custodian_observed_at, $7), \
              profile_version = $6, updated_at = clock_timestamp() \
          WHERE uuid = $1 AND profile_version < $6",
     )
@@ -259,6 +261,7 @@ async fn update_profile(
     .bind(custodian.map(|custodian| custodian.uuid.as_str()))
     .bind(custodian.map(|custodian| public_id(&custodian.id)))
     .bind(account.version)
+    .bind(occurred_at)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -298,7 +301,7 @@ async fn remove_access(
 /// reminders are archived (45-day retention, then the deleted-reminder
 /// ledger), its subscriptions disabled, and every grant and allow-list entry
 /// it is part of ends. Other accounts' data is untouched.
-async fn delete_account(
+pub(crate) async fn delete_account(
     transaction: &mut Tx<'_>,
     uuid: &str,
     occurred_at: DateTime<Utc>,
@@ -308,7 +311,7 @@ async fn delete_account(
     set_cutoff(transaction, uuid, occurred_at).await?;
     sqlx::query(
         "UPDATE accounts SET status = 'deleted', status_changed_at = $2, public_id = '', \
-             display_name = '', pfp_url = '', updated_at = clock_timestamp() \
+             display_name = '', pfp_url = '', custodian_uuid = NULL, custodian_id = NULL, updated_at = clock_timestamp() \
          WHERE uuid = $1",
     )
     .bind(uuid)

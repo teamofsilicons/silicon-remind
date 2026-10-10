@@ -93,7 +93,7 @@ def suggest(report, lookup, out):
     suggested = review = 0
     out.write(f"# Suggested by scripts/suggest-identity-links.py at {datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}"
               f" for {len(unmatched)} unlinked principals.\n"
-              "# Lines are iam_principal_id,accounts_uuid. Review every '# REVIEW' comment, then dry-run this file.\n")
+              "# Lines are iam_principal_id,accounts_uuid. Confirm every identity and custodian before uncommenting a suggestion; handles are not identity proof.\n")
     for entry in unmatched:
         principal = entry.get("iam_principal_id")
         public_id = entry.get("iam_public_id")
@@ -121,7 +121,7 @@ def suggest(report, lookup, out):
                 review += 1
             else:
                 detail = f"{kind}" + (f", custodian {custodian}" if custodian else "")
-                out.write(f"# {public_id}: {detail}; owns {owned(entry)}\n{public_id},{body['uuid']}\n")
+                out.write(f"# REVIEW {public_id}: {detail}; owns {owned(entry)}\n# {public_id},{body['uuid']}\n")
                 suggested += 1
         elif status == 404:
             why = "the account was deleted" if code == "account_deleted" else (
