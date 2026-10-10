@@ -13,7 +13,7 @@ info:
     the /api/v2 paths; /api/v1 answers 410 api_version_retired. Test requests add
     `X-Remind-Test-Key` and never fall through to production data.
 servers:
-- url: https://backend.remind.teamofsilicons.com/api/v2
+- url: https://api.remind.teamofsilicons.com/api/v2
 security:
 - bearerAuth: []
 tags:
@@ -110,7 +110,7 @@ paths:
           $ref: '#/components/responses/Error'
   /api/versions:
     servers:
-    - url: https://backend.remind.teamofsilicons.com
+    - url: https://api.remind.teamofsilicons.com
     get:
       tags:
       - Operations
@@ -885,7 +885,7 @@ paths:
           $ref: '#/components/responses/Error'
   /health/live:
     servers:
-    - url: https://backend.remind.teamofsilicons.com
+    - url: https://api.remind.teamofsilicons.com
     get:
       tags:
       - Operations
@@ -903,7 +903,7 @@ paths:
           $ref: '#/components/responses/Error'
   /health/ready:
     servers:
-    - url: https://backend.remind.teamofsilicons.com
+    - url: https://api.remind.teamofsilicons.com
     get:
       tags:
       - Operations
@@ -921,7 +921,7 @@ paths:
           $ref: '#/components/responses/Error'
   /webhook/:
     servers:
-    - url: https://backend.remind.teamofsilicons.com
+    - url: https://api.remind.teamofsilicons.com
     post:
       tags:
       - Operations

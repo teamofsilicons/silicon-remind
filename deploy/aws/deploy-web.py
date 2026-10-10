@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('image')
 parser.add_argument('--instance', default='i-0546693fac4a32d6d')
 parser.add_argument('--runtime-secret',
-                    default='arn:aws:secretsmanager:us-east-1:234951665042:secret:silicon-remind/runtime-production-dbqkfb',
+                    default='silicon-remind/accounts-production',
                     help='Secrets Manager secret holding REMIND_APP_SECRET')
 args = parser.parse_args()
 aws = ['aws', '--profile', os.environ.get('AWS_PROFILE', 'silicon-production'),

@@ -79,7 +79,7 @@ Use receivers made for testing, never production notification endpoints. Check
 Send the key in `X-Remind-Test-Key` together with your normal access token:
 
 ```sh
-curl https://backend.remind.teamofsilicons.com/api/v2/schedules \
+curl https://api.remind.teamofsilicons.com/api/v2/schedules \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "X-Remind-API-Version: 2" \
   -H "X-Remind-Test-Key: $REMIND_TEST_KEY"
@@ -96,7 +96,7 @@ shell history (a protected curl config file works well).
 use silicon_remind_client::{Client, Secret, models};
 
 async fn example(access_token: Secret, key: Secret) -> silicon_remind_client::Result<()> {
-    let remind = Client::new("https://backend.remind.teamofsilicons.com")?.with_session(access_token)?;
+    let remind = Client::new("https://api.remind.teamofsilicons.com")?.with_session(access_token)?;
     let sandbox = remind.with_test_environment(key)?;
     let environment = sandbox.current_environment().await?;
     let page = sandbox.reminders(&models::ListSchedules::default()).await?;

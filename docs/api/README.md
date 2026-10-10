@@ -1,6 +1,6 @@
 # Public HTTP API
 
-The production origin is `https://backend.remind.teamofsilicons.com`. Routes begin with
+The production origin is `https://api.remind.teamofsilicons.com`. Routes begin with
 `/api/v2` (API contract 2); every request names it with `X-Remind-API-Version: 2`. JSON requests
 use `Content-Type: application/json`. Errors look like
 `{"error":{"code":"…","message":"…","hint":"…","request_id":"…"}}` (`hint` when there is a

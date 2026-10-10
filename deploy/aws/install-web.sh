@@ -12,7 +12,7 @@
 # disabled; its /etc/remind/frontend.env and /var/lib/remind-frontend are left untouched.
 set -Eeuo pipefail
 image=${1:?Pass the digest-pinned web image URI}
-secret_arn=${2:-arn:aws:secretsmanager:us-east-1:234951665042:secret:silicon-remind/runtime-production-dbqkfb}
+secret_arn=${2:-silicon-remind/accounts-production}
 case "$image" in
   234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-remind-production@sha256:*) ;;
   *) echo 'Expected a digest-pinned Remind ECR image' >&2; exit 2;;
@@ -44,7 +44,7 @@ values = {
     'APP_ID': 'remind',
     'ACCOUNTS_URL': source.get('ACCOUNTS_URL') or 'https://accounts.teamofsilicons.com',
     # The web calls the contract-2 paths of openapi.yaml (/schedules, /silicons, /auth/me, ...).
-    'APP_API_URL': 'http://remind-api:8080/api/v2',
+    'APP_API_URL': 'http://remind-accounts-api:8080/api/v2',
     'PUBLIC_URL': 'https://remind.teamofsilicons.com',
     'PORT': '3000',
     'HOSTNAME': '0.0.0.0',

@@ -8,7 +8,7 @@ Silicon or another app calls is in the [API guide](api/README.md).
 
 `POST /webhook/` (also `POST /webhook`) receives Silicon Accounts' signed account events for the app `remind`. Set
 it as the app's webhook at Silicon Accounts (`PUT /v1/apps/remind/webhook`, or the developer platform) with the URL
-`https://backend.remind.teamofsilicons.com/webhook/`, and store the `whsec_…` secret shown once in
+`https://api.remind.teamofsilicons.com/webhook/`, and store the `whsec_…` secret shown once in
 `REMIND_ACCOUNTS_WEBHOOK_SECRET`. Pick `custodian_change` besides the default events (or every update): who looks
 after a Silicon decides who reads its reminders.
 

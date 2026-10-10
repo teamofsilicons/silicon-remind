@@ -155,7 +155,7 @@ async fn remind_errors_keep_code_message_hint_and_request_id()
 
 #[tokio::test]
 async fn origins_are_https_or_this_machine_only() {
-    assert!(Client::new("https://backend.remind.teamofsilicons.com").is_ok());
+    assert!(Client::new("https://api.remind.teamofsilicons.com").is_ok());
     assert!(Client::new("http://127.0.0.1:4181").is_ok());
     assert!(Client::new("http://localhost:4181").is_ok());
     assert!(Client::new("http://remind.example").is_err());

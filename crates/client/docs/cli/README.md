@@ -40,7 +40,7 @@ remind accounts --json      # no sign-in, no network
 
 ```json
 {"app_id":"remind","client_id":"remind","accounts_url":"https://accounts.teamofsilicons.com",
- "api_url":"https://backend.remind.teamofsilicons.com","version":"0.6.0","api_version":2,
+ "api_url":"https://api.remind.teamofsilicons.com","version":"0.6.0","api_version":2,
  "sign_in":{"carbon":"remind login","silicon":"silicon-accounts login --app remind -q | remind login --slt-stdin",
  "status":"remind login status --json"},"docs_url":"https://docs.remind.teamofsilicons.com"}
 ```
@@ -181,7 +181,7 @@ naming it. The [testing guide](../testing-environments.md) has the details.
 | telemetry | | `REMIND_TELEMETRY_ENABLED=false` | `remind config telemetry on\|off` |
 | app id (development only) | | `REMIND_APP_ID` | |
 
-The defaults are `https://backend.remind.teamofsilicons.com` and
+The defaults are `https://api.remind.teamofsilicons.com` and
 `https://accounts.teamofsilicons.com`. Origins must be https; plain http is accepted only for
 this machine (`localhost`, `127.0.0.1`, `::1`), for local development:
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 use url::Url;
 
 /// The production Remind API origin.
-pub const DEFAULT_URL: &str = "https://backend.remind.teamofsilicons.com";
+pub const DEFAULT_URL: &str = "https://api.remind.teamofsilicons.com";
 /// The API contract this client speaks (`/api/v2`, `X-Remind-API-Version: 2`).
 pub const API_VERSION: u32 = 2;
 const PREFIX: &str = "/api/v2";

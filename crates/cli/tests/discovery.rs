@@ -50,7 +50,7 @@ fn the_three_discovery_commands_work_in_an_empty_home_and_write_nothing() -> Res
     assert_eq!(
         ok_json(run(&["accounts", "--json"])?)?,
         golden_accounts(
-            "https://backend.remind.teamofsilicons.com",
+            "https://api.remind.teamofsilicons.com",
             "https://accounts.teamofsilicons.com"
         )
     );

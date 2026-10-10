@@ -1,5 +1,20 @@
 # Standalone EC2 deployment
 
+## Current parallel Accounts release
+
+Follow [parallel-production.md](../../docs/migration/parallel-production.md).
+The old IAM API/worker, `backend.remind` origin, `silicon_remind` databases, runtime
+secret and fleet remain live. New Accounts containers are `remind-accounts-api`
+and `remind-accounts-worker`, using `silicon_remind_accounts` and
+`silicon_remind_accounts_test`, secret `silicon-remind/accounts-production`, and
+`api.remind.teamofsilicons.com`. These stores start empty; no IAM identities or
+subscriptions are imported. Do not rerun the legacy CloudFormation bootstrap.
+
+The new Next.js website uses `http://remind-accounts-api:8080/api/v2`. Its installer
+switches public website ingress and may run only after the coordinated website GO.
+The remaining sections describe the original host and historical replacement path;
+they do not authorize replacing the old API/worker or database.
+
 Production Remind runs on one ARM64 `t4g.small` in `vpc-04b23a487cfe0bd8e`, public subnet
 `subnet-07945746462c26b2d`, created by the CloudFormation stack `silicon-remind-standalone`
 ([standalone.yaml](standalone.yaml)). There is no load balancer: the instance has a public IPv4 address and
@@ -88,9 +103,9 @@ show the exact steps).
 
 ## Web
 
-The web is a Next.js server built from `web/` (a standalone build: `WORKDIR /app`, listening on `$PORT`, non-root).
+The web is a Next.js server built from `frontend/` (a standalone build: `WORKDIR /app`, listening on `$PORT`, non-root).
 It signs Carbons in on the Silicon Accounts pages, keeps each session in a sealed httpOnly cookie, and calls the API
-over the private `remind` Docker network (`APP_API_URL=http://remind-api:8080/api/v2`). Push its ARM64 image to
+over the private `remind` Docker network (`APP_API_URL=http://remind-accounts-api:8080/api/v2`). Push its ARM64 image to
 `silicon-remind-production`, then install it by digest:
 
 ```bash

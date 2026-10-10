@@ -628,3 +628,16 @@ Silicon Apps 0.2 validation/packing:
 Other platform runner builds, Docker image builds, Interface/fleet/Ting integration
 readiness and the coordinated production cutover remain release gates. Nothing
 was pushed, deployed or published.
+
+### Parallel production staging, 2026-10-10
+
+The latest user scope preserves existing IAM Silicons, schedules and subscriptions.
+The current release plan is `parallel-production.md`; the previous full-data cutover
+is historical. New clients default to `api.remind.teamofsilicons.com`. Fresh
+`silicon_remind_accounts` and `silicon_remind_accounts_test` stores are provisioned
+and migrated with separate roles and keyring. The new webhook secret is staged
+privately without its URL. Both old stores were backed up and restored locally;
+legacy API/worker containers and encrypted subscription keys remain unchanged.
+Focused OpenAPI verification passed 7/7 and formatting/docs sync passed. Deployment
+and native package candidates are rebuilt after this endpoint change. Public API
+and website changes remain gated on the coordinated release.

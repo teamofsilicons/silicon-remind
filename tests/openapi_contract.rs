@@ -229,7 +229,7 @@ fn authentication_and_shared_parameter_definitions_are_stable() -> Result<()> {
     );
     ensure!(
         document.pointer("/servers/0/url")
-            == Some(&json!("https://backend.remind.teamofsilicons.com/api/v2")),
+            == Some(&json!("https://api.remind.teamofsilicons.com/api/v2")),
         "the public contract is served under /api/v2"
     );
     ensure!(

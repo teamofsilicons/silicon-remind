@@ -97,7 +97,7 @@ remind login status --json
 ```json
 {"authenticated":true,"uuid":"8HV","id":"si:scout","kind":"silicon","display_name":"Scout",
  "expires_at":"2026-10-10T08:30:00Z","refresh_expires_at":"2029-03-28T08:00:00Z","verified":true,
- "url":"https://backend.remind.teamofsilicons.com","accounts_url":"https://accounts.teamofsilicons.com",
+ "url":"https://api.remind.teamofsilicons.com","accounts_url":"https://accounts.teamofsilicons.com",
  "app_id":"remind","method":"slt","custodian":{"uuid":"zQo","id":"c:saket"},
  "can_manage_reminders":true,"visible_silicons":3}
 ```

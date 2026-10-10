@@ -94,7 +94,7 @@ const GLOBAL: &str = "Global options";
     arg_required_else_help = true
 )]
 pub struct Cli {
-    /// Remind API origin for this command (default: the one saved with `remind config set-url`, else https://backend.remind.teamofsilicons.com). Sign-ins are kept per origin.
+    /// Remind API origin for this command (default: the one saved with `remind config set-url`, else https://api.remind.teamofsilicons.com). Sign-ins are kept per origin.
     #[arg(long, global = true, env = "REMIND_URL", value_name = "URL", help_heading = GLOBAL)]
     pub url: Option<String>,
     /// Silicon Accounts origin to sign in with (default: the one saved with `remind config set-accounts-url`, else https://accounts.teamofsilicons.com).
@@ -576,7 +576,7 @@ pub enum Config {
         after_help = "Example: remind config set-url http://127.0.0.1:4181  (plain http only for this machine)"
     )]
     SetUrl {
-        /// https origin, e.g. https://backend.remind.teamofsilicons.com.
+        /// https origin, e.g. https://api.remind.teamofsilicons.com.
         #[arg(value_name = "URL")]
         service_url: String,
     },

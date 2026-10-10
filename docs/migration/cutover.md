@@ -1,4 +1,6 @@
-# Remind: production cutover to Silicon Accounts and Silicon Apps
+# Historical full-data cutover design
+
+**Superseded by [parallel-production.md](parallel-production.md).** The user requires existing IAM Silicons and their schedules to remain working. Do not execute the fleet conversion, legacy runtime replacement, or identity adoption commands below; they are retained only as the tested design for a separately authorized future migration.
 
 What a Carbon does to switch production Remind from Silicon IAM and Honeycomb to Silicon Accounts and Silicon Apps.
 Nothing here was done by the migration agents: they never touch production. Every command that changes production
@@ -113,7 +115,7 @@ The web reads `REMIND_APP_SECRET` from the same secret ([install-web.sh](../../d
 - **Backend image**: run `.github/workflows/deployment-builds.yml` (image `backend`) on the release commit, or build it
   as [README-standalone.md](../../deploy/aws/README-standalone.md#backend-image) shows; push it to `$ECR` and note
   its digest as `BACKEND_DIGEST` (`sha256:…`).
-- **Web image**: the same workflow (image `frontend`) builds `web/Dockerfile`; push it and note `WEB_DIGEST`.
+- **Web image**: the same workflow (image `frontend`) builds `frontend/Dockerfile`; push it and note `WEB_DIGEST`.
 - **CLI archives**: tag `v0.6.0`; the release workflow keeps `remind-silicon-apps-release` (six archives and
   `SHA256SUMS`). Upload the two Linux archives and make a development release (run at cutover, before the window;
   nobody gets it until it is promoted):

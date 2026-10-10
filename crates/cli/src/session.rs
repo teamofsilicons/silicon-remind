@@ -248,7 +248,7 @@ impl Ctx {
 fn bad_origin(source: &str, error: &ClientError) -> anyhow::Error {
     CliError::usage(
         format!("{} (from {source}).", error.message().trim_end_matches('.')),
-        "Use an https origin such as https://backend.remind.teamofsilicons.com; plain http works only for localhost, 127.0.0.1 or ::1.",
+        "Use an https origin such as https://api.remind.teamofsilicons.com; plain http works only for localhost, 127.0.0.1 or ::1.",
     )
     .into()
 }
