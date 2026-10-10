@@ -56,15 +56,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dev_accounts  # noqa: E402  (the same directory)
 
 ROOT = dev_accounts.ROOT
-MASK = re.compile(r"\b(slt|sar|sap|sapr|stk|whsec|oac)[_-][A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]+")
-
-
+# Silicon Accounts tokens are a prefix and 43 base64url characters; error codes such as slt_already_used are short
+# words, so they stay readable. STKs are stk- and 8 to 32 hex digits; access tokens are JWTs.
+MASK = re.compile(r"\b(slt|sar|sap|sapr|whsec|oac)_[A-Za-z0-9_-]{20,}|\bstk-[0-9a-f]{8,32}\b"
+                  r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]+")
 TEST_KEY = re.compile(r'("key":\s*")[A-Za-z0-9]{32}"')
 
 
 def mask(text):
-    text = MASK.sub(lambda m: (m.group(1) + "_<masked>") if m.group(1) else "<jwt>", text)
-    return TEST_KEY.sub(r'\1<test key>"', text)
+    def hide(match):
+        if match.group(1):
+            return match.group(1) + "_<masked>"
+        return "stk-<masked>" if match.group(0).startswith("stk-") else "<jwt>"
+    return TEST_KEY.sub(r'\1<test key>"', MASK.sub(hide, text))
 
 
 class Run:
