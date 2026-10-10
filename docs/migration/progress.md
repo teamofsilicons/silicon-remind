@@ -136,7 +136,9 @@ eea91bb Rewrite the client and CLI manuals for Silicon Accounts and Silicon Apps
 151bca6 Group the global flags in help and use the real device link format ·
 1c1b50a Sign in for production unless --test names a test environment ·
 c2f8bb7 Report the production fallback consistently after signing in ·
-and the commit that adds this section.
+64b65d9 Record the client and CLI stage: decisions, cutover, proposal, progress ·
+2ba6965 Keep the previous identity service's name out of user-visible text (the 0.5 state archive is
+`state.legacy-<time>.json`) · and the commit that completes this list.
 
 ### Tests
 
