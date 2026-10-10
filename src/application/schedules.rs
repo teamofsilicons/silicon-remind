@@ -23,7 +23,7 @@ use crate::{
         AccountRef, Actor, ActorKind, CreateScheduleCommand, Credential, CronExpression,
         CursorKind, MAX_SCHEDULE_STATUS_BATCH_SIZE, PageCursor, PatchScheduleCommand, ReadScope,
         Schedule, ScheduleKind, ScheduleSection, ScheduleStatus, ScheduleTiming,
-        ScheduleValidationError, is_valid_global_silicon_id,
+        ScheduleValidationError, is_valid_account_uuid, is_valid_global_silicon_id,
     },
     error::AppError,
     infrastructure::{
@@ -149,13 +149,12 @@ impl ScheduleService {
         encoded_cursor: Option<&str>,
         limit: Option<u32>,
     ) -> Result<(Page<ScheduleRow>, Owners), AppError> {
-        if silicon_id
-            .as_deref()
-            .is_some_and(|value| !is_valid_global_silicon_id(value))
-        {
+        if silicon_id.as_deref().is_some_and(|value| {
+            !is_valid_global_silicon_id(value) && !is_valid_account_uuid(value)
+        }) {
             return Err(AppError::invalid(
                 "silicon_id_invalid",
-                "silicon_id must be a Silicon id such as si:scout.",
+                "silicon_id must be a Silicon id such as si:scout or its account UUID.",
             ));
         }
         let cursor = encoded_cursor
@@ -434,7 +433,8 @@ impl ScheduleService {
         match &actor.read {
             ReadScope::Owners(owners) => {
                 let mut uuid = actor
-                    .visible_by_id(silicon_id)
+                    .visible_by_uuid(silicon_id)
+                    .or_else(|| actor.visible_by_id(silicon_id))
                     .map(|owner| owner.account.uuid.clone());
                 if uuid.is_none()
                     && self
@@ -469,7 +469,10 @@ impl ScheduleService {
                     Ok(Some(account)) => self.identity.keys_of(&account.uuid).await?,
                     _ => Vec::new(),
                 };
-                Ok((Some(keys), Some(silicon_id.to_owned())))
+                Ok((
+                    Some(keys),
+                    is_valid_global_silicon_id(silicon_id).then(|| silicon_id.to_owned()),
+                ))
             }
         }
     }

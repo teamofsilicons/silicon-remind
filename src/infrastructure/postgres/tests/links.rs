@@ -327,3 +327,21 @@ async fn ambiguous_identity_mappings_are_refused_before_any_write() -> anyhow::R
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn retired_account_ids_cannot_be_reintroduced_by_legacy_link_import() -> anyhow::Result<()> {
+    let database = test_database().await?;
+    seed_legacy(&database.pool).await?;
+    sqlx::query("INSERT INTO accounts_uuid128_map(old_uuid,new_uuid,kind,mapping_sha256) VALUES('Old',$1,'silicon',$2)")
+        .bind(Uuid::new_v4().to_string()).bind("f".repeat(64)).execute(&database.pool).await?;
+    let entries = parse_mapping("si:scout,Old").map_err(|errors| anyhow::anyhow!("{errors:?}"))?;
+    let report = link_identities(&database.pool, None, None, &entries, "test", false).await?;
+    assert!(!report.committed);
+    assert_eq!(report.refused.len(), 1);
+    assert!(report.refused[0].contains("retired"));
+    let old_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts WHERE uuid='Old'")
+        .fetch_one(&database.pool)
+        .await?;
+    assert_eq!(old_rows, 0);
+    Ok(())
+}

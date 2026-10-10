@@ -165,3 +165,60 @@ async fn deliveries_reach_every_subscription_of_the_owner_account() -> anyhow::R
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn retired_subjects_and_inflight_events_cannot_recreate_the_old_account() -> anyhow::Result<()>
+{
+    use crate::infrastructure::account_events::{EventOutcome, apply};
+    let database = test_database().await?;
+    let new_uuid = Uuid::new_v4().to_string();
+    let key = seed_account(
+        &database.pool,
+        &new_uuid,
+        ActorKind::Silicon,
+        "si:scout",
+        None,
+    )
+    .await?;
+    sqlx::query("INSERT INTO accounts_uuid128_map(old_uuid,new_uuid,kind,mapping_sha256) VALUES('Old',$1,'silicon',$2)")
+        .bind(&new_uuid).bind("f".repeat(64)).execute(&database.pool).await?;
+    let old = claims(
+        "Old",
+        ActorKind::Silicon,
+        "si:scout",
+        Utc::now().timestamp(),
+    )?;
+    assert_eq!(
+        database
+            .identity
+            .resolve_bearer(&old)
+            .await
+            .err()
+            .map(|error| error.code()),
+        Some("account_uuid_migrated".into())
+    );
+    let fresh = claims(
+        &new_uuid,
+        ActorKind::Silicon,
+        "si:scout",
+        Utc::now().timestamp(),
+    )?;
+    let actor = database.identity.resolve_bearer(&fresh).await?;
+    assert_eq!(actor.storage_key, key);
+    let (event, body) = super::event(
+        "old-inflight",
+        "account.deleted",
+        fixture_now(),
+        &serde_json::json!({"uuid":"Old","membership_id":"remind:Old"}),
+    )?;
+    assert_eq!(
+        apply(&database.identity, None, &event, &body).await?,
+        EventOutcome::Ignored
+    );
+    let old_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts WHERE uuid='Old'")
+        .fetch_one(&database.pool)
+        .await?;
+    assert_eq!(old_rows, 0);
+    assert!(database.identity.resolve_bearer(&fresh).await.is_ok());
+    Ok(())
+}

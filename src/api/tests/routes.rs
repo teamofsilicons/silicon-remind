@@ -651,3 +651,37 @@ async fn test_environments_belong_to_accounts_and_open_with_their_key() -> anyho
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn reminders_filter_by_canonical_uuid_and_keep_outsiders_out() -> anyhow::Result<()> {
+    let harness = Harness::new().await?;
+    let uuid = "550e8400-e29b-41d4-a716-446655440000";
+    harness
+        .seed(uuid, ActorKind::Silicon, "si:scout", None)
+        .await?;
+    harness
+        .seed("Zed", ActorKind::Carbon, "c:zed", None)
+        .await?;
+    let owner = harness.bearer(uuid, ActorKind::Silicon, "si:scout")?;
+    let outsider = harness.bearer("Zed", ActorKind::Carbon, "c:zed")?;
+    let (status, _) = harness
+        .send(
+            "POST",
+            "/api/v2/schedules",
+            Some(&owner),
+            Some(reminder()),
+            &[("idempotency-key", "canonical-filter-create")],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let url = format!("/api/v2/schedules?silicon_id={uuid}");
+    let (status, body) = harness.send("GET", &url, Some(&owner), None, &[]).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+    let (status, body) = harness
+        .send("GET", &url, Some(&outsider), None, &[])
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().map(Vec::len), Some(0));
+    Ok(())
+}

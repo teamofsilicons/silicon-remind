@@ -1,7 +1,7 @@
 //! Syntax of Silicon Accounts identifiers.
 //!
-//! An account's permanent `uuid` is a short, case-sensitive base62 string (for
-//! example `zQo`); it is never lowercased or parsed as an RFC 4122 UUID. Its
+//! Accounts now issue canonical lowercase 128-bit UUIDs; legacy case-sensitive
+//! base62 identifiers remain readable during the coordinated backfill. Its
 //! public id is a prefix and a handle: `c:` for a Carbon, `si:` for a Silicon.
 //! Silicon Accounts issues handles of 3 to 30 characters of `a-z`, `0-9`, `-`
 //! and `_`; Remind also accepts the up-to-50-character handles that rows from
@@ -41,10 +41,14 @@ pub fn is_valid_public_id(value: &str) -> bool {
     is_valid_global_silicon_id(value) || is_valid_carbon_id(value)
 }
 
-/// Validates a Silicon Accounts uuid: 1 to 64 base62 characters, case-sensitive.
+/// Validates a canonical UUID or a legacy case-sensitive account identifier.
 #[must_use]
 pub fn is_valid_account_uuid(value: &str) -> bool {
-    (1..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    ((1..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        || (value.len() == 36
+            && uuid::Uuid::parse_str(value).is_ok_and(|id| {
+                id.hyphenated().to_string() == value && id.get_variant() == uuid::Variant::RFC4122
+            }))
 }
 
 #[cfg(test)]
@@ -80,8 +84,14 @@ mod tests {
     }
 
     #[test]
-    fn account_uuids_are_case_sensitive_base62() {
-        for valid in ["zQo", "8HV", "a8K", "A"] {
+    fn standard_uuids_and_legacy_identifiers_are_accepted() {
+        for valid in [
+            "zQo",
+            "8HV",
+            "a8K",
+            "A",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ] {
             assert!(is_valid_account_uuid(valid));
         }
         for invalid in ["", "z-Q", "zQo ", "c:ada", &"a".repeat(65)] {

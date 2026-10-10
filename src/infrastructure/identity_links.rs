@@ -229,6 +229,16 @@ async fn validate_mappings(
             ));
         }
         if let Some(uuid) = &entry.accounts_uuid {
+            let retired: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM accounts_uuid128_map WHERE old_uuid=$1)",
+            )
+            .bind(uuid)
+            .fetch_one(&mut **transaction)
+            .await?;
+            if retired {
+                errors.push(format!("line {}: account ID {uuid} was retired; use the current UUID from the coordinated migration map",entry.line));
+                continue;
+            }
             if let Some((first, other)) = destinations.insert(uuid.clone(), (entry.line, key)) {
                 errors.push(format!("line {}: {uuid} is also assigned to {other} on line {first}; different principals cannot be merged", entry.line));
             }

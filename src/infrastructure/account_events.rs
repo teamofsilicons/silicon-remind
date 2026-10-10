@@ -69,6 +69,13 @@ pub async fn apply(
             "The event names an account uuid Remind cannot read.",
         ));
     }
+    // A signed in-flight pre-cutover delivery cannot recreate the retired subject.
+    // Accounts emits fresh reconciliation events under the new UUID at cutover.
+    if let Some(uuid) = subject
+        && identity.is_retired_uuid(uuid).await?
+    {
+        return Ok(EventOutcome::Ignored);
+    }
     let _: Value = serde_json::from_slice(raw_body)
         .map_err(|_| body_invalid("The signed body is not a JSON object."))?;
     let receipt = NewInternalEvent {

@@ -572,3 +572,23 @@ concurrent last-slot admission, archived-row accounting, replay-at-limit,
 environment retire/restore limits, address rules and sandbox owner enforcement.
 Strict clippy is a commit gate. Full live E2E and the new cross-app standard UUID
 migration remain in progress; no production changes.
+
+## Standard 128-bit UUID addition
+
+Canonical UUID parsing and schema migrations are implemented for production and
+all test environments. The offline consumer uses Accounts' one saved CSV, updates
+all live identity bindings atomically per database, preserves storage keys and
+credential bytes, supports null-kind tombstones, and records a retired-subject
+ledger. Old bearer/proof subjects, in-flight events and legacy link imports cannot
+recreate retired accounts. Full-schema production and two-schema testing dry-run,
+apply, replay, conflicts, grant retention and AES-GCM decryption tests pass.
+
+The full workspace tests passed; focused regressions additionally cover retired
+subjects and canonical UUID schedule filters. The live API/CLI run passed130 checks;
+the missing-webkit proof fixture was corrected to the registered Hook app and its
+proof scenario then passed15/15. Production cutover has not run. See
+[the UUID runbook](account-uuids.md) for the coordinated operation.
+
+## Next.js / Arc frontend completion — 2026-10-10
+
+`frontend/` now implements the full Accounts-based Remind workspace and sealed environment selection. Typecheck, lint, production build and 49 units pass; 26 real functional browser checks plus five populated screenshot checks pass. Selected reviewed screens and detailed proof are in [frontend.md](frontend.md) and `screens/`. The backend UUID filter mismatch found by screenshots was repaired by the root backend owner. Hosting/CI now build `frontend/Dockerfile`; image build and production cutover remain unperformed. No human UNDERSTANDING file changed.

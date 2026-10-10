@@ -130,6 +130,29 @@ impl IdentityStore {
         &self.gateway
     }
 
+    /// Whether an account subject was retired by the coordinated UUID migration.
+    ///
+    /// # Errors
+    /// Returns a database error if the migration ledger cannot be read.
+    pub async fn is_retired_uuid(&self, uuid: &str) -> Result<bool, AppError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM accounts_uuid128_map WHERE old_uuid=$1)",
+        )
+        .bind(uuid)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn require_current_uuid(&self, uuid: &str) -> Result<(), AppError> {
+        if self.is_retired_uuid(uuid).await? {
+            return Err(AppError::unauthenticated(
+                "account_uuid_migrated",
+                "This account ID was migrated. Sign in again to use its current UUID.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Resolves the account behind a verified access token.
     ///
     /// # Errors
@@ -137,6 +160,7 @@ impl IdentityStore {
     /// Refuses tokens issued before the account's sign-in at Remind ended, and
     /// tokens of deleted accounts; returns database errors.
     pub async fn resolve_bearer(&self, claims: &Claims) -> Result<Actor, AppError> {
+        self.require_current_uuid(&claims.sub).await?;
         let kind = claims
             .kind
             .map(|kind| match kind {
@@ -201,6 +225,7 @@ impl IdentityStore {
                 "The proof names an account uuid Remind cannot read.",
             ));
         }
+        self.require_current_uuid(&user.uuid).await?;
         let kind = user.kind.map(|kind| match kind {
             silicon_accounts_client::AccountKind::Carbon => "carbon",
             silicon_accounts_client::AccountKind::Silicon => "silicon",

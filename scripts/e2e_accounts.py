@@ -1124,14 +1124,14 @@ def scenario_6(run, people, state):
 
     # Another Carbon, so the first one stays inside the stack's 10 email codes per address in 10 minutes.
     people.carbon("c2")
-    at_webkit = people.app_signin("c2", "webkit", "http://127.0.0.1:4260/auth/callback")
-    status, foreign = issue_proof(run, "webkit", at_webkit)
+    at_hook = people.app_signin("c2", "hook", "http://127.0.0.1:4200/auth/callback")
+    status, foreign = issue_proof(run, "hook", at_hook)
     if status == 201:
         status, body = run.remind_api("GET", "/schedules", "Proof " + foreign["proof_token"])
         run.check("a proof from an app REMIND_PROOF_ISSUERS does not list is refused (403 proof_issuer_not_allowed)",
                   status == 403 and code(body) == "proof_issuer_not_allowed", (status, body))
     else:
-        run.check("webkit can issue a proof for the issuer check", False, (status, foreign))
+        run.check("hook can issue a proof for the issuer check", False, (status, foreign))
 
 
 def scenario_7(run, people, state):
