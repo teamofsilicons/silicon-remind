@@ -646,3 +646,38 @@ The earlier PR CI run exposed a timing-dependent telemetry test: best-effort
 recording may intentionally drop an event after its 100 ms production budget.
 The isolation test now supplies a 5-second fixture budget while production keeps
 100 ms. The focused test passed against an isolated local database.
+
+### Parallel production live, 2026-10-10
+
+Following coordinated Accounts/Apps/Browser UUID completion, the new isolated
+Accounts API, worker and Next.js website are live. The API and worker use source
+`0e295201` via digest
+`sha256:12c3bb70591cd0211b866158533ee06cddb0f096e13902ea7a8edd0ef2927388`;
+the web uses source `94e1ea3`. New database roles, testing store, keyring, runtime
+units and telemetry paths are separate from the preserved IAM service. The old
+API and worker remain active, with unchanged schedules, subscription secrets,
+identities and custody. The prior frontend files, config and session directory
+are retained for website rollback.
+
+Public readiness returns 200, signed-out identity returns 401, and the private
+metrics path is not exposed. The real browser shows the new landing page and
+reaches the Remind-branded hosted Accounts flow. Production account verification
+requires the user's genuine Google/passkey completion; no cached pre-cutover
+browser identity is treated as proof. Accounts webhook registration and signed
+ping verification are coordinated centrally.
+
+Documentation run `38059434198` built 13 pages and checked 445 links, including
+the public Rust source bundle, before its verified archive was installed using
+an atomic symlink switch. The prior docs release remains available. The earlier
+clean-run failure was an unprimed Cargo registry for the intentionally offline
+public-source lockfile step; the candidate workflow now fetches locked workspace
+dependencies before building documentation.
+
+All six native CLI build jobs passed in `38057594804`, source
+`94e1ea397a2d05866724ba1a6e3c83c656a36aaf`. Run `38059434279` then executed those exact
+0.6.0 archives on six matching native runners, without rebuilding, and emitted
+structured stdout/stderr evidence and exact archive hashes. The verifier is
+`f38a013`. Reports and archives are in the Briefcase worktree's private
+`.mig/production-release/remind-native-proof/` and `remind-native-release/`.
+Central Apps publication and authenticated production product checks remain
+separate release steps.
