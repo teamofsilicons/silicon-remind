@@ -1,0 +1,25 @@
+name: Build documentation candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci && npm run build && npm run check
+        working-directory: docs-site
+      - name: Package verified static documentation
+        run: |
+          mkdir candidate
+          tar -C docs-site/dist -czf candidate/remind-docs.tar.gz .
+          printf '%s\n' "$GITHUB_SHA" > candidate/SOURCE_REVISION
+          (cd candidate && sha256sum remind-docs.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remind-docs-candidate
+          path: candidate/*

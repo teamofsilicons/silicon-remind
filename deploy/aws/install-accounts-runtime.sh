@@ -50,7 +50,8 @@ WantedBy=multi-user.target
 UNIT
 done
 systemctl daemon-reload
-systemctl enable --now remind-accounts-api remind-accounts-worker
+systemctl enable remind-accounts-api remind-accounts-worker
+systemctl restart remind-accounts-api remind-accounts-worker
 for attempt in {1..30}; do
   if docker exec remind-accounts-api busybox wget -q -O /dev/null http://127.0.0.1:8080/health/ready; then
     echo "Accounts API ready on the private Docker network; legacy services and Caddy unchanged. Backup: $backup"
