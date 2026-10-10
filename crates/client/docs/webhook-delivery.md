@@ -35,8 +35,8 @@ The worker posts UTF-8 JSON:
 }
 ```
 
-`silicon_uuid` is the owning Silicon's permanent Silicon Accounts uuid (short, case-sensitive
-text); key on it. It is `null` only for a reminder kept from before Silicon Accounts whose owner
+`silicon_uuid` is the owning Silicon's permanent Silicon Accounts UUID (a canonical
+36-character UUIDv4); key on it. It is `null` only for a reminder kept from before Silicon Accounts whose owner
 is not linked to an account yet. `silicon_id` is the Silicon's current `si:` id, which can
 change.
 

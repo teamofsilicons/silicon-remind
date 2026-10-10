@@ -735,3 +735,31 @@ matching database dumps and exact restart instructions are retained privately.
 Central Apps catalog publication and managed installation are coordinated by the
 root release owner. Final structured evidence is in the workspace-level
 `.migration/live/parallel/remind/release-record.json`.
+
+
+## Production reminder delivery and test environments — 2026-10-10
+
+The existing disposable Accounts Silicon used by the cross-app release checks
+signed in with a genuine short-lived Accounts token. Against the live API and
+released native CLI, it created, read, edited and archived a far-future reminder;
+its genuine Carbon custodian read the edited record. Archival removed the next
+trigger and the reminder from the current list, with no execution.
+
+A separate one-time reminder fired at 15:11:00 UTC through a signed subscription
+to that same disposable account's production Hook receiver. Hook recorded the
+request at 15:11:00.283083 UTC and its native CLI returned the event. The exact raw
+body HMAC-SHA256 signature, owner UUID, schedule UUID and execution UUID all
+matched. Remind's execution history recorded `delivered`. The subscription was
+then removed and the reminder archived with no next trigger. Ting and human
+notification services were not enabled.
+
+The live test environment path also passed create, info, reminder create/read,
+production isolation, key rotation with retained data, retirement, restoration
+with retained data, cleaning and final retirement. The environment ended empty
+and retired. The shared fixture owner was told these checks were complete so it
+could remove the temporary Accounts Silicon.
+
+Private evidence: `remind-live-product-mutation-proof.json`,
+`remind-live-delivery-proof.json` and `remind-live-testenv-proof.json`, under the
+Briefcase worktree's `.mig/production-release/`. These are actual production
+checks, separate from the local acceptance suites above.
