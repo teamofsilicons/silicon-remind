@@ -166,8 +166,11 @@ Resources:
             python3 - <<'PY'
             import json, os, pathlib
             source = json.loads(pathlib.Path('/etc/remind/runtime.json').read_text())
-            required = ('REMIND_IAM_APP_SECRET', 'REMIND_IAM_WEBHOOK_KEYRING',
-                        'REMIND_ENCRYPTION_KEYRING', 'REMIND_INTERNAL_API_TOKEN',
+            # REMIND_APP_SECRET is Remind's app secret at Silicon Accounts (server only);
+            # REMIND_ACCOUNTS_WEBHOOK_SECRET is the whsec_ secret its app webhook is signed
+            # with (comma-separated while a rotation overlaps).
+            required = ('REMIND_APP_SECRET', 'REMIND_ACCOUNTS_WEBHOOK_SECRET',
+                        'REMIND_ENCRYPTION_KEYRING',
                         'REMIND_DATABASE_URL', 'REMIND_TEST_DATABASE_URL')
             for key in required:
                 value = source.get(key)
@@ -176,11 +179,12 @@ Resources:
             # Only application configuration is copied; arbitrary secret keys are not
             # passed to containers.
             allow = set(required) | {
-                'REMIND_IAM_BASE_URL', 'REMIND_IAM_APP_ID', 'REMIND_ENCRYPTION_CURRENT_VERSION',
+                'ACCOUNTS_URL', 'ACCOUNTS_API_URL', 'REMIND_APP_ID', 'REMIND_PROOF_ISSUERS',
+                'REMIND_ACCOUNTS_REQUEST_TIMEOUT_MS', 'REMIND_ACCOUNTS_LOOKUP_TTL_SECONDS',
+                'REMIND_ENCRYPTION_CURRENT_VERSION',
                 'REMIND_DATABASE_MAX_CONNECTIONS', 'REMIND_LOG_FILTER', 'REMIND_REQUEST_TIMEOUT_SECONDS',
                 'REMIND_WEBHOOK_CONNECT_TIMEOUT_MS', 'REMIND_WEBHOOK_REQUEST_TIMEOUT_MS',
                 'REMIND_WEBHOOK_MAX_RESPONSE_BYTES', 'REMIND_WORKER_MAX_DELIVERY_CONCURRENCY',
-                'REMIND_HONEYCOMB_BASE_URL', 'REMIND_HONEYCOMB_SERVICE_TOKEN',
             }
             values = {k: source[k] for k in allow if k in source}
             values.update({
@@ -188,8 +192,10 @@ Resources:
                 'REMIND_BIND_ADDR': '0.0.0.0:8080',
                 'REMIND_WORKER_OPERATIONAL_BIND_ADDR': '0.0.0.0:9090',
                 'REMIND_PUBLIC_BASE_URL': 'https://${HostName}',
-                'REMIND_IAM_BASE_URL': values.get('REMIND_IAM_BASE_URL', 'https://backend.iam.teamofsilicons.com'),
-                'REMIND_IAM_APP_ID': values.get('REMIND_IAM_APP_ID', 'remind'),
+                'ACCOUNTS_URL': values.get('ACCOUNTS_URL', 'https://accounts.teamofsilicons.com'),
+                'REMIND_APP_ID': values.get('REMIND_APP_ID', 'remind'),
+                # The Silicon Interface reads reminders for an account with a User verification proof.
+                'REMIND_PROOF_ISSUERS': values.get('REMIND_PROOF_ISSUERS', 'remind.schedules.read=interface'),
                 'REMIND_ENCRYPTION_CURRENT_VERSION': values.get('REMIND_ENCRYPTION_CURRENT_VERSION', '1'),
             })
             with open('/etc/remind/runtime.env', 'w', opener=lambda p,m: os.open(p, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)) as output:
@@ -208,7 +214,8 @@ Resources:
             }
             ${HostName} {
               encode gzip
-              @public path /health/* /api/* /webhook /webhook/ /internal/honeycomb/organizations/*
+              # Public: the API, health probes and the Silicon Accounts app webhook. /metrics stays private.
+              @public path /health/* /api/* /webhook /webhook/
               handle @public {
                 reverse_proxy remind-api:8080
               }

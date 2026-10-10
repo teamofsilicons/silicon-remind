@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Install a digest-pinned frontend on the standalone host through SSM."""
+"""Install a digest-pinned web image (Next.js, built from web/) on the standalone host through SSM.
+
+Sends install-web.sh to the instance. It reads Remind's Silicon Accounts app secret from the runtime secret, keeps
+the web's session secret, swaps remind-frontend.service for remind-web.service and points the
+remind.teamofsilicons.com vhost at it. Run at a deploy; it never builds or pushes images.
+"""
 import argparse
 import json
 import os
@@ -11,11 +16,15 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('image')
 parser.add_argument('--instance', default='i-0546693fac4a32d6d')
+parser.add_argument('--runtime-secret',
+                    default='arn:aws:secretsmanager:us-east-1:234951665042:secret:silicon-remind/runtime-production-dbqkfb',
+                    help='Secrets Manager secret holding REMIND_APP_SECRET')
 args = parser.parse_args()
 aws = ['aws', '--profile', os.environ.get('AWS_PROFILE', 'silicon-production'),
        '--region', os.environ.get('AWS_REGION', 'us-east-1')]
-script = Path(__file__).with_name('install-frontend.sh').read_text()
-commands = 'bash -s -- ' + shlex.quote(args.image) + " <<'INSTALL_FRONTEND'\n" + script + '\nINSTALL_FRONTEND'
+script = Path(__file__).with_name('install-web.sh').read_text()
+commands = ('bash -s -- ' + shlex.quote(args.image) + ' ' + shlex.quote(args.runtime_secret)
+            + " <<'INSTALL_WEB'\n" + script + '\nINSTALL_WEB')
 request = {'DocumentName': 'AWS-RunShellScript', 'InstanceIds': [args.instance],
            'TimeoutSeconds': 600, 'Parameters': {'commands': [commands]}}
 command = json.loads(subprocess.check_output(
