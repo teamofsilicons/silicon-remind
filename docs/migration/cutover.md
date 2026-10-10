@@ -64,3 +64,36 @@ moment the new image runs, so every caller of Remind moves at the same time.
 Migration 0010 only adds tables and relaxes `NOT NULL` on `org_id`, so the old image can run on the migrated database
 only until the new service writes its first row without an organization (any reminder, subscription, report or
 idempotency record). After that the old code cannot read those rows: roll forward instead.
+
+## 5. The CLI and the Rust client (added by the client and CLI stage)
+
+Before the window:
+
+1. The production sign-in setup of `remind` must have **`device_flow: true`** (Carbons' `remind login`) and
+   **`public_client: true`** (the CLI exchanges Silicons' short-lived tokens and refreshes with `client_id=remind`
+   alone; it holds no secret). The local test stack already has both. Without them `remind login` answers
+   `sign_in_not_allowed` and says how to turn them on.
+2. Publish `silicon-remind-client` 0.6.0, then `silicon-remind-cli` 0.6.0 to crates.io (in that order; the CLI depends
+   on the client), and upload the 0.6.0 archives to Silicon Apps (the packaging stage prepares them). The CLI's
+   `cargo package` verification can only pass once the client is on crates.io.
+
+In the window, at the same time as the service:
+
+3. **Silicons on the old CLI (0.5, installed by Honeycomb).** It speaks contract 1, so after the service switch every
+   command answers `410 api_version_retired`; `remind login <SLT>` cannot work either. Installing 0.6.0 through Silicon
+   Apps fixes it. On its first change 0.6.0 archives the old `state.json` as `state.iam-<time>.json` and asks to sign
+   in again; nothing else is needed on the machine. A machine that still runs the 0.1 updater service can remove it
+   with `remind daemon uninstall` (hidden, kept for one release).
+4. **The Silicon runtime** (`silicon connect` in stemcell) keeps running `remind login <SLT>` and `remind iam --json`;
+   both keep working (the second prints the `remind accounts --json` object). The runtime must mint the token from
+   Silicon Accounts (`silicon-accounts login --app remind -q`, an `slt_…`), not from the previous identity service:
+   the CLI refuses anything that does not start with `slt_` before sending it, with a hint that says how to mint one.
+   This is a change in stemcell, outside this migration.
+
+Check:
+
+5. On a clean machine: `remind --help`, `remind accounts --json` (shows `"app_id":"remind"`) and
+   `remind login status --json` (`{"authenticated":false}`) all exit 0. Then
+   `silicon-accounts login --app remind -q | remind login --slt-stdin`, `remind login status --json`
+   (`"verified":true`), `remind create …`, `remind list`, `remind logout`; and a Carbon's `remind login` approved on
+   the account site, then `remind silicons`.

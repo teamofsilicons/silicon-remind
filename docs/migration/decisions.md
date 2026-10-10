@@ -253,3 +253,120 @@ configuration. The AWS templates under `deploy/aws/` still carry IAM settings; t
   (positional `remind login <slt>`, device flow), `remind accounts --json` with the hidden `iam --json` alias.
 - Web (Next.js + Arc UI), docs (`docs/*.md` still describe IAM; dated IAM-era reports move to `docs/history/`),
   packaging (`apps.yaml`, release workflow), deploy templates and docs-site navigation (`iam.md`).
+
+## Stage 2: client crate and CLI (2026-10-10)
+
+### 11. The client crate (`silicon-remind-client` 0.6.0)
+
+11.1 **Two parts.** `accounts::SignIn` signs an account in to Remind at Silicon Accounts as Remind's public client
+(`client_id=remind`, no secret): device flow for Carbons, short-lived token (`slt_…`) for Silicons, refresh and
+revoke. `Client` calls contract 2 (`/api/v2`, `X-Remind-API-Version: 2`) with an access token (`with_session`) or a
+User verification proof (`with_proof`, `Authorization: Proof sap_…`). Both stay stateless.
+
+11.2 **Hand-rolled where 0.4.0 has no helper.** `silicon-accounts-client` 0.4.0 has no public-client SLT exchange
+(the brief's cheat sheet names `exchange_slt_public_client`; it does not exist in 0.4.0), and its public-client revoke
+accepts only the first-party ids. `SignIn` therefore posts `grant_type=urn:silicon:params:oauth:grant-type:slt` with
+`slt` and `client_id`, and revokes with `POST /v1/oauth/revoke` (`token`, `token_type_hint=refresh_token`,
+`client_id`), both never retried (single use). Device authorize/poll and refresh use the crate's
+`app_device_authorize`, `app_device_poll` and `refresh_app_public_client`.
+
+11.3 **Refusals are typed from Silicon Accounts' own words.** `invalid_grant` on an SLT carries a stable
+`error_description` (silicon-accounts `core/src/repo/tokens.rs`); `SignIn` maps it to `Refusal::SltAlreadyUsed`,
+`SltExpired`, `SltWrongApp { app }` (the app named in the message), `SltUnknown`, `NotAShortLivedToken`, else `Other`
+with the message verbatim. Every refusal hints `silicon-accounts login --app remind -q`. A token not starting with
+`slt_` (for example an `oac_` token from the previous identity service) is refused before anything is sent. Checked
+against the real stack: the already-used and wrong-app messages classify as designed.
+
+11.4 **Errors.** `Error::Api` keeps Remind's `{error:{code,message,hint,request_id}}` plus status and `Retry-After`;
+`Error::Accounts` covers other Silicon Accounts failures (including `connection_failed`); `Error::SignInRefused`
+carries the refusal. Every error has `code()`, `message()`, `hint()`, `status()`, `request_id()`, `is_transient()`.
+
+11.5 **Inside a test environment you stay yourself.** `with_test_environment` keeps the credential (0.5 cleared it:
+test environments then had their own identities). A test key is 32 letters and digits; the previous identity
+service's `ask_…` secrets are refused locally.
+
+11.6 **Removed:** `with_session(bearer, org)`'s organization, `iam()`, server-side `login`/`refresh`/`logout`,
+`organizations()`, `configure_environment_iam`, `auto_update()` and the `updates` module. **Added:** `viewers`,
+`grant_viewer`, `revoke_viewer`, `allowed_accounts`, `allow_account`, `disallow_account`, `webhooks(silicon)`,
+`silicons` paging by uuid. Models follow contract 2 (`AccountRef {uuid, id, kind}`, `owner` on reminders).
+
+### 12. The CLI (`remind`, `silicon-remind-cli` 0.6.0)
+
+12.1 **Command tree.** Signing in: `accounts`, `login` (device flow; `--open`, `--label`, `--force`), `login --slt`,
+`login --slt-stdin`, positional `login <slt>`, `login status [--offline]`, `logout`, `whoami`. New: `share
+add|list|remove`, `allow add|list|remove` (with `--silicon` for custodians), `webhook list --silicon`,
+`config set-accounts-url`. Kept: reminders, webhooks, `env …` (now `env use <id>` selects a saved key), `test-info`,
+`clean`, `docs` (+ `accounts` topic), `report`, `report-status`, `config`, `health`. Removed: `--org`, `--account`,
+`auth …`, `configure-iam`, `env use --secret-stdin`, `env create --iam-*`, `update`, `config auto-update`, `daemon
+install|run`.
+
+12.2 **Hidden, for one release.** `remind iam --json` prints exactly the `accounts --json` object (the Silicon
+runtime still calls it). `remind daemon uninstall|status` removes the 0.1 updater unit (`apps/remind.md`). `auth …`,
+`update`, `configure-iam` and `config auto-update` answer what replaced them (`update` returns
+`{"status":"managed","manager":"silicon-apps","command":"silicon-apps update remind"}` with exit 0, as 0.5 did for its
+manager). `--no-update` and `webhook set` are accepted silently. Positional `remind login <slt>` stays documented (it
+is in the contract).
+
+12.3 **State.** `{home}/.remind/state.json` schema 2: settings, `sign_ins` keyed `<api origin>#production` or
+`<api origin>#<test environment id>` (each with the Silicon Accounts origin and app id that issued it, the token pair,
+expiries, account and method), test keys, selection. Directory 0700, files 0600, atomic replace. The exclusive lock on
+`state.lock` is held only for read-modify-write and for a refresh, never while a Carbon approves a code. Reading
+never creates anything, so `--help`, `accounts --json` and `login status --json` leave an empty home empty.
+
+12.4 **Which sign-in a command uses.** One per Remind origin, plus one per test environment signed in with an explicit
+`--test <id>`. Any other test environment (including one selected with `remind env use`) uses the production sign-in
+of the same origin, and `remind login`/`logout` without `--test` always act on production. *Found in review: an
+earlier draft saved a sign-in made while an environment was selected for that environment only, leaving production
+signed out.* Test environments are managed from production whatever is selected; an explicit `--test` on `env`
+management is refused.
+
+12.5 **Refresh.** When under 60 seconds are left, under the lock: re-read; if another process already rotated the pair
+and it is fresh, use it; else refresh and save the new pair before using it. A 401 from Remind gets one forced refresh
+and one retry, except codes a refresh cannot cure (`account_deleted`, `token_kind_mismatch`, `token_wrong_audience`,
+`legacy_token_rejected`, proof and test-key codes). `invalid_grant` on refresh removes the local sign-in
+(`sign_in_ended`, exit 3). Proven across three concurrent processes: one refresh.
+
+12.6 **Signing in.** Before a single-use token is spent, the state directory is created (so the result can be saved)
+and both origins are validated. After the exchange, the token is checked with `GET /auth/me` in the plane it was made
+for: a 401/403 revokes the new sign-in and saves nothing (`token_refused_by_remind`: the two origins name different
+deployments); a transport failure or 5xx saves it unverified with a warning, so a Silicon whose Remind is briefly down
+still signs in. A token sign-in always replaces the saved one and revokes the previous refresh token (no pile-up of
+sign-ins for Silicons that sign in on every start); a device sign-in while signed in says so and changes nothing
+unless `--force`. The device label defaults to `remind on <hostname>`. No `REMIND_SLT` variable: the app never had one.
+
+12.7 **`login status`.** `{"authenticated":false}` (+ `reason`, `message` for `sign_in_ended`, `sign_in_again` (0.5
+state), `account_deleted`, `token_revoked`, `state_unreadable`, `home_unavailable`); signed in:
+`authenticated, uuid, id, kind, display_name?, expires_at, refresh_expires_at, verified, url, accounts_url, app_id,
+method, custodian?, can_manage_reminders, visible_silicons, test_environment?, uses_production_sign_in?, warning?`.
+`verified` is true only when Remind accepted the token just now. With `--json` it always exits 0; without, it exits 1
+when signed out (as `silicon-accounts login status` does).
+
+12.8 **`logout`.** Removes the local sign-in, then revokes its refresh token; when Silicon Accounts cannot be reached
+it warns and still forgets it (`revoked: false`). Nothing to end: `{"signed_out":false,"reason":"not_signed_in"}`,
+exit 0.
+
+12.9 **`accounts --json`.** `{app_id, client_id, accounts_url, api_url, version, api_version, sign_in {carbon, silicon,
+status}, docs_url}`, offline, exit 0 even with no usable home. `REMIND_APP_ID` overrides the app id for development
+(production and the Apps validators never set it).
+
+12.10 **Old state.** A 0.5 `state.json` is read without its sign-ins (status: `reason: sign_in_again`); the next write
+archives it as `state.iam-<time>.json` and keeps the API origin, telemetry and 32-character test keys (keys of the
+previous identity service's sandboxes and selections pointing at them are dropped). An unreadable file is reported
+by discovery commands and moved aside as `state.corrupt-<time>.json` on the next write.
+
+12.11 **Exit codes** stay 0 / 1 / 2 / 3 (also: not signed in, sign-in refused or ended) / 4, plus 130 for Ctrl-C while
+waiting for a device approval. `--json` errors keep `{error:{code,message,hint?,status?,request_id?,retry_after?}}`.
+
+12.12 **Telemetry** unchanged in kind: one `command_completed` event through Remind (Space Station) after commands that
+used the sign-in, only while the access token is fresh; never for discovery or local commands. Opt-out as before.
+
+### 13. Manuals touched by this stage
+
+13.1 `docs/accounts.md` (signing in and who sees what) replaces `iam.md` in the bundled manuals (`remind docs
+accounts`) and in the docs-site navigation. `docs/iam.md` and `docs/honeycomb-lifecycle.md` themselves are left for
+the documentation stage; their crate copies are gone. `scripts/sync-package-docs.py` gained `--check` and deletes
+retired copies.
+
+13.2 Rewritten: `docs/cli/README.md`, `docs/client/README.md`, `docs/api/README.md` (contract 2),
+`docs/testing-environments.md`, `docs/webhook-delivery.md` (`silicon_uuid`), `docs/releases.md` (Silicon Apps
+packaging per the brief's convention; the packaging stage owns the scripts it names), both crate READMEs.

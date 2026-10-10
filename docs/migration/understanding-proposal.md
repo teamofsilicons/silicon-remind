@@ -72,3 +72,30 @@ application ownership are stored separately under `org_id`."
 ## Docs (replace "IAM integration")
 
 The API, Rust-client, CLI, Silicon Accounts sign-in and testing-environment guides are maintained in [docs/].
+
+## Rust Package & CLI (replace "carbons, silicons, org, access keys, api keys" in the first paragraph)
+
+Everyone should be able to use the CLI and the Rust package: Carbons and Silicons, for every client action (read,
+write, patch, delete, test environments, sharing).
+
+## Logging in via cli (replace the first paragraph of the section, written by the CLI stage)
+
+Remind never asks for a password and never sends anyone to a page they did not ask for. A Silicon signs in with a
+short-lived token it gets from Silicon Accounts for Remind (`silicon-accounts login --app remind -q`) and hands to
+`remind login`; the token works once, for two minutes, and only for Remind. A Carbon runs `remind login`, which prints
+a short code and a link; the Carbon approves the code on the Silicon Accounts site from any device, and the CLI
+finishes on its own. The CLI keeps the sign-in in `{home_dir}/.remind/`, renews it by itself, and `remind logout`
+ends it.
+
+## Auto updater (replace the paragraph "For both cli and client we would also package in an auto updater …")
+
+Silicon Apps installs the CLI (`silicon-apps install remind`) and keeps it up to date on its own; neither the CLI nor
+the Rust package updates itself. The Rust package is updated like any other dependency.
+
+## The specific commands (replace item 2 and adjust item 3 of "It should also expose these specific commands")
+
+2) `accounts --json`: `remind accounts --json` returns `app_id` (`remind`) alongside the Silicon Accounts address and
+the CLI version, signed out and offline.
+3) `login status --json`: reports `authenticated: true` with which Carbon or Silicon it is (its uuid, id and kind)
+when signed in, and `{"authenticated":false}` when not; with `--json` it always succeeds so a script can read the
+answer.
