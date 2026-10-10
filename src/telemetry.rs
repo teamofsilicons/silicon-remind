@@ -139,7 +139,18 @@ impl Recorder {
         &self,
         pool: &sqlx::PgPool,
         is_test: bool,
+        event: serde_json::Value,
+    ) {
+        self.record_with_budget(pool, is_test, event, std::time::Duration::from_millis(100))
+            .await;
+    }
+
+    async fn record_with_budget(
+        &self,
+        pool: &sqlx::PgPool,
+        is_test: bool,
         mut event: serde_json::Value,
+        budget: std::time::Duration,
     ) {
         if !self.enabled {
             return;
@@ -150,7 +161,7 @@ impl Recorder {
         event["occurred_at"] = chrono::Utc::now().to_rfc3339().into();
         if is_test {
             // Never hand sandbox events to the production daemon or its disk spool.
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            let _ = tokio::time::timeout(budget, async {
                 sqlx::query("INSERT INTO telemetry_events(id,event) VALUES($1,$2)")
                     .bind(uuid::Uuid::now_v7()).bind(event).execute(pool).await?;
                 sqlx::query("DELETE FROM telemetry_events WHERE id IN (SELECT id FROM telemetry_events ORDER BY recorded_at DESC OFFSET 10000)").execute(pool).await?;
@@ -178,11 +189,15 @@ mod isolation_tests {
             #[cfg(unix)]
             client: None,
         };
+        // This test verifies routing and opt-out, not the deliberately lossy
+        // production latency budget. Loaded CI must still observe the fixture.
+        let budget = std::time::Duration::from_secs(5);
         recorder
-            .record(
+            .record_with_budget(
                 &pool,
                 true,
                 serde_json::json!({"source":"cli","event":"command_completed"}),
+                budget,
             )
             .await;
         let event: serde_json::Value = sqlx::query_scalar("SELECT event FROM telemetry_events")
@@ -191,14 +206,20 @@ mod isolation_tests {
         assert_eq!(event["environment"], "testing");
         recorder.enabled = false;
         recorder
-            .record(&pool, true, serde_json::json!({"event":"should_not_exist"}))
+            .record_with_budget(
+                &pool,
+                true,
+                serde_json::json!({"event":"should_not_exist"}),
+                budget,
+            )
             .await;
         recorder.enabled = true;
         recorder
-            .record(
+            .record_with_budget(
                 &pool,
                 false,
                 serde_json::json!({"event":"production_should_not_write_locally"}),
+                budget,
             )
             .await;
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM telemetry_events")

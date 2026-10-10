@@ -641,3 +641,8 @@ legacy API/worker containers and encrypted subscription keys remain unchanged.
 Focused OpenAPI verification passed 7/7 and formatting/docs sync passed. Deployment
 and native package candidates are rebuilt after this endpoint change. Public API
 and website changes remain gated on the coordinated release.
+
+The earlier PR CI run exposed a timing-dependent telemetry test: best-effort
+recording may intentionally drop an event after its 100 ms production budget.
+The isolation test now supplies a 5-second fixture budget while production keeps
+100 ms. The focused test passed against an isolated local database.
