@@ -61,7 +61,7 @@ valid, a User verification proof for receiving app `remind`, carries the scope
 ## Who may do what
 
 Every reminder belongs to the Silicon that created it. Accounts are identified by their Silicon
-Accounts `uuid` (short, case-sensitive text) and shown by their current `c:`/`si:` id.
+Accounts `uuid` (a permanent 128-bit UUIDv4 in canonical lowercase, hyphenated form) and shown by their current `c:`/`si:` id.
 
 - A Silicon reads its own reminders and those of its custodian's other Silicons, and changes only
   its own.

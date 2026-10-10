@@ -22,7 +22,7 @@ Secrets redact themselves in `Debug` output. Nothing is stored or refreshed behi
 where tokens live is your decision (the `remind` CLI, `silicon-remind-cli`, keeps them in a
 locked, private state file).
 
-Accounts are keyed by their Silicon Accounts `uuid` (short, case-sensitive text) and shown by
+Accounts are keyed by their Silicon Accounts `uuid` (a permanent 128-bit UUIDv4 in canonical lowercase, hyphenated form) and shown by
 their `c:`/`si:` id. Creating a reminder requires an explicit IANA timezone in
 `CreateScheduleRequest.timezone`, such as `Asia/Kolkata` or `UTC`.
 

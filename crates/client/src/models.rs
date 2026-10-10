@@ -1,7 +1,7 @@
 //! Public Remind wire types (contract 2). No backend or database dependency.
 //!
-//! Accounts are identified by their Silicon Accounts `uuid` (short, case-sensitive text such
-//! as `zQo`; never an RFC 4122 UUID) and shown by their current public id (`c:ada`,
+//! Accounts are identified by their permanent Silicon Accounts `uuid` (a 128-bit UUIDv4
+//! in canonical lowercase, hyphenated form) and shown by their current public id (`c:ada`,
 //! `si:scout`), which can change.
 use crate::Secret;
 use chrono::{DateTime, Utc};

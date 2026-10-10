@@ -763,3 +763,9 @@ Private evidence: `remind-live-product-mutation-proof.json`,
 `remind-live-delivery-proof.json` and `remind-live-testenv-proof.json`, under the
 Briefcase worktree's `.mig/production-release/`. These are actual production
 checks, separate from the local acceptance suites above.
+
+Current source guides, package guide copies and Rust documentation comments now
+describe canonical 128-bit account UUIDs consistently. The immutable 0.6.0 native
+archives and published crates retain their original embedded guide snapshot,
+which predates these prose corrections. No executable rebuild or version change
+was made for documentation alone.

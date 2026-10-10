@@ -42,7 +42,7 @@ pub fn now() -> i64 {
 /// The signed-in Carbon or Silicon, as Silicon Accounts shares it with Remind.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedInAccount {
-    /// Permanent Silicon Accounts uuid (short, case-sensitive). Key on this.
+    /// Permanent Silicon Accounts UUIDv4 (canonical lowercase, hyphenated). Key on this.
     pub uuid: String,
     /// Current public id (`c:ada`, `si:scout`); it can change.
     pub id: String,

@@ -173,8 +173,8 @@ your decision.
 | `report(input, mutation)`, `report_status(id)` | bug reports |
 | `track(event)` | one best-effort telemetry event (never fails the caller) |
 
-Accounts are `AccountRef { uuid, id, kind }`: key on `uuid` (short, case-sensitive text such as
-`zQo`, never an RFC 4122 UUID) and show `id` (`c:ada`, `si:scout`), which can change. A reminder
+Accounts are `AccountRef { uuid, id, kind }`: key on `uuid` (a permanent 128-bit UUIDv4 in
+canonical lowercase, hyphenated form) and show `id` (`c:ada`, `si:scout`), which can change. A reminder
 has `owner`; `silicon_id` is the owner's current id. `AccountTarget { id, silicon_id }` names
 another account by `c:`/`si:` id or uuid, and, for a custodian, which of its Silicons the request
 is about.
