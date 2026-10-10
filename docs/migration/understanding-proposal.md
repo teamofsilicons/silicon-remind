@@ -65,8 +65,11 @@ in. A login is always exactly one account, so there is nothing to choose and no 
 
 ## Identifier schema (replace the last sentence of the first paragraph)
 
-Every account also has a permanent `uuid` from Silicon Accounts: short, case-sensitive letters and digits (for example
-`8HV`). Remind keys everything on the uuid; ids can change, the uuid never does. Delete "Organisation membership and
+Every account also has a permanent 128-bit (16-byte) UUID from Silicon Accounts,
+serialized as 36 lowercase characters with hyphens, for example
+`d7ce239a-7b3e-4e0b-9236-b936405c1fda`. New accounts use UUIDv4. Remind keys everything
+on that immutable UUID; public `c:`/`si:` ids can change. Existing short identities
+move once through the coordinated migration. Delete "Organisation membership and
 application ownership are stored separately under `org_id`."
 
 ## Docs (replace "IAM integration")
