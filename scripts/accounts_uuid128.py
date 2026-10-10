@@ -157,8 +157,17 @@ def migrate(database_url, manifest, mapping, kinds, digest, apply=False):
                     if old not in mapping or (mapping[old],kinds[old]) != (new,kind):
                         raise ValueError("a managed schema has a conflicting persisted UUID map")
             for account_table in manifest.get("account_tables", [f"{schema}.accounts"]):
-                cur.execute(sql.SQL("SELECT uuid,kind::text FROM {} WHERE uuid=ANY(%s)").format(qualify(sql,account_table)), (list(mapping)+list(mapping.values()),))
+                cur.execute(sql.SQL("SELECT uuid,kind::text FROM {}").format(qualify(sql,account_table)))
                 accounts = dict(cur.fetchall())
+                for account_uuid in accounts:
+                    if account_uuid in mapping:
+                        continue
+                    try:
+                        parsed = uuid.UUID(account_uuid)
+                    except ValueError:
+                        raise ValueError(f"unmapped legacy account in {account_table}; export the complete Accounts plan") from None
+                    if str(parsed) != account_uuid or parsed.variant != uuid.RFC_4122:
+                        raise ValueError(f"unmapped legacy account in {account_table}; export the complete Accounts plan")
                 for old,new in mapping.items():
                     if old in accounts and not kind_matches(accounts[old], kinds[old], manifest.get("allow_unknown_kind", False)):
                         raise ValueError("mapping kind contradicts the existing account")

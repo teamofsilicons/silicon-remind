@@ -77,6 +77,9 @@ class Backfill(unittest.TestCase):
         fixture=self.seed()
         with psycopg.connect(self.url) as conn:
             manifest=manifest_for(conn)
+        partial={old:new for old,new in self.mapping.items() if old != "De3"}
+        with self.assertRaisesRegex(ValueError,"unmapped legacy account"):
+            migrate(self.url,manifest,partial,self.kinds,"a"*64,True)
         migrate(self.url,manifest,self.mapping,self.kinds,"f"*64,False)
         with psycopg.connect(self.url) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM accounts WHERE uuid='Si2'").fetchone()[0],1)
