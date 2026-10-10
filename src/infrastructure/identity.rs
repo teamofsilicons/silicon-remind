@@ -160,10 +160,15 @@ impl IdentityStore {
             .and_then(|iat| Utc.timestamp_opt(iat, 0).single())
             .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
         let token_id = claims.id.clone().unwrap_or_default();
-        let row = self
+        let (row, first_sign_in) = self
             .observe_token(&claims.sub, kind, &token_id, issued_at)
             .await?;
-        let row = self.refresh_if_stale(row).await?;
+        // An account Remind so far knew only from a lookup (shared with by id,
+        // named in a filter) has no display name or photo: a lookup never
+        // carries them, and the user base only has them once the account signed
+        // in. Its first token is that moment, so read it now, whatever the
+        // lookup TTL says.
+        let row = self.refresh_if_stale(row, first_sign_in).await?;
         self.actor_for(
             &row,
             Credential::AccessToken {
@@ -214,7 +219,7 @@ impl IdentityStore {
         if row.status == "deleted" {
             return Err(account_deleted());
         }
-        let row = self.refresh_if_stale(row).await?;
+        let row = self.refresh_if_stale(row, false).await?;
         self.actor_for(
             &row,
             Credential::Proof {
@@ -225,13 +230,16 @@ impl IdentityStore {
         .await
     }
 
+    /// Records a token Remind accepted for the account; also says whether it is
+    /// the first token Remind sees for an account it already knew (from a
+    /// lookup, a proof or a webhook), which is when its profile becomes readable.
     async fn observe_token(
         &self,
         uuid: &str,
         kind: ActorKind,
         token_id: &str,
         issued_at: DateTime<Utc>,
-    ) -> Result<AccountRow, AppError> {
+    ) -> Result<(AccountRow, bool), AppError> {
         if let Some(row) = self.find(uuid).await?
             && token_is_current(&row, issued_at)?
             && row.kind() == Some(kind)
@@ -239,7 +247,7 @@ impl IdentityStore {
             && row.last_token_iat.is_some_and(|seen| seen >= issued_at)
             && self.primary_key(uuid).await?.is_some()
         {
-            return Ok(row);
+            return Ok((row, false));
         }
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
@@ -259,6 +267,7 @@ impl IdentityStore {
         .fetch_one(&mut *transaction)
         .await?;
         token_is_current(&row, issued_at)?;
+        let first_sign_in = row.last_token_iat.is_none();
         if row.kind().is_some_and(|stored| stored != kind) {
             return Err(AppError::unauthenticated(
                 "token_kind_mismatch",
@@ -283,17 +292,18 @@ impl IdentityStore {
         .await?;
         insert_primary_key(&mut transaction, uuid).await?;
         transaction.commit().await?;
-        self.require_row(uuid).await
+        Ok((self.require_row(uuid).await?, first_sign_in))
     }
 
-    /// Refreshes the cached account when it was never read or is older than the
-    /// lookup TTL. A failed read keeps the cached copy.
-    async fn refresh_if_stale(&self, row: AccountRow) -> Result<AccountRow, AppError> {
+    /// Refreshes the cached account when it was never read, is older than the
+    /// lookup TTL, or `force` says so. A failed read keeps the cached copy.
+    async fn refresh_if_stale(&self, row: AccountRow, force: bool) -> Result<AccountRow, AppError> {
         let ttl = chrono::Duration::from_std(self.lookup_ttl)
             .map_err(|error| AppError::internal("lookup_ttl", error))?;
-        if row
-            .looked_up_at
-            .is_some_and(|looked_up_at| Utc::now() - looked_up_at < ttl)
+        if !force
+            && row
+                .looked_up_at
+                .is_some_and(|looked_up_at| Utc::now() - looked_up_at < ttl)
         {
             return Ok(row);
         }

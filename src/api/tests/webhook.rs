@@ -183,3 +183,56 @@ async fn profiles_come_from_the_user_base_not_from_lookups() -> anyhow::Result<(
     assert_eq!(me["display_name"], "Ada Lovelace");
     Ok(())
 }
+
+/// Found by the end-to-end run: an account Remind first met through a lookup
+/// (shared with by id) kept an empty name and photo after it signed in,
+/// because the lookup counted as a fresh read for the whole lookup TTL.
+#[tokio::test]
+async fn an_account_first_looked_up_gets_its_profile_when_it_signs_in() -> anyhow::Result<()> {
+    let harness = Harness::new().await?;
+    harness
+        .seed("Ada", ActorKind::Carbon, "c:ada", None)
+        .await?;
+    harness
+        .seed(
+            "Sco",
+            ActorKind::Silicon,
+            "si:scout",
+            Some(("Ada", "c:ada")),
+        )
+        .await?;
+    // Zed is known to Remind only through a lookup by id, which never carries
+    // a display name or photo.
+    harness
+        .lookup("Zed", ActorKind::Carbon, "c:zed", None)
+        .await;
+    let scout = harness.bearer("Sco", ActorKind::Silicon, "si:scout")?;
+    let (status, grant) = harness
+        .send(
+            "POST",
+            "/api/v2/viewers",
+            Some(&scout),
+            Some(json!({"id": "c:zed"})),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{grant}");
+
+    // Zed signs in to Remind, so the user base has its profile from now on.
+    harness
+        .member("Zed", ActorKind::Carbon, "c:zed", "Zed Shaw")
+        .await;
+    let zed = harness.bearer("Zed", ActorKind::Carbon, "c:zed")?;
+    let (status, me) = harness
+        .send("GET", "/api/v2/auth/me", Some(&zed), None, &[])
+        .await?;
+    assert_eq!(
+        (status, me["display_name"].as_str(), me["pfp_url"].as_str()),
+        (
+            StatusCode::OK,
+            Some("Zed Shaw"),
+            Some("https://example.test/pfp.png")
+        )
+    );
+    Ok(())
+}
