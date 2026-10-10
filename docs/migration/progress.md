@@ -402,7 +402,8 @@ Nothing new. Still outside Remind: the Silicon Interface's switch to proofs and 
   (now in `.gitignore`). Decisions §18.1–18.4.
 - **`scripts/e2e-accounts.sh`** (`scripts/e2e_accounts.py`): the eight scenarios of the stage plus every Silicon
   Accounts event, suspension, concurrent refresh and the Carbon's refresh (decisions §18.5–18.10). 131 checks; each
-  scenario also runs alone (`--only N`); transcripts mask tokens, STKs and test keys.
+  scenario also runs alone (`--only N`); transcripts mask tokens, STKs and test keys; a run signs its CLI test homes
+  out when it ends (the 23 homes earlier runs of this stage left signed in were signed out by hand).
 - **Bug found and fixed** (decisions §19.1): an account first stored from a lookup (shared with by id, named in a
   `--silicon` filter) stayed without name and photo for up to 15 minutes after signing in. Its first token now forces
   a re-read. Regression test `an_account_first_looked_up_gets_its_profile_when_it_signs_in`.
@@ -415,7 +416,9 @@ Nothing new. Still outside Remind: the Silicon Interface's switch to proofs and 
 35c8c71 Run Remind and its end-to-end checks against a local Silicon Accounts ·
 9383ab7 Check refreshes and suspension end to end ·
 5f8be15 Keep error codes readable in end-to-end transcripts ·
-and the commit that records this stage.
+7b4c30b Record the end-to-end stage: decisions, cutover pre-flight, progress ·
+a4af827 Sign the end-to-end test homes out when a run ends ·
+and the commit that completes this list.
 
 ### Tests
 
