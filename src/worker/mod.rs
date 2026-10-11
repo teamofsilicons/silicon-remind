@@ -26,7 +26,6 @@ pub mod scheduler;
 
 struct WorkerRuntime {
     identity: IdentityStore,
-    telemetry: crate::telemetry::Recorder,
     tests: Option<crate::infrastructure::testing::TestEnvironments>,
     repository: PostgresRepository,
     encryption: SecretCipherKeyring,
@@ -47,6 +46,7 @@ struct WorkerRuntime {
 /// Returns startup/configuration errors. Transient loop failures are observed,
 /// logged, and retried rather than terminating the process.
 pub async fn run(settings: Settings) -> anyhow::Result<()> {
+    crate::logging::install_tls_provider();
     let pool = postgres::connect(&settings.database).await?;
     let repository = PostgresRepository::new(pool.clone());
     let encryption = SecretCipherKeyring::from_base64url(
@@ -99,7 +99,6 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     };
     let runtime = WorkerRuntime {
         identity,
-        telemetry: crate::telemetry::Recorder::new(&settings),
         tests,
         repository,
         encryption,
@@ -183,7 +182,7 @@ async fn serve_worker(
     );
     let mut operational_failure = None;
     let mut test_cursor = None;
-    let mut heartbeat = heartbeat_interval();
+    let mut sweep = sweep_interval();
     loop {
         tokio::select! {
             () = &mut shutdown => break,
@@ -199,8 +198,7 @@ async fn serve_worker(
                 });
                 break;
             }
-            _ = heartbeat.tick() => {
-                record_heartbeat(runtime).await;
+            _ = sweep.tick() => {
                 if let Err(error) = runtime.identity.refresh_due_accounts(100).await {
                     tracing::warn!(%error, "account refresh sweep failed");
                 }
@@ -388,11 +386,7 @@ async fn work_test_environments(runtime: &WorkerRuntime, test_cursor: &mut Optio
     }
 }
 
-async fn record_heartbeat(runtime: &WorkerRuntime) {
-    runtime.telemetry.record(runtime.repository.pool(),false,serde_json::json!({"source":"worker","event":"heartbeat","step":"polling","batch_size":runtime.batch_size,"delivery_concurrency":runtime.delivery.max_concurrency()})).await;
-}
-
-fn heartbeat_interval() -> tokio::time::Interval {
+fn sweep_interval() -> tokio::time::Interval {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     interval

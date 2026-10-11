@@ -51,7 +51,6 @@ pub struct ApiState {
     pub(crate) encryption: SecretCipherKeyring,
     pub(crate) is_test: bool,
     pub(crate) reports_enabled: bool,
-    pub(crate) telemetry: crate::telemetry::Recorder,
     pub(crate) environment: RuntimeEnvironment,
     pub(crate) metrics: Metrics,
     pub(crate) request_timeout: Duration,
@@ -66,6 +65,7 @@ impl ApiState {
     /// Returns an error when an outbound client or the encryption keyring cannot
     /// be constructed from validated configuration.
     pub fn new(settings: &Settings, pool: PgPool) -> anyhow::Result<Self> {
+        crate::logging::install_tls_provider();
         let repository = PostgresRepository::new(pool.clone());
         let gateway = AccountsGateway::new(&settings.accounts)?;
         let identity = IdentityStore::new(pool, gateway, settings.accounts.lookup_ttl);
@@ -90,7 +90,6 @@ impl ApiState {
             webhook_secrets: settings.accounts.webhook_secrets.clone(),
             encryption,
             is_test: false,
-            telemetry: crate::telemetry::Recorder::new(settings),
             reports_enabled: settings.postmark_server_token.is_some(),
             environment: settings.environment,
             metrics: Metrics::new(),
@@ -107,7 +106,6 @@ impl ApiState {
 )]
 pub fn router(state: ApiState, settings: &Settings) -> Router {
     let public_api = Router::new()
-        .route("/telemetry/events", post(handlers::telemetry::record))
         .route("/reports", post(handlers::reports::create))
         .route("/reports/{id}", get(handlers::reports::get))
         .route(

@@ -30,7 +30,6 @@ impl Home {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &self.path)
-            .env("REMIND_TELEMETRY_ENABLED", "false")
             .stdin(Stdio::null());
         // Winsock loads its providers relative to SystemRoot on Windows.
         if let Some(system_root) = std::env::var_os("SystemRoot") {

@@ -1,5 +1,5 @@
 //! The Remind API client: immutable configuration, one request per call, no stored session.
-use crate::{Error, Mutation, Result, Secret, is_test_environment_key, models};
+use crate::{Error, Mutation, Result, Secret, is_test_environment_key};
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -30,7 +30,6 @@ pub struct Client {
     base: Url,
     credential: Option<Credential>,
     test_key: Option<Secret>,
-    telemetry_enabled: bool,
 }
 
 impl Client {
@@ -50,7 +49,6 @@ impl Client {
             base,
             credential: None,
             test_key: None,
-            telemetry_enabled: true,
         })
     }
 
@@ -106,12 +104,14 @@ impl Client {
         Ok(next)
     }
 
-    /// Turns client and request telemetry on or off (on by default).
+    /// Does nothing and returns an unchanged copy: Remind records no telemetry.
+    #[deprecated(
+        since = "0.7.0",
+        note = "Remind records no telemetry; remove this call"
+    )]
     #[must_use]
-    pub fn with_telemetry(&self, enabled: bool) -> Self {
-        let mut next = self.clone();
-        next.telemetry_enabled = enabled;
-        next
+    pub fn with_telemetry(&self, _enabled: bool) -> Self {
+        self.clone()
     }
 
     /// Whether a test environment is selected.
@@ -122,10 +122,6 @@ impl Client {
     /// Whether a credential is attached.
     pub fn has_credential(&self) -> bool {
         self.credential.is_some()
-    }
-
-    pub(crate) fn telemetry_enabled(&self) -> bool {
-        self.telemetry_enabled
     }
 
     pub(crate) fn require_test(&self) -> Result<()> {
@@ -164,9 +160,6 @@ impl Client {
             .http
             .request(method, url)
             .header("x-remind-api-version", API_VERSION.to_string());
-        if !self.telemetry_enabled {
-            request = request.header("x-remind-telemetry", "off");
-        }
         match &self.credential {
             Some(Credential::Bearer(token)) => request = request.bearer_auth(token.expose()),
             Some(Credential::Proof(proof)) => {
@@ -194,32 +187,13 @@ impl Client {
     }
 
     pub(crate) async fn json<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T> {
-        let started = std::time::Instant::now();
-        let result = self
-            .send(request)
+        self.send(request)
             .await
-            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|_| Error::Decode));
-        self.observe(started, result.is_ok()).await;
-        result
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|_| Error::Decode))
     }
 
     pub(crate) async fn empty(&self, request: RequestBuilder) -> Result<()> {
-        let started = std::time::Instant::now();
-        let result = self.send(request).await.map(|_| ());
-        self.observe(started, result.is_ok()).await;
-        result
-    }
-
-    async fn observe(&self, started: std::time::Instant, success: bool) {
-        self.track(&models::TelemetryEvent {
-            source: "rust_client".into(),
-            event: "request_completed".into(),
-            step: "response".into(),
-            success,
-            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            status_code: None,
-        })
-        .await;
+        self.send(request).await.map(|_| ())
     }
 
     async fn send(&self, request: RequestBuilder) -> Result<Vec<u8>> {

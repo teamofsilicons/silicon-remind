@@ -23,7 +23,7 @@ The server performs public hosted Accounts sign-in with PKCE and keeps access an
 
 Mutation requests carry idempotency keys. Hold controls guard archive, purge, revoke, rotate and retire actions. Backend limit and validation errors stay visible next to the operation. The browser uses immutable Accounts UUIDs for authority and mutable public ids for display; both canonical UUIDs and transitional legacy identifiers are accepted.
 
-Space Station telemetry starts only after sign-in and can be disabled in Settings. Its transport permits a small event vocabulary; it strips account ids, reminder text, destination URLs, credentials, raw errors and page queries.
+The site records no telemetry.
 
 ## Verify
 

@@ -515,6 +515,7 @@ impl TestEnvironments {
             "hook_destinations",
             "idempotency_records",
             "internal_event_receipts",
+            // Migration 0007's table: no longer written, still cleared with the rest.
             "telemetry_events",
             "bug_reports",
             "audit_records",

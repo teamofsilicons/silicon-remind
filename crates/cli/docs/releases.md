@@ -16,7 +16,7 @@ Silicon Accounts). Each target ships as its own archive,
 ```yaml
 schema_version: 1
 app_id: remind
-version: 0.6.0
+version: 0.7.0
 command: remind
 targets:
   linux-x86_64:
@@ -59,7 +59,7 @@ To build and pack on one Mac instead (Xcode, `cargo-zigbuild` with Zig 0.15, and
 ```sh
 python3 scripts/build-release.py                                  # all six targets into dist/apps/
 python3 scripts/build-release.py --targets linux-x86_64,linux-aarch64
-scripts/package-apps.sh 0.6.0 macos-aarch64 target/release/remind  # pack one binary you built
+scripts/package-apps.sh 0.7.0 macos-aarch64 target/release/remind  # pack one binary you built
 ```
 
 The script refuses a binary built for another target, a Linux binary that needs a glibc newer than 2.28, and a
@@ -72,11 +72,11 @@ An author of the `remind` app uploads each archive to Silicon Apps, creates a de
 release from the packages, checks it, then promotes it to production:
 
 ```sh
-silicon-apps upload remind --target linux-x86_64 dist/apps/remind-0.6.0-linux-x86_64.tar.gz
-silicon-apps upload remind --target linux-aarch64 dist/apps/remind-0.6.0-linux-aarch64.tar.gz
+silicon-apps upload remind --target linux-x86_64 dist/apps/remind-0.7.0-linux-x86_64.tar.gz
+silicon-apps upload remind --target linux-aarch64 dist/apps/remind-0.7.0-linux-aarch64.tar.gz
 silicon-apps packages remind
-silicon-apps release remind --version 0.6.0 --package <package_id> --package <package_id>
-silicon-apps promote remind <release_id> --version 0.6.0
+silicon-apps release remind --version 0.7.0 --package <package_id> --package <package_id>
+silicon-apps promote remind <release_id> --version 0.7.0
 ```
 
 Publish the crates in dependency order: `silicon-remind-client`, then `silicon-remind-cli`.

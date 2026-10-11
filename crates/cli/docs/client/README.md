@@ -7,7 +7,7 @@ is built only on this crate, so everything the CLI does, your program can do.
 
 ```toml
 [dependencies]
-silicon-remind-client = "0.6"
+silicon-remind-client = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -151,7 +151,7 @@ your decision.
 | `revoke(&refresh_token)` | sign out; `true` when something was revoked |
 | `Client::new(url)` | client for the Remind API at a pathless origin |
 | `with_session(access_token)`, `with_proof(proof)` | attach a credential |
-| `with_test_environment(key)`, `with_telemetry(on)` | select a test environment; telemetry |
+| `with_test_environment(key)` | select a test environment |
 | `health(ready)`, `versions()` | liveness/readiness; served contracts (no credential needed) |
 | `me()` | the calling account as Remind sees it (`Identity`) |
 | `login_status()` | `LoginStatus`: `authenticated: false` only for HTTP 401 |
@@ -171,7 +171,6 @@ your decision.
 | `environment_key(id)`, `rotate_environment_key(id)`, `delete_environment(id)`, `restore_environment(id)` | keys and lifecycle |
 | `current_environment()`, `clean_environment()` | inside a test environment, by key alone |
 | `report(input, mutation)`, `report_status(id)` | bug reports |
-| `track(event)` | one best-effort telemetry event (never fails the caller) |
 
 Accounts are `AccountRef { uuid, id, kind }`: key on `uuid` (a permanent 128-bit UUIDv4 in
 canonical lowercase, hyphenated form) and show `id` (`c:ada`, `si:scout`), which can change. A reminder
@@ -223,12 +222,11 @@ Every error has `code()`, `message()`, `hint()`, `status()` and `request_id()`, 
 - `Error::Invalid` (refused locally), `Error::Transport` (no answer from Remind),
   `Error::Decode` (an answer this client does not understand), `Error::ResponseTooLarge`.
 
-## Versions, reports and telemetry
+## Versions and reports
 
 `versions()` reads `/api/versions`; every request names contract 2 (`X-Remind-API-Version: 2`).
 See the [version policy](../version-policy.md). `report` and `report_status` send and track a
-bug report. Telemetry is on by default: `with_telemetry(false)` turns off client events and
-Remind's request observations for that client. Events go through the Remind API; no Space
-Station key ships with the client. See [diagnostics](../diagnostics.md).
+bug report; see [bug reports](../diagnostics.md). Remind records no telemetry: `with_telemetry`
+and `track` are deprecated and do nothing.
 
 The crate never updates itself: update it in your `Cargo.toml` and rebuild.

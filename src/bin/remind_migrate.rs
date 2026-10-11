@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use silicon_remind::{
     config::{MigrationSettings, RuntimeEnvironment, lookup_settings_from_env},
     infrastructure::{accounts::AccountsGateway, identity_links, postgres},
-    telemetry,
+    logging,
 };
 
 /// Applies Remind's database migrations, or links rows from before Silicon
@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let settings = MigrationSettings::from_env()?;
     // Logs go to standard error: standard output carries link-identities' JSON report.
-    telemetry::init_command(settings.environment, &settings.log_filter)?;
+    logging::init_command(settings.environment, &settings.log_filter)?;
     match cli.command.unwrap_or(Command::Migrate) {
         Command::Migrate => {
             let pool = postgres::connect(&settings.database).await?;

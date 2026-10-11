@@ -1,7 +1,7 @@
 //! Every command except signing in: discovery, reminders, sharing, webhooks, test
 //! environments, settings, manuals and reports.
 use crate::{
-    args::{Allow, Command, Config, Share, Toggle, Webhook},
+    args::{Allow, Command, Config, Share, Webhook},
     output::{CliError, EXIT_OK, key_values},
     session::{Authed, Ctx},
     state::{configure_home, slot},
@@ -439,6 +439,10 @@ async fn report(ctx: &Ctx, message: &str, pr: Option<&str>) -> anyhow::Result<()
     Ok(())
 }
 
+/// What the retired `remind config telemetry on|off` prints; it changes nothing.
+const TELEMETRY_REMOVED: &str =
+    "Telemetry was removed from Remind; there is nothing to turn on or off.";
+
 fn config(ctx: &Ctx, command: &Config) -> anyhow::Result<()> {
     match command {
         Config::Show => {
@@ -457,7 +461,6 @@ fn config(ctx: &Ctx, command: &Config) -> anyhow::Result<()> {
                 "app_id": ctx.app_id,
                 "home": home.parent().display().to_string(),
                 "state_dir": home.dir().display().to_string(),
-                "telemetry": state.telemetry,
                 "sign_ins": sign_ins,
                 "saved_test_environment_count": state.test_keys.len(),
                 "selected_test_environment": state.selected_tests.get(&ctx.url),
@@ -486,10 +489,11 @@ fn config(ctx: &Ctx, command: &Config) -> anyhow::Result<()> {
                 "Later commands keep their state there; existing sign-ins and keys were not moved.",
             );
         }
-        Config::Telemetry { value } => {
-            let enabled = matches!(value, Toggle::On);
-            save(ctx, move |state| state.telemetry = enabled)?;
-            ctx.out.result(&json!({"telemetry": enabled}))?;
+        Config::Telemetry { .. } => {
+            ctx.out.either(
+                &json!({"telemetry": "removed", "message": TELEMETRY_REMOVED}),
+                TELEMETRY_REMOVED,
+            )?;
         }
         Config::AutoUpdate { .. } => {
             ctx.out

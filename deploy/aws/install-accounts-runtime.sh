@@ -30,7 +30,6 @@ PY
 for component in api worker; do
   memory=256m; [ "$component" = worker ] && memory=128m
   unit=remind-accounts-$component
-  install -d -m 0700 -o 10001 -g 10001 "/var/lib/remind/accounts-telemetry-$component"
   if [ -f "/etc/systemd/system/$unit.service" ]; then cp -p "/etc/systemd/system/$unit.service" "$backup/"; fi
   cat > "/etc/systemd/system/$unit.service" <<UNIT
 [Unit]
@@ -42,7 +41,7 @@ Wants=network-online.target
 Restart=always
 RestartSec=5
 ExecStartPre=-/usr/bin/docker rm -f $unit
-ExecStart=/usr/bin/docker run --name $unit --network remind --entrypoint /usr/local/bin/remind-$component --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --memory $memory --env-file /etc/remind/accounts/runtime.env --mount type=bind,src=/var/lib/remind/accounts-telemetry-$component,dst=/var/lib/remind/telemetry --log-opt max-size=10m --log-opt max-file=3 $image
+ExecStart=/usr/bin/docker run --name $unit --network remind --entrypoint /usr/local/bin/remind-$component --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --memory $memory --env-file /etc/remind/accounts/runtime.env --log-opt max-size=10m --log-opt max-file=3 $image
 ExecStop=/usr/bin/docker stop -t 30 $unit
 TimeoutStopSec=40
 [Install]

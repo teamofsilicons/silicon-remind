@@ -1,7 +1,6 @@
 //! One method per Remind API operation (contract 2). Paths are relative to `/api/v2`.
 use crate::{Client, Error, Mutation, Result, models};
 use reqwest::Method;
-use std::time::Duration;
 use uuid::Uuid;
 
 fn segment(value: &str) -> String {
@@ -15,20 +14,13 @@ fn silicon_query(silicon: Option<&str>) -> Vec<(&'static str, String)> {
 }
 
 impl Client {
-    /// Sends one bounded, best-effort operational event (Space Station, through Remind).
-    /// Does nothing without a signed-in session or after opting out; never fails the caller.
-    pub async fn track(&self, event: &models::TelemetryEvent) {
-        if !self.telemetry_enabled() || !self.has_credential() {
-            return;
-        }
-        if let Ok(request) = self.request(Method::POST, "/telemetry/events") {
-            let _ = request
-                .timeout(Duration::from_millis(250))
-                .json(event)
-                .send()
-                .await;
-        }
-    }
+    /// Does nothing: Remind records no telemetry, so nothing is sent.
+    #[deprecated(
+        since = "0.7.0",
+        note = "Remind records no telemetry; remove this call"
+    )]
+    #[allow(deprecated)]
+    pub async fn track(&self, _event: &models::TelemetryEvent) {}
 
     /// `GET /api/versions`: the contracts this Remind serves and their deprecation state.
     pub async fn versions(&self) -> Result<serde_json::Value> {

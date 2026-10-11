@@ -7,7 +7,6 @@ pub mod health;
 pub mod reports;
 pub mod schedules;
 pub mod sharing;
-pub(crate) mod telemetry;
 pub mod testing;
 
 use axum::response::{IntoResponse as _, Response};
