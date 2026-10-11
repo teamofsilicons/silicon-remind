@@ -530,7 +530,8 @@ pub struct BugReportResponse {
     pub failure_reason: Option<String>,
 }
 
-/// Bounded operational fields; bodies, credentials and arbitrary context never appear.
+/// Kept so existing code still compiles; [`crate::Client::track`] ignores it and sends nothing.
+#[deprecated(since = "0.7.0", note = "Remind records no telemetry")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TelemetryEvent {
     /// `rust_client`, `cli` or `web`.

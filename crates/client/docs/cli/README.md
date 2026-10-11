@@ -40,7 +40,7 @@ remind accounts --json      # no sign-in, no network
 
 ```json
 {"app_id":"remind","client_id":"remind","accounts_url":"https://accounts.teamofsilicons.com",
- "api_url":"https://api.remind.teamofsilicons.com","version":"0.6.0","api_version":2,
+ "api_url":"https://api.remind.teamofsilicons.com","version":"0.7.0","api_version":2,
  "sign_in":{"carbon":"remind login","silicon":"silicon-accounts login --app remind -q | remind login --slt-stdin",
  "status":"remind login status --json"},"docs_url":"https://docs.remind.teamofsilicons.com"}
 ```
@@ -178,7 +178,6 @@ naming it. The [testing guide](../testing-environments.md) has the details.
 | Remind API origin | `--url` | `REMIND_URL` | `remind config set-url <url>` |
 | Silicon Accounts origin | `--accounts-url` | `ACCOUNTS_URL` | `remind config set-accounts-url <url>` |
 | home | | `SILICON_HOME` | `remind config home <directory>` |
-| telemetry | | `REMIND_TELEMETRY_ENABLED=false` | `remind config telemetry on\|off` |
 | app id (development only) | | `REMIND_APP_ID` | |
 
 The defaults are `https://api.remind.teamofsilicons.com` and
@@ -228,15 +227,8 @@ remind report-status <report_id>
 ```
 
 `report` emails the Remind team using your sign-in (`--pr` is optional); inside a test
-environment it is simulated. Never include secrets.
-
-## Telemetry
-
-Operational telemetry is on by default: after a command that used your sign-in, `remind` sends
-one `command_completed` event (success, duration) through Remind to Space Station. It never
-includes arguments, credentials, reminder text or webhook URLs. `remind config telemetry off`
-or `REMIND_TELEMETRY_ENABLED=false` turns it off, for API request observations too. Events
-inside a test environment stay in that environment. See [diagnostics](../diagnostics.md).
+environment it is simulated. Never include secrets. See [bug reports](../diagnostics.md).
+Remind records no telemetry.
 
 ## Command reference
 
@@ -264,7 +256,7 @@ inside a test environment stay in that environment. See [diagnostics](../diagnos
 | `test-info`, `clean` | inside a test environment only |
 | `docs [topic]` | offline manuals |
 | `report <message>`, `report-status <id>` | bug reports |
-| `config show\|set-url\|set-accounts-url\|home\|telemetry` | local settings |
+| `config show\|set-url\|set-accounts-url\|home` | local settings |
 | `health` | API liveness; `--ready` checks its database |
 
 Global flags: `--url`, `--accounts-url`, `--test <id>`, `--production`, `--json`,

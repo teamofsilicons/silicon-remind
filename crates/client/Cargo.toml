@@ -1,6 +1,6 @@
 [package]
 name = "silicon-remind-client"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.98"
 description = "Stateless Rust client for Silicon Remind: sign in with Silicon Accounts, manage reminders, sharing and test environments"

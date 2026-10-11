@@ -203,10 +203,7 @@ class Config:
             "REMIND_WORKER_OPERATIONAL_BIND_ADDR": f"127.0.0.1:{self.worker_port}",
             "REMIND_WORKER_POLL_INTERVAL_MS": "500",
             "REMIND_TEST_WEBHOOK_URLS": self.receiver_url,
-            # Never mail or record telemetry from a development service, even with a stray .env around.
-            "REMIND_TELEMETRY_ENABLED": "false",
-            "REMIND_TELEMETRY_TABLE_KEY": "",
-            "REMIND_TELEMETRY_HOME": str(self.dir / "telemetry"),
+            # Never mail from a development service, even with a stray .env around.
             "REMIND_POSTMARK_SERVER_TOKEN": "",
         })
         return env

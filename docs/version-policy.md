@@ -9,7 +9,7 @@ the same response header. `GET /api/versions` lists the contracts, their lifecyc
 Rust client's `versions()` returns it.
 
 The protocol is HTTPS with JSON. Use the published [OpenAPI document](../openapi.yaml) to generate consumers. Package
-versions and wire versions are independent: CLI and client 0.6.0 speak contract 2.
+versions and wire versions are independent: CLI and client 0.7.0 speak contract 2.
 
 ## Contract 1 is retired
 
@@ -31,8 +31,8 @@ group of accounts. Both are gone, so it could not keep running beside contract 2
 
 | Consumer | HTTP contract | Updates |
 | --- | --- | --- |
-| CLI and client 0.5 and earlier | 1 (retired: `410`) | install 0.6.0 |
-| CLI and client 0.6.0 | 2 | CLI: Silicon Apps keeps it current; client: a normal Cargo update |
+| CLI and client 0.5 and earlier | 1 (retired: `410`) | install 0.7.0 |
+| CLI and client 0.6 and 0.7 | 2 | CLI: Silicon Apps keeps it current; client: a normal Cargo update |
 | Website | 2 | deployed by the operator |
 
 Within a contract, existing paths, status codes and reminder semantics stay supported, and consumers must ignore
@@ -48,7 +48,7 @@ website. A missing, null, empty or whitespace-only timezone answers `422 timezon
 ## Deprecation and sunset
 
 The database registry stores each contract's status, deprecation time, last request time and request count. This is
-Remind's own contract-governance state, separate from telemetry. Usage inside a test environment stays in its own
+Remind's own contract-governance state. Usage inside a test environment stays in its own
 schema and cannot keep a production contract alive.
 
 A deprecated contract that is not current sunsets after **seven full days with no requests**, counted from the later
@@ -61,6 +61,9 @@ until retirement is recorded.
 
 Contract 1 is the one exception: it was retired at once when Remind moved to Silicon Accounts, because its
 authentication stopped existing at that moment (recorded in migration 0010).
+
+Remind records no telemetry: 0.7.0 removed `POST /api/v2/telemetry/events` within contract 2, which clients only
+ever called best-effort without reading the answer.
 
 When adding another contract, operators first register it as active, add its router and client compatibility tests,
 and deploy every supported handler. Only then do they mark the superseded contract deprecated with a database

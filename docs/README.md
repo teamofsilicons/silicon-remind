@@ -58,7 +58,7 @@ You stay signed in as yourself; its 32-character key opens it to anyone you give
 - [Verify webhook deliveries](webhook-delivery.md)
 - [Test environments](testing-environments.md)
 - [Version policy and compatibility](version-policy.md)
-- [Bug reports and telemetry settings](diagnostics.md)
+- [Bug reports](diagnostics.md)
 - [Operator deployment guide](deployment.md) and the [service-only routes](internal-api.md)
 
 Run `remind <command> --help` to explore the command tree, or `remind docs <topic>` for the complete offline

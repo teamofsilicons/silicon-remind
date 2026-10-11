@@ -51,9 +51,9 @@ proof), `REMIND_ACCOUNTS_REQUEST_TIMEOUT_MS`, `REMIND_ACCOUNTS_LOOKUP_TTL_SECOND
 `REMIND_ENCRYPTION_CURRENT_VERSION`, the database pool size, log filter, request and webhook timeouts and the
 delivery concurrency. Every setting is described in [.env.example](../../.env.example).
 
-Postmark (bug reports) and Space Station telemetry settings, and the telemetry spool mount, were added to the live
-host by hand (see the [deployment records](../../docs/history/deploy/)); the template does not create them. Carry them
-over before you re-provision the instance.
+Postmark (bug reports) settings were added to the live host by hand (see the
+[deployment records](../../docs/history/deploy/)); the template does not create them. Carry them over before you
+re-provision the instance. Remind records no telemetry, so leave out the old telemetry settings and spool mount.
 
 The restricted `remind_testing` role needs `CREATE` and `TEMPORARY` on `silicon_remind_test`: each isolated schema
 replays migrations that use temporary mapping tables. `bootstrap-task.py` grants these only to the testing role.

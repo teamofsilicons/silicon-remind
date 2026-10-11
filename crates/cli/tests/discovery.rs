@@ -239,7 +239,12 @@ fn a_state_file_from_the_previous_release_asks_to_sign_in_again() -> Result<()> 
     );
     let changed = home
         .remind(None, None)
-        .args(["config", "telemetry", "off", "--json"])
+        .args([
+            "config",
+            "set-url",
+            "https://backend.remind.teamofsilicons.com",
+            "--json",
+        ])
         .output()?;
     assert!(changed.status.success());
     assert!(String::from_utf8_lossy(&changed.stderr).contains("archived"));
@@ -253,6 +258,10 @@ fn a_state_file_from_the_previous_release_asks_to_sign_in_again() -> Result<()> 
     let state = home.state()?;
     assert_eq!(state["version"], 2);
     assert!(state.get("sessions").is_none());
+    assert!(
+        state.get("telemetry").is_none(),
+        "the old setting is dropped"
+    );
     Ok(())
 }
 
@@ -309,6 +318,23 @@ fn retired_commands_explain_what_replaced_them() -> Result<()> {
         .args(["--org", "tos", "list"])
         .output()?;
     assert_eq!(removed.status.code(), Some(2));
+    for value in ["on", "off"] {
+        let telemetry = home
+            .remind(None, None)
+            .args(["config", "telemetry", value])
+            .output()?;
+        assert_eq!(telemetry.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&telemetry.stdout),
+            "Telemetry was removed from Remind; there is nothing to turn on or off.\n"
+        );
+    }
+    let telemetry = ok_json(
+        home.remind(None, None)
+            .args(["--json", "config", "telemetry", "off"])
+            .output()?,
+    )?;
+    assert_eq!(telemetry["telemetry"], "removed");
     assert!(
         !home.path.join(".remind").exists(),
         "none of these wrote state"

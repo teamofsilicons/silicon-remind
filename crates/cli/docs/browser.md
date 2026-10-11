@@ -34,11 +34,5 @@ logs belong to the test environment. [Testing guide](testing-environments.md).
 
 Every error says what happened and what to do. If a request keeps failing, keep its request id for diagnosis. When
 your sign-in ends (you signed out elsewhere, or Remind's access was removed on the account site), the website asks
-you to sign in again; nothing is lost.
-
-## Telemetry preference
-
-Settings → Telemetry controls Remind's operational analytics for this browser. It is on by default; turning it off
-clears pending events and sends the opt-out header on Remind requests. Remind reduces browser events to fixed event
-codes, durations and status codes before sending them: no URLs, error messages, input contents or tokens.
-[Bug reports and telemetry](diagnostics.md).
+you to sign in again; nothing is lost. To report a bug, see [bug reports](diagnostics.md). Remind records no
+telemetry.

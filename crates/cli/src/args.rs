@@ -337,7 +337,7 @@ pub enum Command {
         /// Report id from remind report.
         id: Uuid,
     },
-    /// Show or change local settings: origins, home directory, telemetry.
+    /// Show or change local settings: origins and home directory.
     Config {
         #[command(subcommand)]
         command: Config,
@@ -598,7 +598,8 @@ pub enum Config {
         #[arg(value_name = "DIRECTORY")]
         location: std::path::PathBuf,
     },
-    /// Turn operational telemetry on or off (no arguments, secrets or reminder text are sent).
+    /// Retired: Remind records no telemetry, so this changes nothing.
+    #[command(hide = true)]
     Telemetry {
         #[arg(value_enum)]
         value: Toggle,

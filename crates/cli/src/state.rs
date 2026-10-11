@@ -78,9 +78,6 @@ pub struct State {
     /// Saved Silicon Accounts origin; the production one when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounts_url: Option<String>,
-    /// Operational telemetry (on by default).
-    #[serde(default = "enabled")]
-    pub telemetry: bool,
     /// Sign-ins by slot (`<api origin>#production` or `<api origin>#<test environment id>`).
     #[serde(default)]
     pub sign_ins: BTreeMap<String, StoredSignIn>,
@@ -101,9 +98,6 @@ pub struct State {
 fn default_url() -> String {
     silicon_remind_client::DEFAULT_URL.to_owned()
 }
-fn enabled() -> bool {
-    true
-}
 
 impl Default for State {
     fn default() -> Self {
@@ -111,7 +105,6 @@ impl Default for State {
             version: STATE_VERSION,
             url: default_url(),
             accounts_url: None,
-            telemetry: true,
             sign_ins: BTreeMap::new(),
             test_keys: BTreeMap::new(),
             selected_tests: BTreeMap::new(),
@@ -317,7 +310,7 @@ fn read_state(path: &Path) -> Snapshot {
     }
 }
 
-/// Keeps what still works from a Remind 0.5 state file: the API origin, telemetry and
+/// Keeps what still works from a Remind 0.5 state file: the API origin and
 /// 32-character test environment keys (keys of the previous identity service's sandboxes
 /// cannot be used any more).
 fn upgrade_legacy(state: &mut State) {
@@ -555,7 +548,7 @@ mod tests {
         let snapshot = home.read();
         assert!(snapshot.exists && snapshot.unreadable.is_some());
         let ((), notices) = home.update(|state| {
-            state.telemetry = false;
+            state.accounts_url = Some("https://accounts.example".into());
             Ok(())
         })?;
         assert_eq!(notices.len(), 1);
@@ -570,7 +563,10 @@ mod tests {
             .collect();
         assert_eq!(aside.len(), 1);
         assert_eq!(std::fs::read(aside[0].path())?, b"{not json");
-        assert!(!home.read().state.telemetry);
+        assert_eq!(
+            home.read().state.accounts_url.as_deref(),
+            Some("https://accounts.example")
+        );
         Ok(())
     }
 
@@ -600,7 +596,6 @@ mod tests {
         assert!(snapshot.legacy && snapshot.legacy_sign_ins && snapshot.unreadable.is_none());
         assert!(snapshot.state.sign_ins.is_empty());
         assert_eq!(snapshot.state.url, "https://r.example");
-        assert!(!snapshot.state.telemetry);
         assert_eq!(snapshot.state.test_keys.len(), 1);
         assert!(snapshot.state.selected_tests.is_empty());
         assert_eq!(snapshot.state.test_names.len(), 1);

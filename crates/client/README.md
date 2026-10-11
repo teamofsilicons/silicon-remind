@@ -5,7 +5,7 @@ Rust 1.98 or newer.
 
 ```toml
 [dependencies]
-silicon-remind-client = "0.6"
+silicon-remind-client = "0.7"
 ```
 
 - `accounts::SignIn` signs a Carbon (device flow) or a Silicon (short-lived token from

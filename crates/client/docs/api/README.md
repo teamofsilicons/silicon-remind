@@ -238,7 +238,7 @@ changes, sign-outs, access removal, deletion); it is not the subscription route 
 `406` before anything runs, and the selected version comes back on the response. See the
 [version policy](../version-policy.md).
 
-## Reports and telemetry
+## Reports
 
 `POST /api/v2/reports` takes `{"message":"steps, expected result, actual result","pr":null}` with
 your access token and an `Idempotency-Key`. Messages are at most 16,384 UTF-8 bytes, at most 10
@@ -248,6 +248,5 @@ same receipt, a different body `409`. `GET /api/v2/reports/{id}` is visible only
 that sent it. Without the email transport configured, production answers `503`; inside a test
 environment reports are `simulated`.
 
-`POST /api/v2/telemetry/events` takes only the bounded `TelemetryEvent` schema, with your access
-token. `X-Remind-Telemetry: off` turns observations off for any request. See
-[diagnostics](../diagnostics.md).
+Remind records no telemetry and ignores an `X-Remind-Telemetry` header. See
+[bug reports](../diagnostics.md).

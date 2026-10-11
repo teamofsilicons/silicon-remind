@@ -61,6 +61,11 @@ async fn requests_use_contract_two_with_a_bearer_and_an_optional_test_key()
     );
     client.health(false).await?;
     let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the client sends nothing besides the calls"
+    );
     let health = requests
         .iter()
         .find(|r| r.url.path() == "/health/live")
@@ -227,6 +232,15 @@ async fn sign_in_failures_are_typed() -> Result<(), Box<dyn std::error::Error>> 
         unreachable
             .hint()
             .is_some_and(|h| h.contains("still unused"))
+    );
+    let requests = accounts.received_requests().await.unwrap_or_default();
+    assert!(!requests.is_empty());
+    assert!(
+        requests.iter().all(|r| r
+            .headers
+            .get("x-accounts-telemetry")
+            .is_some_and(|v| v == "off")),
+        "every Silicon Accounts call asks it to record no telemetry"
     );
     Ok(())
 }

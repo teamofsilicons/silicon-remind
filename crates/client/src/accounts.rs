@@ -196,7 +196,6 @@ pub struct SignIn {
     http: reqwest::Client,
     base: Url,
     app_id: String,
-    telemetry: bool,
 }
 
 impl SignIn {
@@ -217,6 +216,7 @@ impl SignIn {
         let client = AccountsClient::builder()
             .base_url(base.as_str())
             .user_agent(concat!("silicon-remind-client/", env!("CARGO_PKG_VERSION")))
+            .telemetry(false)
             .build()
             .map_err(|error| Error::accounts(&error))?;
         let http = reqwest::Client::builder()
@@ -231,15 +231,17 @@ impl SignIn {
             http,
             base,
             app_id: app_id.to_owned(),
-            telemetry: true,
         })
     }
 
-    /// Turns Silicon Accounts telemetry off for these calls (`X-Accounts-Telemetry: off`).
+    /// Does nothing: every call already tells Silicon Accounts to record no telemetry
+    /// (`X-Accounts-Telemetry: off`).
+    #[deprecated(
+        since = "0.7.0",
+        note = "Silicon Accounts telemetry is always off for Remind; remove this call"
+    )]
     #[must_use]
-    pub fn with_telemetry(mut self, enabled: bool) -> Self {
-        self.telemetry = enabled;
-        self.client = self.client.with_telemetry(enabled);
+    pub fn with_telemetry(self, _enabled: bool) -> Self {
         self
     }
 
@@ -523,14 +525,12 @@ impl SignIn {
             .base
             .join(&format!("v1/oauth/{endpoint}"))
             .map_err(|_| Error::Invalid("invalid Silicon Accounts URL".into()))?;
-        let mut request = self
+        let request = self
             .http
             .post(url)
             .header("accept", "application/json")
+            .header("x-accounts-telemetry", "off")
             .form(form);
-        if !self.telemetry {
-            request = request.header("x-accounts-telemetry", "off");
-        }
         let response = request.send().await.map_err(|error| Error::Accounts {
             status: None,
             code: if error.is_timeout() {

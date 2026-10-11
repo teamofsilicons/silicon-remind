@@ -51,8 +51,6 @@ pub struct Ctx {
     pub test: Option<Uuid>,
     /// The test environment named with `--test` on this command line.
     pub explicit_test: Option<Uuid>,
-    /// Telemetry is on.
-    pub telemetry: bool,
     /// `--idempotency-key`.
     pub idempotency_key: Option<String>,
     /// The state as it was when the command started.
@@ -110,8 +108,6 @@ impl Ctx {
                 .test
                 .or_else(|| snapshot.state.selected_tests.get(&url).copied())
         };
-        let telemetry = snapshot.state.telemetry
-            && std::env::var("REMIND_TELEMETRY_ENABLED").as_deref() != Ok("false");
         Self {
             out: Output { json: inputs.json },
             home,
@@ -120,7 +116,6 @@ impl Ctx {
             app_id,
             test,
             explicit_test: if inputs.production { None } else { inputs.test },
-            telemetry,
             idempotency_key: inputs.idempotency_key,
             snapshot,
         }
@@ -145,12 +140,11 @@ impl Ctx {
         slot(&self.url, self.explicit_test)
     }
 
-    /// A Remind client for this origin with telemetry set and, inside a test environment, its
-    /// key attached. No credential.
+    /// A Remind client for this origin, with the test environment's key attached inside one. No
+    /// credential.
     pub fn client(&self) -> anyhow::Result<Client> {
-        let client = Client::new(&self.url)
-            .map_err(|error| bad_origin("--url / REMIND_URL", &error))?
-            .with_telemetry(self.telemetry);
+        let client =
+            Client::new(&self.url).map_err(|error| bad_origin("--url / REMIND_URL", &error))?;
         match self.test {
             Some(id) => Ok(client.with_test_environment(self.test_key(id)?)?),
             None => Ok(client),
@@ -159,9 +153,7 @@ impl Ctx {
 
     /// A client for production on this origin, ignoring any test environment.
     pub fn production_client(&self) -> anyhow::Result<Client> {
-        Ok(Client::new(&self.url)
-            .map_err(|error| bad_origin("--url / REMIND_URL", &error))?
-            .with_telemetry(self.telemetry))
+        Client::new(&self.url).map_err(|error| bad_origin("--url / REMIND_URL", &error))
     }
 
     /// The saved key of test environment `id` on this origin.
@@ -184,9 +176,8 @@ impl Ctx {
 
     /// Signs in to this command's Silicon Accounts as Remind.
     pub fn sign_in_at(&self, accounts_url: &str, app_id: &str) -> anyhow::Result<SignIn> {
-        Ok(SignIn::new(accounts_url, app_id)
-            .map_err(|error| bad_origin("--accounts-url / ACCOUNTS_URL", &error))?
-            .with_telemetry(self.telemetry))
+        SignIn::new(accounts_url, app_id)
+            .map_err(|error| bad_origin("--accounts-url / ACCOUNTS_URL", &error))
     }
 
     /// The sign-in this command uses: its own slot, else (inside a test environment) the

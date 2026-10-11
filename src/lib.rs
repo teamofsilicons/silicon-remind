@@ -17,10 +17,10 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod infrastructure;
+pub mod logging;
 pub mod metrics;
 pub mod request_context;
 pub mod shutdown;
-pub mod telemetry;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod worker;

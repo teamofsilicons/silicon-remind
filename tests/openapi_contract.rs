@@ -154,7 +154,6 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
     let expected = [
         ("post", "/reports", "submitBugReport"),
         ("get", "/reports/{id}", "getBugReport"),
-        ("post", "/telemetry/events", "recordTelemetryEvent"),
         ("get", "/api/versions", "discoverVersions"),
         ("get", "/auth/me", "getIdentity"),
         ("get", "/silicons", "listSilicons"),

@@ -63,12 +63,6 @@ pub struct Settings {
     pub test_webhook_urls: Vec<String>,
     /// Postmark server credential; absent disables production bug submission.
     pub postmark_server_token: Option<SecretString>,
-    /// Space Station telemetry, enabled unless explicitly opted out.
-    pub telemetry_enabled: bool,
-    /// Write-only key for the dedicated Remind production event table.
-    pub telemetry_table_key: Option<SecretString>,
-    /// Private spool directory for the official Space Station Rust client.
-    pub telemetry_home: std::path::PathBuf,
     /// Delivery retry policy.
     pub retry: RetrySettings,
     /// Schedule, execution, and idempotency retention policy.
@@ -440,11 +434,6 @@ impl Settings {
             encryption,
             webhook,
             worker,
-            telemetry_enabled: parse_or(source, "REMIND_TELEMETRY_ENABLED", "true")?,
-            telemetry_table_key: optional(source, "REMIND_TELEMETRY_TABLE_KEY")
-                .map(SecretString::from),
-            telemetry_home: value_or(source, "REMIND_TELEMETRY_HOME", "/var/lib/remind/telemetry")
-                .into(),
             postmark_server_token: optional(source, "REMIND_POSTMARK_SERVER_TOKEN")
                 .map(SecretString::from),
             test_webhook_urls: value_or(source, "REMIND_TEST_WEBHOOK_URLS", "")
@@ -468,8 +457,8 @@ impl Settings {
 
 #[cfg(test)]
 impl Settings {
-    /// Settings for in-process tests: development mode, telemetry off, the
-    /// given Silicon Accounts origin and database.
+    /// Settings for in-process tests: development mode, the given Silicon
+    /// Accounts origin and database.
     pub(crate) fn for_tests(accounts_url: &str, database_url: &str) -> Result<Self, SettingsError> {
         struct Values(BTreeMap<&'static str, String>);
         impl ConfigSource for Values {
@@ -492,7 +481,6 @@ impl Settings {
             ),
             ("REMIND_ENCRYPTION_CURRENT_VERSION", "1".to_owned()),
             ("REMIND_ENCRYPTION_KEYRING", format!(r#"{{"1":"{key}"}}"#)),
-            ("REMIND_TELEMETRY_ENABLED", "false".to_owned()),
         ])))
     }
 }
