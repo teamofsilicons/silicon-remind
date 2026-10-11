@@ -9,9 +9,9 @@ permissions:
   actions: read
 env:
   RELEASE_APP_ID: remind
-  RELEASE_VERSION: 0.6.0
-  BUILD_RUN_ID: '38057594804'
-  BUILD_SOURCE_COMMIT: 94e1ea397a2d05866724ba1a6e3c83c656a36aaf
+  RELEASE_VERSION: 0.7.0
+  BUILD_RUN_ID: '38174099688'
+  BUILD_SOURCE_COMMIT: 73e4bc8c56c4873117ecec239b4ce104dd92df36
 jobs:
   native:
     name: Verify ${{ matrix.target }}
