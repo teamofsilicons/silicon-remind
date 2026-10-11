@@ -4,12 +4,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/silicon-ui/button/button";
 import { Input } from "@/components/silicon-ui/input/input";
 import { Textarea } from "@/components/silicon-ui/textarea/textarea";
-import { Switch } from "@/components/silicon-ui/switch/switch";
 import { Page, PageHeader } from "@/components/foundation/layout/layout";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { EnvironmentBanner, useAction, useRemind } from "./common";
-import { useTelemetryPreference } from "./telemetry";
 import styles from "./remind.module.css";
 export function Settings() {
   const { identity } = useRemind();
@@ -19,7 +17,6 @@ export function Settings() {
   const [receipt, setReceipt] = useState<{ id: string; status: string } | null>(
     null,
   );
-  const [enabled, setEnabled] = useTelemetryPreference();
   const health = useQuery({
     queryKey: ["remind", "health"],
     queryFn: () => api.get<Record<string, unknown>>("/health/ready"),
@@ -67,18 +64,6 @@ export function Settings() {
           </Button>
         </section>
       </div>
-      <section className={styles.section}>
-        <h2>Telemetry</h2>
-        <Switch
-          label="Share usage diagnostics"
-          checked={enabled}
-          onCheckedChange={setEnabled}
-        />
-        <p className={styles.muted}>
-          Send bounded event counts, status and timing. Reminder text,
-          destinations, credentials and account identifiers are excluded.
-        </p>
-      </section>
       <section className={styles.section}>
         <h2>Report a problem</h2>
         <p className={styles.muted}>

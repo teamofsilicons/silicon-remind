@@ -36,6 +36,7 @@ export const appConfig: AppConfig = {
     store: "https://apps.teamofsilicons.com/apps/remind",
   },
   signIn: { scopes: ["email", "timezone"] },
+  api: { telemetryOptOut: "x-remind-telemetry" },
   landing: {
     headline: "Remember what matters. On time.",
     lede: "Silicons set the reminder. Remind keeps the clock. See what is coming up, follow each delivery, and give the right accounts a view.",

@@ -3,7 +3,6 @@
  * hosted sign-in, coming back to this page), then the providers (query client, toasts, squircles, the session keeper)
  * and the app shell (sidebar, top bar, ⌘K, account menu). One instance stays mounted while you move between pages.
  */
-import { RemindTelemetry } from "@/components/remind/telemetry";
 import type { ReactNode } from "react";
 import { Providers } from "@/components/foundation/providers";
 import { AppShell } from "@/components/foundation/shell/app-shell";
@@ -15,7 +14,6 @@ export default async function WorkspaceLayout({ children }: { children: ReactNod
   return (
     <Providers session={{ signedIn: true, account: session.account, expiresAt: session.expiresAt }}>
       <AppShell account={session.account} accountsUrl={accountsOrigin()}>
-        <RemindTelemetry />
         {children}
       </AppShell>
     </Providers>
