@@ -17,7 +17,7 @@ The default frontend is `http://127.0.0.1:4180`. Start the real Remind stack fro
 
 ## Sessions and test environments
 
-The server performs public hosted Accounts sign-in with PKCE and keeps access and rotating refresh tokens in an authenticated, encrypted, httpOnly cookie. Secure deployments use `__Host-` cookies, same-origin mutation checks and a per-request CSP nonce. Refresh is single-flight inside one server process; use a single instance until refresh coordination is shared across replicas.
+The server performs public hosted Accounts sign-in with PKCE and keeps access and rotating refresh tokens in an authenticated, encrypted, httpOnly cookie. Secure deployments use `__Host-` cookies, same-origin mutation checks and a per-request CSP nonce. Refresh uses shared durable state; see Durable browser sessions below.
 
 `/api/*` adds the bearer token and `X-Remind-API-Version: 2` on the server. Choosing a test environment retrieves its key with the signed-in account, seals it in an account-bound httpOnly cookie and reloads the page to discard drafts and cached results. The browser gets the environment name and id. The proxy injects the selected key; environment administration and sharing stay in Production. Sign-out clears the selection. Key rotation requires selecting the environment again. Explicit key reveal/copy remains available to authorized owners and custodians.
 
@@ -41,3 +41,23 @@ The browser suite exercises hosted email sign-in, refresh/replay and cross-site 
 ## Deploy
 
 From the repository root: `docker build -f frontend/Dockerfile -t silicon-remind-web frontend`. The image runs the standalone Next server as the unprivileged `node` account on port 3000. `.github/workflows/deployment-builds.yml` builds an ARM64 image from the exact revision. The existing AWS web installer consumes a digest-pinned image and persistent runtime secrets. Build and review the image before any separately authorized production cutover; local browser proof does not establish that the image was built or deployed.
+
+## Durable browser sessions
+
+`lib/server/refresh-store.ts` and `refresh-state.ts` hold the current session and a random refresh operation key before
+calling Accounts. A compare-and-set update prevents late responses from overwriting newer tokens or a saved sign-out.
+Existing sealed cookies are adopted atomically. Cookies remain HttpOnly and encrypted; server state is encrypted with
+`SESSION_SECRET`, with a separate purpose for each record. Keep that secret stable across deployments.
+
+Production requires either `REFRESH_STATE_TABLE` plus `REFRESH_STATE_REGION` (DynamoDB, consistent reads and conditional
+writes), or `REFRESH_STATE_PATH` on a durable, private local volume shared by all web processes on one host. Vercel
+requires DynamoDB; `REFRESH_STATE_ROLE_ARN` selects an app-specific Vercel OIDC role with GetItem/PutItem permissions.
+EC2 can use its instance role. Never share a development store with production. Development defaults to
+`.dev/refresh-state.sqlite`; its parent directory and database are private. Configure DynamoDB TTL on `expires`.
+
+Storage failures, transport failures, 5xx and recovery conflicts preserve the session and return a retryable error.
+Recovered absolute access-token expiry is respected, including zero remaining lifetime: the successor is saved before
+rotating again. Only a definitive `invalid_grant` ends the sign-in. Sign-out is saved before the cookie is cleared.
+Tests in `tests/refresh-recovery.test.ts` cover competing refreshes, process restart, lost replies, expired recovery,
+stale cookies, storage failure and sign-out racing a refresh. All replicas must use this protocol before traffic is
+switched; do not roll back to the old token-refresh code once these sessions are in use.
