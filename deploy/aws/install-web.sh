@@ -3,7 +3,7 @@
 #
 # Installs the Next.js web for https://remind.teamofsilicons.com from a digest-pinned image built from frontend/
 # (Next.js standalone server: WORKDIR /app, listens on $PORT, runs as a non-root user). The web signs Carbons in with
-# Silicon Accounts and keeps each session in a sealed httpOnly cookie, so it needs no session storage; it calls the
+# Silicon Accounts and uses sealed httpOnly cookies with encrypted refresh state in /var/lib/remind-browser-sessions; it calls the
 # Remind API over the private `remind` Docker network.
 #
 # Settings live in /etc/remind/web.env (root, 0600): APP_SECRET is read from the runtime secret's REMIND_APP_SECRET on
@@ -19,6 +19,8 @@ case "$image" in
 esac
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 234951665042.dkr.ecr.us-east-1.amazonaws.com >/dev/null
 docker pull "$image"
+# Persist encrypted refresh operations across container replacements.
+install -d -m 0700 -o 1000 -g 1000 /var/lib/remind-browser-sessions
 install -d -m 0700 /etc/remind
 (umask 077 && aws secretsmanager get-secret-value --region us-east-1 --secret-id "$secret_arn" \
   --query SecretString --output text > /etc/remind/web-secret.json)
@@ -70,7 +72,7 @@ Type=simple
 Restart=always
 RestartSec=5
 ExecStartPre=-/usr/bin/docker rm -f remind-web
-ExecStart=/usr/bin/docker run --name remind-web --network remind --env-file /etc/remind/web.env --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --tmpfs /app/.next/cache:rw,noexec,nosuid,size=64m --cap-drop ALL --security-opt no-new-privileges:true --memory 384m --log-opt max-size=10m --log-opt max-file=3 $image
+ExecStart=/usr/bin/docker run --name remind-web --network remind --env-file /etc/remind/web.env --mount type=bind,src=/var/lib/remind-browser-sessions,dst=/var/lib/browser-sessions --env REFRESH_STATE_PATH=/var/lib/browser-sessions/state.sqlite --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --tmpfs /app/.next/cache:rw,noexec,nosuid,size=64m --cap-drop ALL --security-opt no-new-privileges:true --memory 384m --log-opt max-size=10m --log-opt max-file=3 $image
 ExecStop=/usr/bin/docker stop -t 20 remind-web
 TimeoutStopSec=30
 [Install]
