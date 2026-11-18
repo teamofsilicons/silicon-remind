@@ -1,0 +1,67 @@
+{
+  "release": "Standalone interface API and Ting delivery",
+  "verified_at": "2026-11-18T02:13:16+00:00",
+  "production": {
+    "api_base": "https://api.remind.teamofsilicons.com/api/v2",
+    "discovery": "https://api.remind.teamofsilicons.com/api/versions",
+    "website": "https://remind.teamofsilicons.com/",
+    "listing": "https://apps.teamofsilicons.com/apps/remind",
+    "interface_api_documentation_url": "https://docs.remind.teamofsilicons.com/api/interfaces/",
+    "openapi": "https://docs.remind.teamofsilicons.com/openapi.yaml",
+    "openapi_sha256": "601c5a93a43e3e0df3cb7f13b575f1b429ed0286b1092d0fa78d53b734f284f7",
+    "features": {
+      "reports": true,
+      "test_environments": false,
+      "ting": true
+    },
+    "ting_type": "remind.reminderDue",
+    "migration": 14,
+    "backend_and_web_source": "3eb6c89c6329851853939c2600a74ef9f82d9443",
+    "build": "https://github.com/teamofsilicons/silicon-remind/actions/runs/44219028748",
+    "backend_image": "sha256:d360cb1e9aa15cbad8bae01e8c5273cbac89d8020206dc2dfb9fb93f1fee2e4d",
+    "web_image": "sha256:e378a2cb53d37af9749415919ea40533167e8bce31d3e6e94b0105184978d15c",
+    "docs_source": "ec309530379f08a759e74e43a8a840b904bafbc7",
+    "docs_image": "sha256:6aae2cc33d12824d6058701f9c79c677d69ca4fdea2b7a472de85ba17b9a4461"
+  },
+  "production_verification": {
+    "public_listing_links_to_guide": true,
+    "public_schema_matches_source": true,
+    "services_ready": [
+      "api",
+      "worker",
+      "web"
+    ],
+    "browser": "Chromium from an independent origin using a Remind-scoped Silicon Accounts access token",
+    "reminder_operations": [
+      "create with idempotent replay",
+      "edit",
+      "bulk pause and resume",
+      "archive and read archive",
+      "list shared access",
+      "read execution history"
+    ],
+    "delivery": {
+      "ting_only": {
+        "ting_status": "accepted",
+        "webhook_status": "none",
+        "matching_ting_in_owner_inbox": true
+      },
+      "ting_and_hook": {
+        "ting_status": "accepted",
+        "webhook_status": "delivered",
+        "matching_ting_in_owner_inbox": true,
+        "same_execution_in_verified_hook_history": true
+      }
+    },
+    "temporary_webhook_removed": true
+  },
+  "local_verification": {
+    "rust_tests_passed": 237,
+    "frontend_unit_tests_passed": 55,
+    "browser_tests_passed": 26,
+    "docs_pages_checked": 14,
+    "docs_links_and_assets_checked": 488,
+    "interface_oauth": "Issued apps.remind.access_token with an authorized public Interface and S256 PKCE. A separate browser origin read Remind data, Carbon writes returned 403, a refresh credential returned 401, and revocation immediately invalidated the access token.",
+    "worker_retry": "A failed webhook retried with the same execution ID without duplicating the accepted Ting."
+  }
+}
