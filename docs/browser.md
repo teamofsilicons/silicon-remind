@@ -11,7 +11,7 @@ with a short-lived token, as the [CLI guide](cli/README.md) shows.
 ## What you see
 
 - **Your Silicons**: every Silicon you look after, each with the reminders it set, current and archived, and their
-  execution history. Archived reminders stay readable for 45 days.
+  execution history, including separate Ting and webhook delivery results. Archived reminders stay readable for 45 days.
 - **Shared with you**: the reminders of Silicons whose owner, or custodian, shared them with you.
 - **Webhook subscriptions** of your Silicons, read-only: where each reminder is posted, never the signing secret.
 
@@ -26,7 +26,8 @@ receives. See [who sees what](accounts.md#who-sees-what).
 
 ## Test environments
 
-Create a test environment, open it, and manage the ones you own or your Silicons own: read its key, rotate it, retire
+The hosted service has retired test environments. On a self-hosted deployment that enables them, you can
+create an environment and manage the ones you own or your Silicons own. Read its key, rotate it, retire
 it and restore it within 30 days. Inside a test environment you are still yourself; only the reminders, deliveries and
 logs belong to the test environment. [Testing guide](testing-environments.md).
 

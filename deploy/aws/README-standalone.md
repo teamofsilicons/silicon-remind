@@ -1,19 +1,22 @@
 # Standalone EC2 deployment
 
-## Current parallel Accounts release
+## Current Accounts deployment
 
-Follow [parallel-production.md](../../docs/migration/parallel-production.md).
-The old IAM API/worker, `backend.remind` origin, `silicon_remind` databases, runtime
-secret and fleet remain live. New Accounts containers are `remind-accounts-api`
-and `remind-accounts-worker`, using `silicon_remind_accounts` and
-`silicon_remind_accounts_test`, secret `silicon-remind/accounts-production`, and
-`api.remind.teamofsilicons.com`. These stores start empty; no IAM identities or
-subscriptions are imported. Do not rerun the legacy CloudFormation bootstrap.
+The Accounts API and worker use the database `silicon_remind_accounts` and the
+runtime secret `silicon-remind/accounts-production`. The website connects to
+`http://remind-accounts-api:8080/api/v2`. Interfaces connect to
+`https://api.remind.teamofsilicons.com/api/v2`. The hosted testing database was
+retired in October 2026. The Accounts installer omits its old connection string
+when preparing `/etc/remind/accounts/runtime.env`.
 
-The new Next.js website uses `http://remind-accounts-api:8080/api/v2`. Its installer
-switches public website ingress and may run only after the coordinated website GO.
-The remaining sections describe the original host and historical replacement path;
-they do not authorize replacing the old API/worker or database.
+Apply migrations to the Accounts production database with its migration role.
+Register the current Ting type by running `remind-worker --register-ting` with
+the production worker environment. Probe `GET /api/versions` for capability
+flags and verify a due reminder in its owner's Ting inbox. Use the
+`silicon-deployment` AWS profile for this deployment.
+
+The [original parallel rollout](../../docs/migration/parallel-production.md)
+and the sections below describe the older IAM host configuration.
 
 Production Remind runs on one ARM64 `t4g.small` in `vpc-04b23a487cfe0bd8e`, public subnet
 `subnet-07945746462c26b2d`, created by the CloudFormation stack `silicon-remind-standalone`

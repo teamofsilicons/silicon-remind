@@ -14,7 +14,7 @@ const FINGERPRINT: &str = "SELECT md5(string_agg(t, '|' ORDER BY t)) FROM (\
              s.schedule_kind, s.cron_expression, s.status, s.next_run_at, s.version, \
              s.completed_at, s.deleted_at, s.purge_after, s.created_at, s.updated_at)::text AS t \
      FROM schedules s \
-     UNION ALL SELECT e::text FROM executions e \
+     UNION ALL SELECT (to_jsonb(e) - 'ting_status' - 'webhook_status')::text FROM executions e \
      UNION ALL SELECT (d.id, d.org_id, d.owner_principal_id, d.silicon_id, \
              d.endpoint_url_ciphertext, d.endpoint_url_nonce, d.signing_secret_ciphertext, \
              d.signing_secret_nonce, d.encryption_key_version, d.version, d.disabled_at, \

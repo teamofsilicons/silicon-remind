@@ -21,6 +21,7 @@ tags:
 - name: Executions
 - name: Account
 - name: Sharing
+- name: Ting
 - name: Webhooks
 - name: Test environments
 - name: Operations
@@ -388,6 +389,39 @@ paths:
                     type:
                     - string
                     - 'null'
+        default:
+          $ref: '#/components/responses/Error'
+  /ting:
+    get:
+      tags: [Ting]
+      operationId: getTingRegistration
+      summary: Read the calling Silicon's Remind registration receipt
+      description: registered_at records the last successful enrollment. The recipient controls current preferences and grants in Ting.
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '200':
+          description: Registration state or simulated test delivery
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TingRegistration'
+        default:
+          $ref: '#/components/responses/Error'
+    put:
+      tags: [Ting]
+      operationId: enableTing
+      summary: Connect or reconnect the calling Silicon to Ting
+      description: Uses the calling Silicon's live Remind access token. Repeated calls enable the same recipient subscription. Test environments simulate the operation.
+      parameters:
+      - $ref: '#/components/parameters/TestKey'
+      responses:
+        '200':
+          description: Registration receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TingRegistration'
         default:
           $ref: '#/components/responses/Error'
   /webhook:
@@ -946,9 +980,9 @@ components:
         A Silicon Accounts access token issued to Remind (an EdDSA-signed JWT with audience remind and
         the Silicon Accounts issuer). Sign in with `remind login`, or exchange a Silicon sign-in token
         for Remind with Silicon Accounts. Remind verifies the signature against the published keys,
-        the audience, the issuer and the expiry; routes that change sharing, delivery endpoints, test
-        environment keys or archive reminders also ask Silicon Accounts whether the token is still
-        active. A token issued before the account signed out of Remind, lost access, or was deleted
+        the audience, the issuer and the expiry. Every bearer request also requires active
+        introspection with token_type access_token and client_id remind. Interfaces use the token
+        from apps["remind"].access_token. A token issued before the account signed out of Remind, lost access, or was deleted
         is refused with token_revoked or account_deleted. Errors (401): unauthenticated, token_expired,
         token_wrong_audience, token_wrong_issuer, token_unknown_key, token_bad_signature,
         token_malformed, token_missing_claim, token_invalid, token_kind_mismatch, token_revoked,
@@ -1137,6 +1171,13 @@ components:
                 format: date-time
               implemented:
                 type: boolean
+        features:
+          type: object
+          required: [ting, test_environments, reports]
+          properties:
+            ting: {type: boolean}
+            test_environments: {type: boolean}
+            reports: {type: boolean}
         sunset_idle_days:
           type: integer
         policy:
@@ -1332,6 +1373,13 @@ components:
           updated_at:
             type: string
             format: date-time
+    TingRegistration:
+      type: object
+      required: [configured, simulated, registered_at]
+      properties:
+        configured: {type: boolean}
+        simulated: {type: boolean}
+        registered_at: {type: [string, 'null'], format: date-time}
     Execution:
       type: object
       required:
@@ -1367,6 +1415,12 @@ components:
           - delivered
           - retrying
           - failed
+        ting_status:
+          type: string
+          enum: [pending, accepted, blocked, unsubscribed, disabled, simulated, failed, untracked]
+        webhook_status:
+          type: string
+          enum: [pending, delivered, none, simulated, failed, untracked]
         hook_event_id:
           type:
           - string

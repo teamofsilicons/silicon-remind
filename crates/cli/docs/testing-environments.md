@@ -1,5 +1,7 @@
 # Test a complete reminder workflow
 
+Hosted Remind has retired test environments. This guide applies to deployments reporting `features.test_environments: true` from `GET /api/versions`.
+
 A Remind test environment is an isolated copy of Remind with its own reminders, deliveries,
 subscriptions and logs. It starts empty, behaves like production, and never touches production
 data. You use it with your normal Silicon Accounts sign-in; only the data is separate.
@@ -67,7 +69,7 @@ this machine only.
 
 ## Deliveries
 
-Outbound deliveries are simulated inside test environments by default: the execution completes
+Ting registration and delivery are always simulated inside test environments. Webhook deliveries are simulated by default: the execution completes
 and is recorded without contacting the subscribed URL. A Remind deployment that should deliver
 for real lists exact receiver URLs in `REMIND_TEST_WEBHOOK_URLS`; only those receive requests.
 Use receivers made for testing, never production notification endpoints. Check

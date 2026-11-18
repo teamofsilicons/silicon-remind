@@ -201,6 +201,8 @@ impl PostgresRepository {
              ) \
              UPDATE executions e SET \
                  status = CASE WHEN e.attempt_count = 0 THEN 'pending' ELSE 'retrying' END, \
+                 ting_status = CASE WHEN e.ting_status = 'untracked' THEN 'pending' ELSE e.ting_status END, \
+                 webhook_status = CASE WHEN e.webhook_status = 'untracked' THEN 'pending' ELSE e.webhook_status END, \
                  attempt_count = e.attempt_count + 1, \
                  attempted_at = $1, lease_owner = $3, lease_expires_at = $4 \
              FROM candidates c WHERE e.id = c.id \
@@ -282,6 +284,24 @@ impl PostgresRepository {
         .ok_or(RepositoryError::NotFound)
     }
 
+    /// Save both channel outcomes before scheduling another attempt. The execution's lease
+    /// fences stale workers, and each receiver also gets a stable occurrence key.
+    pub(crate) async fn record_channels(
+        &self,
+        execution_id: Uuid,
+        worker: &str,
+        ting: &str,
+        hooks: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        let result = sqlx::query("UPDATE executions SET ting_status=$3, webhook_status=$4 WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>$5 AND status IN ('pending','retrying')")
+            .bind(execution_id).bind(worker).bind(ting).bind(hooks).bind(now).execute(&self.pool).await?;
+        if result.rows_affected() != 1 {
+            return Err(RepositoryError::LeaseLost);
+        }
+        Ok(())
+    }
+
     /// Marks a leased execution delivered after a validated `2xx`. The historical
     /// `hook_event_id` column stores the receipt.
     ///
@@ -293,7 +313,7 @@ impl PostgresRepository {
         &self,
         execution_id: Uuid,
         worker_id: &str,
-        hook_event_id: Uuid,
+        hook_event_id: Option<Uuid>,
         accepted_at: DateTime<Utc>,
     ) -> Result<ExecutionRow, RepositoryError> {
         validate_worker_id(worker_id)?;

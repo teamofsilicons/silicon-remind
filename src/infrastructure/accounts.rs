@@ -3,7 +3,7 @@
 //! Access tokens are verified locally against a cached JWKS (refetched, at most
 //! every 30 seconds, when a token names an unknown key). Introspection, User
 //! verification proofs, account lookups and user base reads go to Silicon
-//! Accounts with Remind's app credentials; introspection and proofs are cached
+//! Accounts with Remind's app credentials. Only proofs are cached
 //! briefly, and lookups and user base reads stay inside Remind's own budget,
 //! below the 600 a minute Silicon Accounts allows per app.
 
@@ -27,8 +27,6 @@ use crate::config::AccountsSettings;
 const JWKS_MAX_AGE: Duration = Duration::from_secs(3_600);
 /// A token naming an unknown key refetches the JWKS at most this often.
 const JWKS_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
-/// Introspection answers are reused for at most this long.
-const INTROSPECTION_TTL: Duration = Duration::from_secs(30);
 /// Proof verifications are reused for at most this long, and never past expiry.
 const PROOF_TTL: Duration = Duration::from_secs(30);
 /// Lookups Remind allows itself per minute (Silicon Accounts allows 600).
@@ -81,7 +79,6 @@ struct Inner {
     verify: VerifyOptions,
     jwks: RwLock<Option<CachedJwks>>,
     jwks_fetch: Mutex<Option<Instant>>,
-    introspections: Mutex<HashMap<[u8; 32], (bool, Instant)>>,
     proofs: Mutex<ProofCache>,
     lookups: Mutex<LookupState>,
     proof_budget: Mutex<VecDeque<Instant>>,
@@ -120,16 +117,17 @@ impl AccountsGateway {
             .build()
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         let issuer = settings.url.as_str().trim_end_matches('/').to_owned();
+        let mut verify = VerifyOptions::for_app(&settings.app_id).with_issuer(issuer.clone());
+        verify.leeway_seconds = 0;
         Ok(Self {
             inner: Arc::new(Inner {
                 client,
                 app_id: settings.app_id.clone(),
                 app_secret: settings.app_secret.clone(),
-                verify: VerifyOptions::for_app(&settings.app_id).with_issuer(issuer.clone()),
+                verify,
                 issuer,
                 jwks: RwLock::new(None),
                 jwks_fetch: Mutex::new(None),
-                introspections: Mutex::new(HashMap::new()),
                 proofs: Mutex::new(HashMap::new()),
                 lookups: Mutex::new(LookupState::default()),
                 proof_budget: Mutex::new(VecDeque::new()),
@@ -177,29 +175,20 @@ impl AccountsGateway {
     ///
     /// Returns [`AccountsError::Unavailable`] when Silicon Accounts cannot answer.
     pub async fn token_is_active(&self, token: &str) -> Result<bool, AccountsError> {
-        let key = digest(token);
-        if let Some((active, at)) = self.inner.introspections.lock().await.get(&key)
-            && at.elapsed() < INTROSPECTION_TTL
-        {
-            return Ok(*active);
-        }
-        let app = self
-            .inner
-            .client
-            .as_app(&self.inner.app_id, self.inner.app_secret.expose_secret());
-        let introspection = app
+        let live = self
+            .app_client()
             .introspect(token)
             .await
             .map_err(|error| unavailable(&error))?;
-        let audience_matches = introspection
-            .client_id
-            .as_deref()
-            .is_none_or(|client_id| client_id == self.inner.app_id);
-        let active = introspection.active && audience_matches;
-        let mut cache = self.inner.introspections.lock().await;
-        bound(&mut cache, |(_, at)| at.elapsed() < INTROSPECTION_TTL);
-        cache.insert(key, (active, Instant::now()));
-        Ok(active)
+        Ok(live.active
+            && live.token_type.as_deref() == Some("access_token")
+            && live.client_id.as_deref() == Some(self.app_id()))
+    }
+
+    pub(crate) fn app_client(&self) -> silicon_accounts_client::AppClient<'_> {
+        self.inner
+            .client
+            .as_app(self.app_id(), self.inner.app_secret.expose_secret())
     }
 
     /// Verifies a proof sent to Remind (`POST /v1/proofs/verify`). `None` means

@@ -24,6 +24,7 @@ import {
   useRemind,
 } from "./common";
 import styles from "./remind.module.css";
+import { ApiError } from "@/lib/errors";
 export function Testing() {
   const { scope, environment, identity } = useRemind();
   const action = useAction();
@@ -72,6 +73,9 @@ export function Testing() {
     setSecret({ name: e.name, key: result.key });
   };
   const rows = list.data?.pages.flatMap((p) => p.items) ?? [];
+  if (list.error instanceof ApiError && list.error.code === "test_environments_unavailable") {
+    return <Page className={styles.page}><PageHeader title="Test environments" description="Test environments are retired on this deployment." /></Page>;
+  }
   return (
     <Page className={styles.page}>
       <PageHeader

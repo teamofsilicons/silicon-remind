@@ -22,7 +22,7 @@ test("a rotated or retired test key does not revoke the Accounts sign-in", async
   const response = await GET(new NextRequest("http://127.0.0.1:4260/api/schedules", { headers: { cookie: cookieFor(session()) } }));
   assert.equal(response.status, 409);
   assert.equal((await response.json()).error.code, "test_key_invalid");
-  assert.equal(response.headers.get("set-cookie"), null);
+  assert.ok(response.headers.get("set-cookie"), "adopts the legacy session");
 });
 
 let restore: () => void = () => undefined;
@@ -75,7 +75,7 @@ test("a GET reaches the service with the bearer token, the query as sent, and th
   const response = await GET(new NextRequest("http://127.0.0.1:4260/api/v1/reminders?q=a%20b&status=done", { headers: { cookie: cookieFor(session()), accept: "application/json", "x-forwarded-for": "198.51.100.1, 203.0.113.7" } }));
   assert.equal(response.status, 200);
   assert.equal(await response.text(), '{"items":[]}');
-  assert.equal(response.headers.get("set-cookie"), null);
+  assert.ok(response.headers.get("set-cookie"), "adopts the legacy session");
   assert.equal(response.headers.get("etag"), '"a"');
   assert.equal(response.headers.get("cache-control"), "private, no-store");
   assert.equal(mock.calls.length, 1);

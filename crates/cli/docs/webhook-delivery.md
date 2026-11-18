@@ -1,8 +1,7 @@
 # Generic webhook delivery
 
 A Silicon subscribes any absolute HTTP(S) endpoint with `POST /api/v2/webhooks` (in the CLI,
-`remind webhook subscribe <url>`). Remind does not
-require, discover, or contact any provider-specific service. In production, endpoints
+`remind webhook subscribe <url>`). Each endpoint receives an extra copy alongside the Silicon’s [Ting notification](api/interfaces.md). In production, endpoints
 must use HTTPS; credentials and URL fragments are rejected. The endpoint may
 use any host, path, and query string. A signing secret is optional.
 

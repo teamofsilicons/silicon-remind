@@ -63,7 +63,7 @@ impl Signer {
 }
 
 pub(super) struct Harness {
-    _database: crate::test_support::TestPostgres,
+    database: crate::test_support::TestPostgres,
     _testing: crate::test_support::TestPostgres,
     pub(super) pool: PgPool,
     pub(super) accounts: MockServer,
@@ -74,6 +74,10 @@ pub(super) struct Harness {
 
 impl Harness {
     pub(super) async fn new() -> anyhow::Result<Self> {
+        Self::with_ting(false).await
+    }
+
+    pub(super) async fn with_ting(enable: bool) -> anyhow::Result<Self> {
         let database = crate::test_support::TestPostgres::start().await?;
         let pool = database.pool(5).await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
@@ -92,15 +96,17 @@ impl Harness {
             .await;
         Mock::given(method("POST"))
             .and(path("/v1/oauth/introspect"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"active": true, "client_id": "remind"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"active": true, "client_id": "remind", "token_type": "access_token"}),
+            ))
             .with_priority(10)
             .mount(&accounts)
             .await;
 
-        let settings = Settings::for_tests(&accounts.uri(), &database.url)?;
+        let mut settings = Settings::for_tests(&accounts.uri(), &database.url)?;
+        if enable {
+            settings.ting_url = Some(accounts.uri().parse()?);
+        }
         let mut state = super::ApiState::new(&settings, pool.clone())?;
         state.tests = Some(
             TestEnvironments::connect(
@@ -121,7 +127,7 @@ impl Harness {
             pool,
             accounts,
             signer,
-            _database: database,
+            database,
             _testing: testing,
         })
     }
@@ -251,3 +257,5 @@ impl Harness {
 pub(super) fn code(body: &Value) -> &str {
     body["error"]["code"].as_str().unwrap_or_default()
 }
+
+mod interfaces;

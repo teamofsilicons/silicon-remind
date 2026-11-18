@@ -34,3 +34,5 @@ pub(crate) fn map_json_rejection(rejection: &axum::extract::rejection::JsonRejec
         AppError::Validation
     }
 }
+
+pub(crate) mod ting;

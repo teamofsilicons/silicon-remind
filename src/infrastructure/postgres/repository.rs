@@ -49,13 +49,13 @@ const SCHEDULE_RETURNING_COLUMNS: &str = "\
 const EXECUTION_COLUMNS: &str = "\
     e.id, e.schedule_id, e.org_id, e.silicon_id, e.schedule_version, \
     e.schedule_kind, e.scheduled_for, e.reminder_text AS text, e.timezone, \
-    e.status, e.attempt_count, e.next_attempt_at, e.attempted_at, \
+    e.status, e.ting_status, e.webhook_status, e.attempt_count, e.next_attempt_at, e.attempted_at, \
     e.delivered_at, e.hook_event_id, e.failure_reason, e.lease_owner, \
     e.lease_expires_at, e.created_at, e.updated_at";
 
 const EXECUTION_RETURNING_COLUMNS: &str = "\
     id, schedule_id, org_id, silicon_id, schedule_version, schedule_kind, \
-    scheduled_for, reminder_text AS text, timezone, status, attempt_count, \
+    scheduled_for, reminder_text AS text, timezone, status, ting_status, webhook_status, attempt_count, \
     next_attempt_at, attempted_at, delivered_at, hook_event_id, \
     failure_reason, lease_owner, lease_expires_at, created_at, updated_at";
 

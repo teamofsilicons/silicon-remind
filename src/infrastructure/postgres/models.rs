@@ -259,6 +259,10 @@ pub struct ExecutionRow {
     pub timezone: String,
     /// Database-validated delivery status.
     pub status: String,
+    /// Durable outcome of the account-addressed Ting.
+    pub ting_status: String,
+    /// Durable outcome of the optional webhook subscriptions.
+    pub webhook_status: String,
     /// Number of acquired delivery attempts.
     pub attempt_count: i32,
     /// Time at which another attempt becomes eligible.

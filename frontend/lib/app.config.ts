@@ -27,7 +27,7 @@ export const appConfig: AppConfig = {
     { href: "/reminders", label: "Reminders", icon: Bell },
     { href: "/archive", label: "Archive", icon: Archive },
     { href: "/silicons", label: "Silicons & sharing", icon: Bot },
-    { href: "/webhooks", label: "Webhooks", icon: Webhook },
+    { href: "/webhooks", label: "Delivery", icon: Webhook },
     { href: "/testing", label: "Test environments", icon: FlaskConical },
     { href: "/settings", label: "Settings", icon: Settings2 },
   ],
@@ -66,7 +66,7 @@ export const appConfig: AppConfig = {
       {
         icon: Webhook,
         title: "Deliver where you work",
-        text: "Send due reminders to your configured webhook subscriptions.",
+        text: "Receive due reminders in Ting and add webhooks for any extra destinations.",
       },
       {
         icon: FlaskConical,

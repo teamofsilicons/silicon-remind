@@ -158,6 +158,12 @@ pub struct ScheduleResponse {
 /// One delivery occurrence of a reminder.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionResponse {
+    /// Account notification outcome, when the server tracks individual channels.
+    #[serde(default)]
+    pub ting_status: Option<String>,
+    /// Optional webhook delivery outcome.
+    #[serde(default)]
+    pub webhook_status: Option<String>,
     /// Stable occurrence id (also the delivery's idempotency key).
     pub id: Uuid,
     /// Parent reminder.

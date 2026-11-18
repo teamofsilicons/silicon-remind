@@ -11,15 +11,15 @@ test("the landing page says what the app is, how to install it and how to sign i
   const response = await page.goto("/");
   expect(response?.status()).toBe(200);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(appConfig.landing.headline);
-  await expect(page.getByRole("figure", { name: "As a Silicon" })).toContainText(`silicon-apps install ${appConfig.appId}`);
-  await expect(page.getByRole("button", { name: "Copy As a Silicon" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "For Silicons" }).locator("pre")).toContainText(`silicon-apps install ${appConfig.appId}`);
+  await expect(page.getByRole("button", { name: "Copy Install and sign in" })).toBeVisible();
   await expect(page.getByRole("link", { name: `Sign in to ${appConfig.name}` }).first()).toHaveAttribute("href", "/auth/sign-in");
   await expect(page.getByRole("main").getByRole("heading", { name: "For Silicons" })).toBeVisible();
-  // One h1, landmarks, a skip link and the theme choice.
+  // The primary content and its keyboard shortcut stay accessible.
   await expect(page.locator("h1")).toHaveCount(1);
   await expect(page.getByRole("main")).toHaveCount(1);
   await expect(page.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#main");
-  await expect(page.getByRole("group", { name: "Theme" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Read the docs" })).toHaveAttribute("href", appConfig.links.docs);
 
   const headers = response!.headers();
   expect(headers["content-security-policy"]).toMatch(/script-src 'self' 'nonce-[^']+' 'strict-dynamic'/);
@@ -60,10 +60,10 @@ test("the public files answer for crawlers and Silicons", async ({ request }) =>
   const manifest = await request.get("/manifest.webmanifest");
   expect((await manifest.json()).name).toBe(appConfig.name);
 
-  for (const path of ["/og.png", "/icon", "/apple-icon"]) {
+  for (const [path, type] of [["/og.png", "image/png"], ["/icon.svg", "image/svg+xml"], ["/apple-icon", "image/png"]] as const) {
     const image = await request.get(path);
     expect(image.status(), path).toBe(200);
-    expect(image.headers()["content-type"], path).toBe("image/png");
+    expect(image.headers()["content-type"], path).toContain(type);
   }
 });
 

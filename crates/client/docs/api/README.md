@@ -1,5 +1,7 @@
 # Public HTTP API
 
+For a standalone frontend, start with the [interface integration guide](interfaces.md).
+
 The production origin is `https://api.remind.teamofsilicons.com`. Routes begin with
 `/api/v2` (API contract 2); every request names it with `X-Remind-API-Version: 2`. JSON requests
 use `Content-Type: application/json`. Errors look like
@@ -20,11 +22,9 @@ X-Remind-API-Version: 2
 ```
 
 The token is an EdDSA JWT with `aud` = `remind`, checked against Silicon Accounts' published
-keys (`iss`, `aud`, expiry). Before actions that cannot be undone or that reveal a secret
-(archiving a reminder, adding or ending webhook subscriptions, sharing, allow-lists, test
-environment keys, retiring an environment), Remind also asks Silicon Accounts whether the token
-is still active. Sign-in happens between your client and Silicon Accounts; Remind never sees a
-refresh token:
+keys (`iss`, `aud`, expiry). Every bearer request also requires Accounts to return an active
+access token for client `remind`. An interface uses `apps["remind"].access_token` from Accounts.
+For first-party clients, sign-in happens directly with Accounts.
 
 - Carbons: the device flow (`POST {ACCOUNTS}/v1/device/authorize` with `client_id=remind`, then
   poll `POST {ACCOUNTS}/v1/oauth/token`), as `remind login` does.
@@ -174,13 +174,12 @@ Input is `{"endpoint_url":"…","signing_secret":"…"}`; leave out `signing_sec
 delivery. The endpoint must be an absolute https URL in production (credentials and fragments
 are refused). Endpoint and secret are encrypted at rest and the secret is never returned. A
 receipt is `{id, silicon_id, silicon_uuid, version, updated_at}`. Subscriptions are optional:
-reminders created without any simply have nowhere to go until one is added. See the
+the owning Silicon receives its due reminders through Ting. See the
 [delivery contract](../webhook-delivery.md).
 
 ## Delivery, archive and retention
 
-When a reminder comes due, the worker stores an immutable occurrence, then posts it to every
-subscription. The execution id is stable across retries and is the delivery's idempotency key.
+When a reminder comes due, the worker stores an immutable occurrence, then sends `remind.reminderDue` to the owning Silicon through Ting and posts to each configured webhook. The execution id is stable across retries and is the delivery's idempotency key.
 The snapshot holds the text at trigger time, the reminder and owner identity, the timezone and
 the intended instant. Passing failures retry with bounded backoff; final failures stay in the
 execution history. Reminders of an account that removed Remind from its apps stop firing until
@@ -193,6 +192,8 @@ the deleted-reminders log, which keeps the newest 100,000 records. The log is in
 exposed through the API.
 
 ## Test environments
+
+Hosted Remind has retired this feature. Check `features.test_environments` at `GET /api/versions` before displaying environment controls.
 
 See the [testing guide](../testing-environments.md). Management is a production action with your
 access token (a request carrying `X-Remind-Test-Key` here answers `403 test_key_not_allowed_here`):

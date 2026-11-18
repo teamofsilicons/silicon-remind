@@ -29,7 +29,7 @@ pub async fn versions(ScopedState(state): ScopedState) -> Result<Response, AppEr
     .fetch_all(state.repository.pool())
     .await?;
     let items: Vec<_> = rows.into_iter().map(|(version,status,sunset_at)| serde_json::json!({"version":version,"status":status,"sunset_at":sunset_at,"implemented":version==CURRENT})).collect();
-    Ok(Json(serde_json::json!({"service":"silicon-remind","current":CURRENT,"supported":[CURRENT],"protocol":"https+json","selection_header":"X-Remind-API-Version","versions":items,"sunset_idle_days":7,"policy":"https://docs.remind.teamofsilicons.com/version-policy/"})).into_response())
+    Ok(Json(serde_json::json!({"service":"silicon-remind","current":CURRENT,"supported":[CURRENT],"protocol":"https+json","selection_header":"X-Remind-API-Version","features":{"ting":state.ting.is_some(),"test_environments":state.tests.is_some(),"reports":state.reports_enabled},"versions":items,"sunset_idle_days":7,"policy":"https://docs.remind.teamofsilicons.com/version-policy/"})).into_response())
 }
 
 /// Applies the idle sunset only to deprecated, non-current versions.

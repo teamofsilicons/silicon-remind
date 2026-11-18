@@ -42,7 +42,7 @@ The service is a Rust modular monolith with three processes:
 
 Product intent lives in [UNDERSTANDING.md](UNDERSTANDING.md), engineering choices in [decisions.md](decisions.md)
 and [docs/migration/decisions.md](docs/migration/decisions.md), and the HTTP contract in [openapi.yaml](openapi.yaml)
-with the [API guide](docs/api/README.md).
+with the [API guide](docs/api/README.md). The [standalone interface guide](docs/api/interfaces.md) covers app tokens, browser requests, and Ting and webhook delivery.
 
 ## Prerequisites
 

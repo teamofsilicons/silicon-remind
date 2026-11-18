@@ -82,25 +82,6 @@ pub const PROOF_READ_ROUTES: &[&str] = &[
     "/api/v2/auth/me",
 ];
 
-/// Routes where a revoked sign-in must be refused at once: Remind asks Silicon
-/// Accounts (introspection, cached up to 30 seconds) instead of trusting the
-/// token's signature alone.
-pub const INTROSPECTED_ROUTES: &[(&str, &str)] = &[
-    ("DELETE", "/api/v2/schedules/{schedule_id}"),
-    ("PUT", "/api/v2/webhook"),
-    ("DELETE", "/api/v2/webhook"),
-    ("POST", "/api/v2/webhooks"),
-    ("DELETE", "/api/v2/webhooks/{subscription_id}"),
-    ("POST", "/api/v2/viewers"),
-    ("DELETE", "/api/v2/viewers/{viewer}"),
-    ("POST", "/api/v2/allowed-accounts"),
-    ("DELETE", "/api/v2/allowed-accounts/{account}"),
-    ("GET", "/api/v2/test-environments/{id}/key"),
-    ("POST", "/api/v2/test-environments/{id}/key-rotations"),
-    ("POST", "/api/v2/test-environments/{id}/restorations"),
-    ("DELETE", "/api/v2/test-environments/{id}"),
-];
-
 /// The credential a request presented.
 #[derive(Debug)]
 pub(crate) enum Presented {
@@ -131,8 +112,7 @@ pub async fn authenticate(
                     .await
                     .map_err(map_accounts_error)?;
                 state.request_budget.admit(&claims.sub)?;
-                if INTROSPECTED_ROUTES.contains(&(method.as_str(), route.as_str()))
-                    && !gateway
+                if !gateway
                         .token_is_active(token.expose_secret())
                         .await
                         .map_err(map_accounts_error)?
@@ -142,7 +122,18 @@ pub async fn authenticate(
                         "Silicon Accounts reports this access token is no longer active (signed out or access removed). Sign in again.",
                     ));
                 }
-                state.identity.resolve_bearer(&claims).await?
+                let actor = state.identity.resolve_bearer(&claims).await?;
+                if actor.is_silicon() && state.ting.is_some()
+                    && request.extensions().get::<super::handlers::testing::EnvironmentContext>().is_none()
+                    && matches!((method.as_str(), route.as_str()), ("GET", "/api/v2/auth/me") | ("POST", "/api/v2/schedules"))
+                    && super::handlers::ting::enrol(&state, &actor, &token, false).await.is_err()
+                {
+                    tracing::warn!("Ting enrolment deferred until the next sign-in or schedule creation");
+                }
+                if method == http::Method::PUT && route == "/api/v2/ting" {
+                    request.extensions_mut().insert(token);
+                }
+                actor
             }
             Presented::Proof(token) => {
                 if method != http::Method::GET || !PROOF_READ_ROUTES.contains(&route.as_str()) {
@@ -297,6 +288,46 @@ fn with_request_id(mut response: Response, request_id: &str) -> Response {
     if let Ok(value) = HeaderValue::from_str(request_id) {
         response.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
+    response
+}
+
+/// Let standalone browser interfaces call the bearer-authenticated API, including version selection
+/// and test-environment requests. CORS must surround version negotiation to serve preflights.
+pub async fn interface_cors(request: Request, next: Next) -> Response {
+    use axum::http::{
+        Method,
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
+            ACCESS_CONTROL_REQUEST_METHOD, ORIGIN, VARY,
+        },
+    };
+    if !(request.uri().path().starts_with("/api/v2/") || request.uri().path() == "/api/versions")
+        || !request.headers().contains_key(ORIGIN)
+    {
+        return next.run(request).await;
+    }
+    let mut response = if request.method() == Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(ACCESS_CONTROL_REQUEST_METHOD)
+    {
+        let mut response = http::StatusCode::NO_CONTENT.into_response();
+        let headers = response.headers_mut();
+        headers.insert(
+            ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
+        headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Authorization, Content-Type, Idempotency-Key, X-Remind-API-Version, X-Remind-Test-Key, X-Request-ID"));
+        headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+        response
+    } else {
+        next.run(request).await
+    };
+    let headers = response.headers_mut();
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("X-Request-ID, X-Remind-API-Version, Retry-After, WWW-Authenticate, Deprecation, Sunset, Link"));
+    headers.append(VARY, HeaderValue::from_static("Origin"));
     response
 }
 
