@@ -1,5 +1,7 @@
 # Test a complete reminder workflow
 
+Hosted Remind has retired test environments. This guide applies to deployments reporting `features.test_environments: true` from `GET /api/versions`.
+
 A Remind test environment is an isolated copy of Remind with its own reminders, deliveries,
 subscriptions and logs. It starts empty, behaves like production, and never touches production
 data. You use it with your normal Silicon Accounts sign-in; only the data is separate.

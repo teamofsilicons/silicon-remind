@@ -64,6 +64,8 @@ Paths below are relative to the production base. Use `GET /auth/me` for capabili
 | Use an isolated environment | Send `X-Remind-Test-Key` on data calls. `GET /testing-environment` and `POST /testing-environment/cleanings` take the key alone. | Holder of the environment key. Normal data routes also require the access token. |
 | Report an integration problem | `POST /reports` with `{message,pr}` and an idempotency key, `GET /reports/{id}` | Reporting account. Include the request ID. A test environment simulates reports. |
 
+Production has retired test environments. Hide their controls when `GET /api/versions` returns `features.test_environments: false`. The test routes in the table are available on deployments with a testing database. Discovery also reports `features.ting` and `features.reports`.
+
 See the [HTTP reference](README.md) for query parameters, examples and payloads for each feature, and the [testing guide](../testing-environments.md) for lifecycle and limits.
 
 ## Receiving due reminders

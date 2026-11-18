@@ -179,20 +179,29 @@ impl DeliveryProcessor {
         };
         let (ting, hooks) = tokio::join!(
             async {
-                if execution.ting_status != "pending" {
-                    Ok(execution.ting_status.as_str())
-                } else {
+                if execution.ting_status == "pending" {
                     self.deliver_ting(&event).await
+                } else {
+                    Ok(execution.ting_status.as_str())
                 }
             },
             async {
-                if execution.webhook_status != "pending" {
-                    Ok(execution.webhook_status.as_str())
-                } else {
+                if execution.webhook_status == "pending" {
                     self.deliver_webhooks(key, &event, attempted_at).await
+                } else {
+                    Ok(execution.webhook_status.as_str())
                 }
             }
         );
+        self.finish_channels(&execution, ting, hooks).await
+    }
+
+    async fn finish_channels(
+        &self,
+        execution: &ExecutionRow,
+        ting: Result<&str, WebhookDeliveryError>,
+        hooks: Result<&str, WebhookDeliveryError>,
+    ) -> anyhow::Result<()> {
         let last_attempt = execution.attempt_count >= i32::from(self.retry.max_attempts);
         let ting_status = channel_status(&ting, last_attempt);
         let webhook_status = channel_status(&hooks, last_attempt);
@@ -215,7 +224,7 @@ impl DeliveryProcessor {
                 .map_or("Delivery is pending", WebhookDeliveryError::reason);
             return self
                 .finish_failure(
-                    &execution,
+                    execution,
                     WebhookDeliveryError::Retryable {
                         reason: reason.to_owned(),
                     },
@@ -230,7 +239,7 @@ impl DeliveryProcessor {
                 .map_or("A delivery channel failed", WebhookDeliveryError::reason);
             return self
                 .finish_failure(
-                    &execution,
+                    execution,
                     WebhookDeliveryError::Terminal {
                         reason: reason.to_owned(),
                     },
@@ -240,7 +249,7 @@ impl DeliveryProcessor {
         if ting_status == "unsubscribed" && webhook_status == "none" {
             return self
                 .finish_failure(
-                    &execution,
+                    execution,
                     terminal("Ting has no Remind subscription and there are no webhooks"),
                 )
                 .await;
@@ -349,12 +358,12 @@ impl DeliveryProcessor {
             .map_err(|_| retryable("Reminder owner lookup failed"))?
             .remove(&key);
         if let Some(owner) = &owner
-            && !self
+            && self
                 .identity
                 .find(&owner.uuid)
                 .await
                 .map_err(|_| retryable("Reminder owner lookup failed"))?
-                .is_some_and(|row| row.status == "active")
+                .is_none_or(|row| row.status != "active")
         {
             return Err(terminal("Reminder owner is no longer active"));
         }

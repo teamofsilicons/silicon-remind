@@ -7,6 +7,5 @@ ALTER TABLE executions
         CHECK (webhook_status IN ('untracked','pending','delivered','none','simulated','failed'));
 ALTER TABLE executions ALTER COLUMN ting_status SET DEFAULT 'pending',
                        ALTER COLUMN webhook_status SET DEFAULT 'pending';
-UPDATE executions SET ting_status = 'pending', webhook_status = 'pending' WHERE status IN ('pending','retrying');
 ALTER TABLE executions DROP CONSTRAINT executions_delivery_consistent,
     ADD CONSTRAINT executions_delivery_consistent CHECK ((status = 'delivered') = (delivered_at IS NOT NULL));

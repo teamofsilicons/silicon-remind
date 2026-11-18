@@ -77,18 +77,29 @@ async fn every_bearer_request_checks_live_type_audience_and_revocation() -> anyh
             .0,
         StatusCode::OK
     );
+    let response = std::sync::Arc::new(std::sync::Mutex::new(ResponseTemplate::new(503)));
+    let active_response = response.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/oauth/introspect"))
+        .respond_with(move |_: &wiremock::Request| {
+            active_response
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .with_priority(1)
+        .mount(&h.accounts)
+        .await;
     for reply in [
         json!({"active": false}),
         json!({"active": true, "client_id": "remind", "token_type": "refresh_token"}),
         json!({"active": true, "client_id": "other", "token_type": "access_token"}),
         json!({"active": true, "token_type": "access_token"}),
     ] {
-        let _reply = Mock::given(method("POST"))
-            .and(path("/v1/oauth/introspect"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
-            .with_priority(1)
-            .mount_as_scoped(&h.accounts)
-            .await;
+        *response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            ResponseTemplate::new(200).set_body_json(reply);
         for (verb, uri) in [
             ("GET", "/api/v2/schedules"),
             ("POST", "/api/v2/schedules"),
@@ -102,17 +113,12 @@ async fn every_bearer_request_checks_live_type_audience_and_revocation() -> anyh
             assert_eq!(code(&body), "token_revoked");
         }
     }
-    let _unavailable = Mock::given(method("POST"))
-        .and(path("/v1/oauth/introspect"))
-        .respond_with(ResponseTemplate::new(503))
-        .with_priority(1)
-        .mount_as_scoped(&h.accounts)
-        .await;
-    assert_eq!(
-        h.send("GET", "/api/v2/auth/me", Some(&token), None, &[])
-            .await?
-            .0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
+    *response
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = ResponseTemplate::new(503);
+    let (status, body) = h
+        .send("GET", "/api/v2/auth/me", Some(&token), None, &[])
+        .await?;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     Ok(())
 }

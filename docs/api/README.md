@@ -193,6 +193,8 @@ exposed through the API.
 
 ## Test environments
 
+Hosted Remind has retired this feature. Check `features.test_environments` at `GET /api/versions` before displaying environment controls.
+
 See the [testing guide](../testing-environments.md). Management is a production action with your
 access token (a request carrying `X-Remind-Test-Key` here answers `403 test_key_not_allowed_here`):
 

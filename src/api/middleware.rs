@@ -291,6 +291,46 @@ fn with_request_id(mut response: Response, request_id: &str) -> Response {
     response
 }
 
+/// Let standalone browser interfaces call the bearer-authenticated API, including version selection
+/// and test-environment requests. CORS must surround version negotiation to serve preflights.
+pub async fn interface_cors(request: Request, next: Next) -> Response {
+    use axum::http::{
+        Method,
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
+            ACCESS_CONTROL_REQUEST_METHOD, ORIGIN, VARY,
+        },
+    };
+    if !(request.uri().path().starts_with("/api/v2/") || request.uri().path() == "/api/versions")
+        || !request.headers().contains_key(ORIGIN)
+    {
+        return next.run(request).await;
+    }
+    let mut response = if request.method() == Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(ACCESS_CONTROL_REQUEST_METHOD)
+    {
+        let mut response = http::StatusCode::NO_CONTENT.into_response();
+        let headers = response.headers_mut();
+        headers.insert(
+            ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
+        headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Authorization, Content-Type, Idempotency-Key, X-Remind-API-Version, X-Remind-Test-Key, X-Request-ID"));
+        headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+        response
+    } else {
+        next.run(request).await
+    };
+    let headers = response.headers_mut();
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("X-Request-ID, X-Remind-API-Version, Retry-After, WWW-Authenticate, Deprecation, Sunset, Link"));
+    headers.append(VARY, HeaderValue::from_static("Origin"));
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use http::{HeaderMap, HeaderValue, header};
@@ -339,37 +379,4 @@ mod tests {
             );
         }
     }
-}
-
-/// Let standalone browser interfaces call the bearer-authenticated API, including version selection
-/// and test-environment requests. CORS must surround version negotiation to serve preflights.
-pub async fn interface_cors(request: Request, next: Next) -> Response {
-    use axum::http::{HeaderValue, Method, header::*};
-    if !(request.uri().path().starts_with("/api/v2/") || request.uri().path() == "/api/versions")
-        || !request.headers().contains_key(ORIGIN)
-    {
-        return next.run(request).await;
-    }
-    let mut response = if request.method() == Method::OPTIONS
-        && request
-            .headers()
-            .contains_key(ACCESS_CONTROL_REQUEST_METHOD)
-    {
-        let mut response = http::StatusCode::NO_CONTENT.into_response();
-        let headers = response.headers_mut();
-        headers.insert(
-            ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
-        );
-        headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Authorization, Content-Type, Idempotency-Key, X-Remind-API-Version, X-Remind-Test-Key, X-Request-ID"));
-        headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
-        response
-    } else {
-        next.run(request).await
-    };
-    let headers = response.headers_mut();
-    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
-    headers.insert(ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("X-Request-ID, X-Remind-API-Version, Retry-After, WWW-Authenticate, Deprecation, Sunset, Link"));
-    headers.append(VARY, HeaderValue::from_static("Origin"));
-    response
 }

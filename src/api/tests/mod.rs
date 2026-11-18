@@ -74,6 +74,10 @@ pub(super) struct Harness {
 
 impl Harness {
     pub(super) async fn new() -> anyhow::Result<Self> {
+        Self::with_ting(false).await
+    }
+
+    pub(super) async fn with_ting(enable: bool) -> anyhow::Result<Self> {
         let database = crate::test_support::TestPostgres::start().await?;
         let pool = database.pool(5).await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
@@ -99,7 +103,10 @@ impl Harness {
             .mount(&accounts)
             .await;
 
-        let settings = Settings::for_tests(&accounts.uri(), &database.url)?;
+        let mut settings = Settings::for_tests(&accounts.uri(), &database.url)?;
+        if enable {
+            settings.ting_url = Some(accounts.uri().parse()?);
+        }
         let mut state = super::ApiState::new(&settings, pool.clone())?;
         state.tests = Some(
             TestEnvironments::connect(
@@ -250,3 +257,5 @@ impl Harness {
 pub(super) fn code(body: &Value) -> &str {
     body["error"]["code"].as_str().unwrap_or_default()
 }
+
+mod interfaces;

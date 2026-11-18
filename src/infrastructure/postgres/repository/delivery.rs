@@ -201,6 +201,8 @@ impl PostgresRepository {
              ) \
              UPDATE executions e SET \
                  status = CASE WHEN e.attempt_count = 0 THEN 'pending' ELSE 'retrying' END, \
+                 ting_status = CASE WHEN e.ting_status = 'untracked' THEN 'pending' ELSE e.ting_status END, \
+                 webhook_status = CASE WHEN e.webhook_status = 'untracked' THEN 'pending' ELSE e.webhook_status END, \
                  attempt_count = e.attempt_count + 1, \
                  attempted_at = $1, lease_owner = $3, lease_expires_at = $4 \
              FROM candidates c WHERE e.id = c.id \

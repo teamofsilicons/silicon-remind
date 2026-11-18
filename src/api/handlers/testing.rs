@@ -269,8 +269,12 @@ async fn owner_ref(
 }
 
 fn manager(state: &ApiState) -> Result<&TestEnvironments, AppError> {
-    state.tests.as_ref().ok_or(AppError::DependencyUnavailable {
-        dependency: "testing_database",
+    state.tests.as_ref().ok_or_else(|| {
+        AppError::described(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "test_environments_unavailable",
+            "This deployment does not offer test environments.",
+        )
     })
 }
 

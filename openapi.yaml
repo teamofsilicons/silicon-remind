@@ -1171,6 +1171,13 @@ components:
                 format: date-time
               implemented:
                 type: boolean
+        features:
+          type: object
+          required: [ting, test_environments, reports]
+          properties:
+            ting: {type: boolean}
+            test_environments: {type: boolean}
+            reports: {type: boolean}
         sunset_idle_days:
           type: integer
         policy:
