@@ -127,7 +127,7 @@ async fn a_due_reminder_reaches_ting_without_a_hook_and_retries_only_the_failed_
         .and(body_partial_json(json!({"type":"remind.reminderDue","for":"One","data":{"text":"Check the build","timezone":"UTC"}})))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({"status":"accepted","id":"ting_id"}))).expect(2).mount(&h.accounts).await;
 
-    let mut settings = Settings::for_tests(&h.accounts.uri(), &h._database.url)?;
+    let mut settings = Settings::for_tests(&h.accounts.uri(), &h.database.url)?;
     settings.ting_url = Some(h.accounts.uri().parse()?);
     let state = crate::api::ApiState::new(&settings, h.pool.clone())?;
     let worker = DeliveryProcessor::new(

@@ -63,7 +63,7 @@ impl Signer {
 }
 
 pub(super) struct Harness {
-    _database: crate::test_support::TestPostgres,
+    database: crate::test_support::TestPostgres,
     _testing: crate::test_support::TestPostgres,
     pub(super) pool: PgPool,
     pub(super) accounts: MockServer,
@@ -127,7 +127,7 @@ impl Harness {
             pool,
             accounts,
             signer,
-            _database: database,
+            database,
             _testing: testing,
         })
     }
