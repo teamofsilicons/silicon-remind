@@ -37,7 +37,8 @@ export type Execution = {
   id: string;
   scheduled_for: string;
   status: string;
-  attempts: number;
+  ting_status?: string;
+  webhook_status?: string;
   failure_reason?: string | null;
   delivered_at?: string | null;
   created_at: string;

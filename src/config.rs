@@ -53,6 +53,8 @@ pub struct Settings {
     pub testing_database: Option<DatabaseSettings>,
     /// Silicon Accounts: token verification, lookups, proofs and the app webhook.
     pub accounts: AccountsSettings,
+    /// Ting API origin for account notifications. Production uses the hosted service by default.
+    pub ting_url: Option<Url>,
     /// Versioned data-encryption keys.
     pub encryption: EncryptionSettings,
     /// Generic outbound webhook delivery client.
@@ -388,6 +390,18 @@ impl Settings {
         let database = database_settings(source, DatabaseProfile::Runtime)?;
         let testing_database = testing_database_settings(source, &database, environment)?;
         let accounts = accounts_settings(source, environment)?;
+        let ting_url = if environment == RuntimeEnvironment::Production
+            || optional(source, "REMIND_TING_URL").is_some()
+        {
+            Some(accounts_origin(
+                source,
+                "REMIND_TING_URL",
+                Some("https://backend.ting.teamofsilicons.com"),
+                environment,
+            )?)
+        } else {
+            None
+        };
         let encryption = encryption_settings(source)?;
         let webhook = WebhookSettings {
             connect_timeout: duration_millis(source, "REMIND_WEBHOOK_CONNECT_TIMEOUT_MS", 2_000)?,
@@ -431,6 +445,7 @@ impl Settings {
             database,
             testing_database,
             accounts,
+            ting_url,
             encryption,
             webhook,
             worker,

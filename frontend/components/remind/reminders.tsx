@@ -462,6 +462,9 @@ function ScheduleDetail({
                     Scheduled {date(e.scheduled_for)} · Delivered{" "}
                     {date(e.delivered_at)}
                   </p>
+                  {e.ting_status && e.ting_status !== "untracked" && (
+                    <p className={styles.muted}>Ting · {e.ting_status} · Webhooks · {e.webhook_status}</p>
+                  )}
                   {e.failure_reason && (
                     <p className={styles.error}>{e.failure_reason}</p>
                   )}

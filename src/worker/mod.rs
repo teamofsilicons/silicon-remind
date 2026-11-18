@@ -39,6 +39,18 @@ struct WorkerRuntime {
     metrics: Metrics,
 }
 
+/// Publishes the bundled reminder type using a short-lived, type-management proof.
+///
+/// # Errors
+/// Returns an error if Ting is unconfigured or refuses the registration.
+pub async fn register_ting(settings: &Settings) -> anyhow::Result<()> {
+    let gateway = AccountsGateway::new(&settings.accounts)?;
+    crate::infrastructure::ting::Ting::configured(settings, gateway)?
+        .ok_or_else(|| anyhow::anyhow!("Set REMIND_TING_URL to register the reminder type"))?
+        .register_type()
+        .await
+}
+
 /// Runs durable scheduling, webhook delivery, and retention until shutdown.
 ///
 /// # Errors
@@ -72,6 +84,8 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         AccountsGateway::new(&settings.accounts)?,
         settings.accounts.lookup_ttl,
     );
+    let ting =
+        crate::infrastructure::ting::Ting::configured(&settings, identity.gateway().clone())?;
     let delivery = delivery::DeliveryProcessor::new(
         repository.clone(),
         identity.clone(),
@@ -87,6 +101,7 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
         clock.clone(),
         metrics.clone(),
     )
+    .with_ting(ting)
     .with_test_destinations(settings.test_webhook_urls.clone());
     let operational_listener =
         tokio::net::TcpListener::bind(settings.worker.operational_bind_addr).await?;

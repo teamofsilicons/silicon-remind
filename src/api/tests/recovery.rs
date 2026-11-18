@@ -67,32 +67,52 @@ async fn custody_changes_revoke_old_custodian_delegation() -> anyhow::Result<()>
 }
 
 #[tokio::test]
-async fn sensitive_routes_introspect_even_with_a_valid_signed_token() -> anyhow::Result<()> {
+async fn every_bearer_request_checks_live_type_audience_and_revocation() -> anyhow::Result<()> {
     let h = Harness::new().await?;
     h.seed("One", ActorKind::Silicon, "si:one", None).await?;
     let token = h.bearer("One", ActorKind::Silicon, "si:one")?;
-    Mock::given(method("POST"))
-        .and(path("/v1/oauth/introspect"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active":false})))
-        .with_priority(1)
-        .mount(&h.accounts)
-        .await;
-    for (verb, pattern) in crate::api::middleware::INTROSPECTED_ROUTES {
-        let uri = pattern
-            .replace("{schedule_id}", "00000000-0000-0000-0000-000000000001")
-            .replace("{subscription_id}", "00000000-0000-0000-0000-000000000001")
-            .replace("{id}", "00000000-0000-0000-0000-000000000001")
-            .replace("{viewer}", "c:ada")
-            .replace("{account}", "c:ada");
-        let (status, response) = h.send(verb, &uri, Some(&token), None, &[]).await?;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{verb} {uri}: {response}");
-        assert_eq!(code(&response), "token_revoked", "{verb} {uri}: {response}");
-    }
     assert_eq!(
         h.send("GET", "/api/v2/schedules", Some(&token), None, &[])
             .await?
             .0,
         StatusCode::OK
+    );
+    for reply in [
+        json!({"active": false}),
+        json!({"active": true, "client_id": "remind", "token_type": "refresh_token"}),
+        json!({"active": true, "client_id": "other", "token_type": "access_token"}),
+        json!({"active": true, "token_type": "access_token"}),
+    ] {
+        let _reply = Mock::given(method("POST"))
+            .and(path("/v1/oauth/introspect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+            .with_priority(1)
+            .mount_as_scoped(&h.accounts)
+            .await;
+        for (verb, uri) in [
+            ("GET", "/api/v2/schedules"),
+            ("POST", "/api/v2/schedules"),
+            (
+                "DELETE",
+                "/api/v2/schedules/00000000-0000-0000-0000-000000000001",
+            ),
+        ] {
+            let (status, body) = h.send(verb, uri, Some(&token), None, &[]).await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{verb} {uri}: {body}");
+            assert_eq!(code(&body), "token_revoked");
+        }
+    }
+    let _unavailable = Mock::given(method("POST"))
+        .and(path("/v1/oauth/introspect"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount_as_scoped(&h.accounts)
+        .await;
+    assert_eq!(
+        h.send("GET", "/api/v2/auth/me", Some(&token), None, &[])
+            .await?
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
     );
     Ok(())
 }

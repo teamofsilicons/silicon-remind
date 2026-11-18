@@ -29,6 +29,7 @@ pub struct DeliveryProcessor {
     repository: PostgresRepository,
     identity: IdentityStore,
     webhook_client: WebhookClient,
+    ting: Option<crate::infrastructure::ting::Ting>,
     encryption: SecretCipherKeyring,
     worker_id: String,
     lease_duration: Duration,
@@ -66,6 +67,7 @@ impl DeliveryProcessor {
             repository,
             identity,
             webhook_client,
+            ting: None,
             encryption,
             worker_id: config.worker_id,
             lease_duration: config.lease_duration,
@@ -77,6 +79,11 @@ impl DeliveryProcessor {
             testing: false,
             test_webhook_urls: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_ting(mut self, ting: Option<crate::infrastructure::ting::Ting>) -> Self {
+        self.ting = ting;
+        self
     }
 
     pub(crate) fn with_test_destinations(mut self, urls: Vec<String>) -> Self {
@@ -144,11 +151,9 @@ impl DeliveryProcessor {
     }
 
     async fn deliver_one(&self, execution: ExecutionRow) -> anyhow::Result<()> {
-        let (destinations, owner) = match self.resolve_destinations(&execution).await {
+        let (key, owner) = match self.resolve_owner(&execution).await {
             Ok(resolved) => resolved,
-            Err(error) => {
-                return self.finish_failure(&execution, error).await;
-            }
+            Err(error) => return self.finish_failure(&execution, error).await,
         };
         let attempted_at = self.clock.now();
         if !self
@@ -156,63 +161,95 @@ impl DeliveryProcessor {
             .delivery_lease_is_live(execution.id, &self.worker_id, attempted_at)
             .await?
         {
-            tracing::debug!(
-                execution.id = %execution.id,
-                "skipping delivery whose lease or schedule is no longer live"
-            );
             return Ok(());
         }
-        // The owner's current id and uuid; the materialization-time id when no
-        // account owns the reminder yet.
-        let (silicon_id, silicon_uuid) = match owner {
-            Some(owner) if !owner.id.is_empty() => (owner.id, Some(owner.uuid)),
-            Some(owner) => (execution.silicon_id.clone(), Some(owner.uuid)),
-            None => (execution.silicon_id.clone(), None),
-        };
         let event = ReminderEvent {
             execution_id: execution.id,
             schedule_id: execution.schedule_id,
-            silicon_id,
-            silicon_uuid,
+            silicon_id: owner
+                .as_ref()
+                .map(|account| &account.id)
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&execution.silicon_id)
+                .clone(),
+            silicon_uuid: owner.map(|account| account.uuid),
             text: execution.text.clone(),
             scheduled_for: execution.scheduled_for,
             timezone: execution.timezone.clone(),
         };
-        // Every receiver gets the same execution UUID as its idempotency key.
-        // If one receiver fails after another succeeds, retrying the whole
-        // batch is safe for receivers that honor that key.
-        let mut first_error = None;
-        for destination in destinations {
-            // Test deliveries are simulated unless deployment configuration
-            // explicitly designates this exact URL as a test receiver.
-            if self.testing
-                && !self
-                    .test_webhook_urls
-                    .iter()
-                    .any(|url| url == destination.endpoint_url.as_str())
-            {
-                continue;
+        let (ting, hooks) = tokio::join!(
+            async {
+                if execution.ting_status != "pending" {
+                    Ok(execution.ting_status.as_str())
+                } else {
+                    self.deliver_ting(&event).await
+                }
+            },
+            async {
+                if execution.webhook_status != "pending" {
+                    Ok(execution.webhook_status.as_str())
+                } else {
+                    self.deliver_webhooks(key, &event, attempted_at).await
+                }
             }
-            if let Err(error) = self
-                .webhook_client
-                .deliver(&destination, &event, attempted_at)
-                .await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-        if let Some(error) = first_error {
-            return self.finish_failure(&execution, error).await;
-        }
+        );
+        let last_attempt = execution.attempt_count >= i32::from(self.retry.max_attempts);
+        let ting_status = channel_status(&ting, last_attempt);
+        let webhook_status = channel_status(&hooks, last_attempt);
+        self.repository
+            .record_channels(
+                execution.id,
+                &self.worker_id,
+                ting_status,
+                webhook_status,
+                self.clock.now(),
+            )
+            .await?;
 
-        // No subscribers is valid. Mark the occurrence processed without an
-        // outbound request so scheduling remains independent of subscriptions.
+        // A terminal failure in one channel must never suppress retries for the other.
+        if ting_status == "pending" || webhook_status == "pending" {
+            let reason = [&ting, &hooks]
+                .into_iter()
+                .filter_map(|result| result.as_ref().err())
+                .find(|error| error.is_retryable())
+                .map_or("Delivery is pending", WebhookDeliveryError::reason);
+            return self
+                .finish_failure(
+                    &execution,
+                    WebhookDeliveryError::Retryable {
+                        reason: reason.to_owned(),
+                    },
+                )
+                .await;
+        }
+        if ting_status == "failed" || webhook_status == "failed" {
+            let reason = ting
+                .as_ref()
+                .err()
+                .or(hooks.as_ref().err())
+                .map_or("A delivery channel failed", WebhookDeliveryError::reason);
+            return self
+                .finish_failure(
+                    &execution,
+                    WebhookDeliveryError::Terminal {
+                        reason: reason.to_owned(),
+                    },
+                )
+                .await;
+        }
+        if ting_status == "unsubscribed" && webhook_status == "none" {
+            return self
+                .finish_failure(
+                    &execution,
+                    terminal("Ting has no Remind subscription and there are no webhooks"),
+                )
+                .await;
+        }
         self.repository
             .mark_delivery_succeeded(
                 execution.id,
                 &self.worker_id,
-                execution.id,
+                (webhook_status == "delivered").then_some(execution.id),
                 self.clock.now(),
             )
             .await?;
@@ -220,44 +257,108 @@ impl DeliveryProcessor {
         Ok(())
     }
 
-    /// Every active subscription of the reminder's owner account, and the owner.
-    async fn resolve_destinations(
+    async fn deliver_ting(
+        &self,
+        event: &ReminderEvent,
+    ) -> Result<&'static str, WebhookDeliveryError> {
+        if self.testing {
+            return Ok("simulated");
+        }
+        let Some(ting) = &self.ting else {
+            return Ok("disabled");
+        };
+        let Some(recipient) = &event.silicon_uuid else {
+            return Ok("unsubscribed");
+        };
+        let result = ting.send(recipient, event).await?;
+        if result == "unsubscribed" {
+            let enrolled: bool = sqlx::query_scalar(
+                "SELECT ting_registered_at IS NOT NULL FROM accounts WHERE uuid=$1",
+            )
+            .bind(recipient)
+            .fetch_one(self.identity.pool())
+            .await
+            .map_err(|_| retryable("Ting registration lookup failed"))?;
+            if !enrolled {
+                return Err(retryable(
+                    "Ting is waiting for the Silicon to open Remind or enable notifications",
+                ));
+            }
+        }
+        Ok(result)
+    }
+
+    async fn deliver_webhooks(
+        &self,
+        key: Uuid,
+        event: &ReminderEvent,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<&'static str, WebhookDeliveryError> {
+        let rows = self
+            .repository
+            .destinations_for_owner_account(key)
+            .await
+            .map_err(|_| retryable("Webhook destination lookup failed"))?;
+        if rows.is_empty() {
+            return Ok("none");
+        }
+        let mut failure = None;
+        let mut delivered = false;
+        for row in &rows {
+            let result: Result<(), WebhookDeliveryError> = async {
+                let destination = self.decrypt_destination(row)?;
+                if self.testing
+                    && !self
+                        .test_webhook_urls
+                        .iter()
+                        .any(|url| url == destination.endpoint_url.as_str())
+                {
+                    return Ok(());
+                }
+                self.webhook_client.deliver(&destination, event, at).await?;
+                delivered = true;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result
+                && (failure.is_none() || !error.is_retryable())
+            {
+                failure = Some(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(if delivered { "delivered" } else { "simulated" })
+    }
+
+    /// Resolve the stable recipient and check production lifecycle state even for a sandbox copy.
+    async fn resolve_owner(
         &self,
         execution: &ExecutionRow,
-    ) -> Result<(Vec<WebhookDestination>, Option<crate::domain::AccountRef>), WebhookDeliveryError>
-    {
-        let owner_key = self
+    ) -> Result<(Uuid, Option<crate::domain::AccountRef>), WebhookDeliveryError> {
+        let key = self
             .repository
             .execution_owner_key(execution.id)
             .await
-            .map_err(|_| retryable("Webhook destination lookup failed"))?;
-        let rows = self
-            .repository
-            .destinations_for_owner_account(owner_key)
-            .await
-            .map_err(|_| retryable("Webhook destination lookup failed"))?;
+            .map_err(|_| retryable("Reminder owner lookup failed"))?;
         let owner = self
             .identity
-            .owners_by_keys(&[owner_key])
+            .owners_by_keys(&[key])
             .await
             .map_err(|_| retryable("Reminder owner lookup failed"))?
-            .remove(&owner_key);
-        if let Some(owner) = &owner {
-            let active = self
+            .remove(&key);
+        if let Some(owner) = &owner
+            && !self
                 .identity
                 .find(&owner.uuid)
                 .await
                 .map_err(|_| retryable("Reminder owner lookup failed"))?
-                .is_some_and(|row| row.status == "active");
-            if !active {
-                return Err(terminal("Reminder owner is no longer active"));
-            }
+                .is_some_and(|row| row.status == "active")
+        {
+            return Err(terminal("Reminder owner is no longer active"));
         }
-        let destinations = rows
-            .iter()
-            .map(|row| self.decrypt_destination(row))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((destinations, owner))
+        Ok((key, owner))
     }
 
     fn decrypt_destination(
@@ -365,6 +466,17 @@ pub fn retry_delay(policy: &RetrySettings, execution_id: Uuid, attempt: u16) -> 
     Duration::from_millis(u64::try_from(total_ms).unwrap_or(u64::MAX))
 }
 
+fn channel_status<'a>(
+    result: &Result<&'a str, WebhookDeliveryError>,
+    last_attempt: bool,
+) -> &'a str {
+    match result {
+        Ok(status) => status,
+        Err(error) if error.is_retryable() && !last_attempt => "pending",
+        Err(_) => "failed",
+    }
+}
+
 fn retryable(reason: &'static str) -> WebhookDeliveryError {
     WebhookDeliveryError::Retryable {
         reason: reason.to_owned(),
@@ -446,14 +558,14 @@ mod tests {
             Metrics::new(),
         )
         .with_repository(PostgresRepository::new(environment_pool.clone()));
-        assert!(processor.resolve_destinations(&execution).await.is_ok());
+        assert!(processor.resolve_owner(&execution).await.is_ok());
         for status in ["access_removed", "deleted"] {
             sqlx::query("UPDATE accounts SET status=$1 WHERE uuid='Owner'")
                 .bind(status)
                 .execute(&production_pool)
                 .await?;
             assert!(matches!(
-                processor.resolve_destinations(&execution).await,
+                processor.resolve_owner(&execution).await,
                 Err(WebhookDeliveryError::Terminal { .. })
             ));
         }

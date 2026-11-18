@@ -67,7 +67,7 @@ this machine only.
 
 ## Deliveries
 
-Outbound deliveries are simulated inside test environments by default: the execution completes
+Ting registration and delivery are always simulated inside test environments. Webhook deliveries are simulated by default: the execution completes
 and is recorded without contacting the subscribed URL. A Remind deployment that should deliver
 for real lists exact receiver URLs in `REMIND_TEST_WEBHOOK_URLS`; only those receive requests.
 Use receivers made for testing, never production notification endpoints. Check

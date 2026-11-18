@@ -46,6 +46,7 @@ pub struct ApiState {
     pub(crate) sharing: SharingService,
     pub(crate) repository: PostgresRepository,
     pub(crate) identity: IdentityStore,
+    pub(crate) ting: Option<crate::infrastructure::ting::Ting>,
     pub(crate) proof_issuers: ProofIssuers,
     pub(crate) webhook_secrets: Vec<SecretString>,
     pub(crate) encryption: SecretCipherKeyring,
@@ -68,6 +69,7 @@ impl ApiState {
         crate::logging::install_tls_provider();
         let repository = PostgresRepository::new(pool.clone());
         let gateway = AccountsGateway::new(&settings.accounts)?;
+        let ting = crate::infrastructure::ting::Ting::configured(settings, gateway.clone())?;
         let identity = IdentityStore::new(pool, gateway, settings.accounts.lookup_ttl);
         let schedules = ScheduleService::new(
             repository.clone(),
@@ -86,6 +88,7 @@ impl ApiState {
             sharing: SharingService::new(identity.clone()),
             repository,
             identity,
+            ting,
             proof_issuers: settings.accounts.proof_issuers.clone(),
             webhook_secrets: settings.accounts.webhook_secrets.clone(),
             encryption,
@@ -140,6 +143,10 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
         )
         .route("/silicons", get(handlers::accounts::silicons))
         .route("/auth/me", get(handlers::accounts::me))
+        .route(
+            "/ting",
+            get(handlers::ting::status).put(handlers::ting::enable),
+        )
         .route(
             "/viewers",
             get(handlers::sharing::list_viewers).post(handlers::sharing::grant_viewer),
@@ -209,6 +216,7 @@ pub fn router(state: ApiState, settings: &Settings) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(settings.server.max_body_bytes))
         .layer(axum_middleware::from_fn(middleware::request_context))
+        .layer(axum_middleware::from_fn(middleware::interface_cors))
         .with_state(state)
 }
 

@@ -92,10 +92,9 @@ impl Harness {
             .await;
         Mock::given(method("POST"))
             .and(path("/v1/oauth/introspect"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"active": true, "client_id": "remind"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"active": true, "client_id": "remind", "token_type": "access_token"}),
+            ))
             .with_priority(10)
             .mount(&accounts)
             .await;

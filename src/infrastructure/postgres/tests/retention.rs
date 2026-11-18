@@ -260,7 +260,7 @@ async fn one_time_materialization_archives_before_delivery_and_purges_as_complet
         .mark_delivery_succeeded(
             execution.id,
             "execution-test-worker",
-            Uuid::now_v7(),
+            Some(Uuid::now_v7()),
             worker_now + Duration::seconds(1),
         )
         .await?;

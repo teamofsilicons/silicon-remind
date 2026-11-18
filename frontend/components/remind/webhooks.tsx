@@ -20,15 +20,34 @@ export function Webhooks() {
     queryFn: () => api.get<{ items: Subscription[] }>("/webhooks"),
     enabled: !!environment.data,
   });
+  const ting = useQuery({
+    queryKey: ["remind", scope, "ting"],
+    queryFn: () => api.get<{ configured: boolean; simulated: boolean; registered_at: string | null }>("/ting"),
+    enabled: !!identity.data?.can_manage_reminders,
+  });
   return (
     <Page className={styles.page}>
       <PageHeader
-        title="Webhooks"
-        description="Each due reminder is delivered to its Silicon’s active subscriptions."
+        title="Delivery"
+        description="Due reminders arrive in the owning Silicon’s Ting inbox. Add a webhook to receive a copy at another endpoint."
       />
       <EnvironmentBanner />
       {identity.error && <ErrorAlert error={identity.error} />}{" "}
       {action.error ? <ErrorAlert error={action.error} /> : null}
+      {ting.error && <ErrorAlert error={ting.error} />}
+      {identity.data?.can_manage_reminders && ting.data && (
+        <section className={styles.form}>
+          <h2>Silicon Ting</h2>
+          {ting.data.simulated ? <p>Test environments simulate Ting delivery.</p> :
+            !ting.data.configured ? <p>Ting is unavailable on this deployment.</p> : <>
+              <p>{ting.data.registered_at ? "Remind has registered this Silicon with Ting." : "Connect this Silicon to receive due reminders."} <a href="https://ting.teamofsilicons.com/">Open Ting</a> to see reminders and manage preferences.</p>
+              <Button variant="secondary" loading={action.busy} onClick={() => void action.act(() => api.put("/ting"), "Ting connected")}>
+                {ting.data.registered_at ? "Reconnect Ting" : "Connect Ting"}
+              </Button>
+            </>}
+        </section>
+      )}
+      <h2>Optional webhooks</h2>
       {list.error && <ErrorAlert error={list.error} />}{" "}
       {identity.data?.can_manage_reminders && (
         <form
@@ -83,8 +102,7 @@ export function Webhooks() {
         <p className={styles.muted}>Loading subscriptions…</p>
       ) : list.data?.items.length === 0 ? (
         <Empty>
-          No active webhooks. Reminders still fire and keep their execution
-          history.
+          No webhook endpoints have been added.
         </Empty>
       ) : (
         <ul className={styles.list}>

@@ -11,3 +11,5 @@ pub mod sharing;
 pub mod webhook;
 
 pub mod testing;
+
+pub(crate) mod ting;

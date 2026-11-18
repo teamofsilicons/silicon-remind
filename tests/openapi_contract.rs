@@ -157,6 +157,8 @@ fn contract_exposes_exactly_the_documented_public_operations() -> Result<()> {
         ("get", "/api/versions", "discoverVersions"),
         ("get", "/auth/me", "getIdentity"),
         ("get", "/silicons", "listSilicons"),
+        ("get", "/ting", "getTingRegistration"),
+        ("put", "/ting", "enableTing"),
         ("get", "/webhook", "getWebhook"),
         ("put", "/webhook", "configureWebhook"),
         ("delete", "/webhook", "disableWebhook"),

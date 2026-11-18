@@ -186,6 +186,10 @@ pub struct ExecutionResponse {
     pub delivered_at: Option<DateTime<Utc>>,
     /// Delivery lifecycle status.
     pub status: ExecutionStatus,
+    /// Ting outcome for this occurrence.
+    pub ting_status: String,
+    /// Webhook outcome for this occurrence.
+    pub webhook_status: String,
     /// webhook event UUID after acceptance.
     pub hook_event_id: Option<Uuid>,
     /// Sanitized terminal/transient failure reason.
@@ -210,6 +214,8 @@ impl TryFrom<&ExecutionRow> for ExecutionResponse {
             attempted_at: row.attempted_at,
             delivered_at: row.delivered_at,
             status,
+            ting_status: row.ting_status.clone(),
+            webhook_status: row.webhook_status.clone(),
             hook_event_id: row.hook_event_id,
             failure_reason: row.failure_reason.clone(),
         })

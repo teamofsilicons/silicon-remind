@@ -282,6 +282,24 @@ impl PostgresRepository {
         .ok_or(RepositoryError::NotFound)
     }
 
+    /// Save both channel outcomes before scheduling another attempt. The execution's lease
+    /// fences stale workers, and each receiver also gets a stable occurrence key.
+    pub(crate) async fn record_channels(
+        &self,
+        execution_id: Uuid,
+        worker: &str,
+        ting: &str,
+        hooks: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        let result = sqlx::query("UPDATE executions SET ting_status=$3, webhook_status=$4 WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>$5 AND status IN ('pending','retrying')")
+            .bind(execution_id).bind(worker).bind(ting).bind(hooks).bind(now).execute(&self.pool).await?;
+        if result.rows_affected() != 1 {
+            return Err(RepositoryError::LeaseLost);
+        }
+        Ok(())
+    }
+
     /// Marks a leased execution delivered after a validated `2xx`. The historical
     /// `hook_event_id` column stores the receipt.
     ///
@@ -293,7 +311,7 @@ impl PostgresRepository {
         &self,
         execution_id: Uuid,
         worker_id: &str,
-        hook_event_id: Uuid,
+        hook_event_id: Option<Uuid>,
         accepted_at: DateTime<Utc>,
     ) -> Result<ExecutionRow, RepositoryError> {
         validate_worker_id(worker_id)?;
