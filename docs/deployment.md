@@ -2,9 +2,9 @@
 
 Production Remind runs on one ARM64 EC2 host: the API, the worker, the web and the documentation site behind Caddy.
 The [standalone guide](../deploy/aws/README-standalone.md) has the commands. The AWS profile is
-`silicon-production`, account `234951665042`, region `us-east-1`. Public names:
+`silicon-deployment`, account `234951665042`, region `us-east-1`. Public names:
 
-- `https://backend.remind.teamofsilicons.com`: the API (`/api/*`, `/health/*`) and the Silicon Accounts app
+- `https://api.remind.teamofsilicons.com`: the API (`/api/*`, `/health/*`) and the Silicon Accounts app
   webhook (`/webhook/`).
 - `https://remind.teamofsilicons.com`: the web, which signs Carbons in on the Silicon Accounts pages.
 - `https://docs.remind.teamofsilicons.com`: these docs.
@@ -19,28 +19,30 @@ Remind is the app `remind` at both. At Silicon Accounts its sign-in setup must h
 - `device_flow: true` (Carbons' `remind login`) and `public_client: true` (the CLI exchanges Silicons' short-lived
   tokens and refreshes with `client_id=remind` alone; it never holds the secret).
 
-Its app webhook is `https://backend.remind.teamofsilicons.com/webhook/`, with `custodian_change` picked besides the
+Its app webhook is `https://api.remind.teamofsilicons.com/webhook/`, with `custodian_change` picked besides the
 default events. The app secret and the webhook secret go into the runtime secret (`REMIND_APP_SECRET`,
 `REMIND_ACCOUNTS_WEBHOOK_SECRET`); the web reads the app secret from the same place. `REMIND_PROOF_ISSUERS` is
 `remind.schedules.read=interface`, so the Silicon Interface can read reminders for an account with a User
 verification proof. The [service-only routes](internal-api.md) describe the webhook.
 
-At Silicon Apps, the app `remind` is public, with its description, its links (website and docs) and one package per
-target in each release.
+The Remind listing publishes the [standalone interface guide](api/interfaces.md).
+Interfaces request the app ID `remind` and send its access token to the Accounts API origin listed above.
 
 ## Runtime and data
 
-The API and worker run from one image (the root [Dockerfile](../Dockerfile), wrapped with
-[Dockerfile.runtime](../deploy/aws/Dockerfile.runtime) for the RDS CA bundle). They use the existing RDS PostgreSQL 17
-instance: database `silicon_remind` through the restricted `remind_runtime` role, and `silicon_remind_test` (test
-environment control tables and one schema per test environment) through `remind_testing`. The production runtime role
-can operate data and read migration history but cannot change schemas. The testing role owns its control tables and
-replica schemas, because test-environment lifecycle operations create, clean and drop those schemas; it has no
-database-creation, role-creation, superuser or RLS-bypass rights. Every test-environment schema uses the same embedded
-migrations as production. Back up the databases and the encryption keyring together.
+The API and worker use the same ARM64 image and AWS RDS CA bundle.
+The Accounts runtime role `remind_accounts_runtime` reads and writes reminders in
+`silicon_remind_accounts`. Schema changes use the migration owner. Back up the
+database and the webhook encryption keyring together.
 
-Configuration comes from Secrets Manager `silicon-remind/runtime-production`; the host writes only known keys into
-`/etc/remind/runtime.env`. Every setting is described in [.env.example](../.env.example).
+Production test environments were retired in October 2026. The Accounts installer
+omits the old test database URL when it prepares `/etc/remind/accounts/runtime.env`
+from the `silicon-remind/accounts-production` secret.
+The public `GET /api/versions` reports which features the deployment supports.
+
+The production worker registers its notification type in Ting with
+`remind-worker --register-ting`. The worker delivers each occurrence to the owning
+Silicon and records a separate outcome for any configured webhook copies.
 
 ## Release procedure
 
@@ -57,7 +59,7 @@ Configuration comes from Secrets Manager `silicon-remind/runtime-production`; th
    database backups, run `remind-migrate` with the migration owner's credentials, re-apply
    [runtime-grants.sql](../deploy/runtime-grants.sql), check a temporary API container's `/health/ready` with the
    real configuration, then replace the API and worker containers with the new digest.
-4. **Web.** Build the ARM64 image from `web/`, push it, and install it with `deploy/aws/deploy-web.py <digest>`.
+4. **Web.** Build the ARM64 image from `frontend/`, push it, and install it with `deploy/aws/deploy-web.py <digest>`.
 5. **Docs.** `npm ci && npm run build && npm run check` in `docs-site/`, then publish `docs-site/dist/` (see
    [docs-site/README.md](../docs-site/README.md)).
 
@@ -65,8 +67,7 @@ Migrations are forward-only: rolling back an image does not undo them. Check pub
 `GET /api/versions` (`"current": 2`), a Silicon signing in with `remind login` and creating a reminder, and its
 custodian seeing it on the web.
 
-The one-time switch from the previous identity service is described in
-[docs/migration/cutover.md](migration/cutover.md).
+The [parallel deployment record](migration/parallel-production.md) describes the introduction of the Accounts API.
 
 ## Alternative: Fargate
 

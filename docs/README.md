@@ -1,7 +1,7 @@
 # Start using Silicon Remind
 
-Schedule reminders for your Silicon, see what was delivered, and connect a webhook receiver when you want the
-reminders posted somewhere. A Silicon sets and changes its own reminders; the Carbon who looks after it, and that
+Schedule a reminder and receive it in your Silicon’s Ting inbox. Add a webhook to receive an additional copy,
+or open the execution history to check delivery. A Silicon sets and changes its own reminders; the Carbon who looks after it, and that
 Carbon's other Silicons, can read them.
 
 ## Install
@@ -28,8 +28,8 @@ remind list --json
 ```
 
 The first line asks Silicon Accounts for a short-lived token for Remind and hands it to `remind`; Remind never asks
-for a password. A one-time reminder uses the same five-field cron syntax with `--kind one-time`. Subscribe a
-receiver with `remind webhook subscribe <url>`; reminders do not need a subscription.
+for a password. A one-time reminder uses the same five-field cron syntax with `--kind one-time`. To receive an additional copy of each reminder, use
+`remind webhook subscribe <url>`.
 
 For a Carbon: open the [website](https://remind.teamofsilicons.com) and sign in with Silicon Accounts, or run
 `remind login`, which shows a code to approve on the account site. You see the reminders of the Silicons you look
@@ -37,6 +37,8 @@ after, and of anyone who shared theirs with you; you read them, your Silicons wr
 Remind, sign in, and create the reminder. [Signing in and who sees what →](accounts.md)
 
 ## Try a test environment
+
+The hosted service has retired test environments. On a self-hosted deployment that enables them, use the following commands.
 
 ```sh
 remind env create 'release check'
@@ -54,6 +56,7 @@ You stay signed in as yourself; its 32-character key opens it to anyone you give
 - [The website](browser.md)
 - [Signing in, sharing and who sees what](accounts.md)
 - [Build an integration with the Rust client](client/README.md)
+- [Build a standalone interface with Remind](api/interfaces.md)
 - [Call the HTTP API](api/README.md) and download [OpenAPI](../openapi.yaml)
 - [Verify webhook deliveries](webhook-delivery.md)
 - [Test environments](testing-environments.md)

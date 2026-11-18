@@ -19,10 +19,11 @@ from urllib.parse import urlparse
 base=Path('/etc/remind/accounts');p=base/'secret.json'
 try:values=json.loads(p.read_text())
 finally:p.unlink()
-for k in ['REMIND_APP_SECRET','REMIND_ACCOUNTS_WEBHOOK_SECRET','REMIND_ENCRYPTION_KEYRING','REMIND_DATABASE_URL','REMIND_TEST_DATABASE_URL']:
+for k in ['REMIND_APP_SECRET','REMIND_ACCOUNTS_WEBHOOK_SECRET','REMIND_ENCRYPTION_KEYRING','REMIND_DATABASE_URL']:
  if not values.get(k):raise SystemExit('Missing required Accounts runtime key: '+k)
 if urlparse(values['REMIND_DATABASE_URL']).path!='/silicon_remind_accounts':raise SystemExit('Refusing legacy production database')
-if urlparse(values['REMIND_TEST_DATABASE_URL']).path!='/silicon_remind_accounts_test':raise SystemExit('Refusing legacy testing database')
+# The hosted test database was retired. Older Secrets Manager versions still contain its URL.
+values.pop('REMIND_TEST_DATABASE_URL', None)
 if any(any(c in str(v) for c in '\r\n\0') for v in values.values()):raise SystemExit('Invalid env value')
 p=base/'runtime.env';p.write_text(''.join(k+'='+str(v)+'\n' for k,v in sorted(values.items())));p.chmod(0o600)
 print('Independent Accounts env file prepared; secret values omitted.')

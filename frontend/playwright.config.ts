@@ -2,6 +2,7 @@
  * Only the Next.js server is managed here. See README.md for setup. */
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { defineConfig } from "@playwright/test";
 
 function dotenv(path: string): Record<string, string> {
@@ -41,10 +42,13 @@ const env = {
   ACCOUNTS_API_URL: pick("ACCOUNTS_API_URL", "http://127.0.0.1:9589")!,
   APP_API_URL: `http://127.0.0.1:${API_PORT}/api/v2`,
   SESSION_SECRET: sessionSecret,
+  REFRESH_STATE_TABLE: "",
+  REFRESH_STATE_PATH: resolve(".dev/e2e-refresh-state.sqlite"),
   PUBLIC_URL: `http://127.0.0.1:${PORT}`,
   EXTRA_IMG_ORIGINS: pick("EXTRA_IMG_ORIGINS", "http://127.0.0.1:9594")!,
 };
-// The tests read these too (e2e/support.ts).
+// The server and browser fixtures share the same local encrypted session store.
+Object.assign(process.env, env);
 process.env.E2E_BASE_URL = env.PUBLIC_URL;
 process.env.E2E_ACCOUNTS_URL = env.ACCOUNTS_URL;
 process.env.E2E_MESSAGING_URL = pick("MOCK_MESSAGING_URL", "http://127.0.0.1:9592");

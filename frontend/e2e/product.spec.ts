@@ -71,7 +71,7 @@ test("Carbon manages real test environments and the key stays sealed", async ({
   const signedIn = await context.request.get(`${BASE}/auth/session`);
   expect((await signedIn.json()).signed_in).toBe(true);
   await row.getByRole("button", { name: "Refresh selection", exact: true }).click();
-  expect((await context.request.get(`${BASE}/api/schedules`)).status()).toBe(200);
+  await expect.poll(async () => (await context.request.get(`${BASE}/api/schedules`)).status()).toBe(200);
   await page
     .getByRole("button", { name: "Back to Production", exact: true })
     .click();

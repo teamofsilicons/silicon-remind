@@ -63,7 +63,7 @@ export async function seedSilicon(email: string) {
   expect(token.status).toBe(200);
   const tokens = await token.json();
   const status = await fetch(
-    `${process.env.APP_API_URL || "http://127.0.0.1:4181"}/api/v2/auth/me`,
+    new URL("/api/v2/auth/me", process.env.APP_API_URL || "http://127.0.0.1:4181"),
     {
       headers: {
         Authorization: `Bearer ${tokens.access_token}`,
